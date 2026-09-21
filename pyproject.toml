@@ -1,0 +1,21 @@
+[project]
+name = "mikasa-robo-mmm"
+version = "0.1.0"
+description = "MIKASA Robo MMM benchmark"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "mani_skill",
+    "torch>=2.0",
+    "pillow",
+    "pandas",
+    "pyarrow",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+mani_skill = { path = "../ManiSkill", editable = true }
