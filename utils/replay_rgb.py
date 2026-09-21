@@ -8,7 +8,7 @@ The planner and the source env are never touched.
 
 Usage:
     uv run python -m utils.replay_rgb <source_run_dir> --output-dir <dir> \
-        --robot fetch --stride 10 --fps 10
+        --robot fetch --stride 10
 """
 
 import argparse
@@ -20,6 +20,7 @@ import numpy as np
 
 import gymnasium as gym
 
+import my_scenes  # noqa: F401  (registers project environments)
 from mani_skill.trajectory import utils as trajectory_utils
 from mani_skill.utils import common
 
@@ -40,15 +41,15 @@ def main():
     episode = src_json["episodes"][args.episode]
     seed = episode.get("episode_seed")
     control_mode = episode.get("control_mode", env_info["env_kwargs"]["control_mode"])
-    env = gym.make(
-        env_info["env_id"],
+    env_kwargs = dict(env_info["env_kwargs"])
+    env_kwargs.update(
         num_envs=1,
         obs_mode="rgb",
         render_mode="rgb_array",
         control_mode=control_mode,
         robot_uids=args.robot,
-        sim_config=env_info["env_kwargs"].get("sim_config"),
     )
+    env = gym.make(env_info["env_id"], **env_kwargs)
     base_env = env.unwrapped
     obs, _ = env.reset(seed=seed, options={"reconfigure": True})
 

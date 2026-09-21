@@ -147,6 +147,7 @@ from mani_skill.utils.wrappers.record import RecordEpisode
 
 import mani_skill  # noqa: F401
 import my_scenes  # noqa: F401  (registers benchmark environments)
+from utils.episode_replay import EpisodeSpec
 from utils.logging_utils import PlannerLogger
 from utils.mikasa.seeding import seed_everything
 
@@ -661,6 +662,17 @@ def run_sweep(args, *, make_env=gym.make, recorder_cls=RecordEpisode) -> SweepRe
             if log_root is not None:
                 logger = PlannerLogger(
                     env, run_dir=log_root / f"seed_{seed}", name=log_name, log_freq=args.log_freq
+                )
+                logger.record_episode_spec(
+                    EpisodeSpec(
+                        episode_id=i,
+                        env_id=args.scene,
+                        env_kwargs=dict(make_kwargs),
+                        reset_kwargs={"seed": seed},
+                        seed=seed,
+                        planner=log_name,
+                        control_mode=args.control_mode,
+                    )
                 )
                 logger.log_event("episode_start", seed=seed, scene=args.scene)
                 # Handles exist only after a reset, and the planner's own reset

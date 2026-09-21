@@ -169,3 +169,38 @@ uv run python -m utils.validate_seeded_replay \
 Для action replay `obs-mode=none` достаточно; state observations остаются в обычном `utils.test_planner` пути.
 
 Результаты находятся в `runs/seeded_replay/<planner>/seed_<seed>/`; общий итог — `replay_summary.json`. `utils.episode_replay.SeededEpisodeBuilder` — action-replay builder. State replay остаётся в `utils.replay_rgb` для точного post-pass рендеринга.
+
+### Сборка сцены по готовым метаданным
+
+Если `EpisodeSpec` уже записан в `trajectory.json`, сцену можно собрать без запуска planner и без replay actions:
+
+```text
+runs/trajectories/takeitback_seed0/
+└── trajectory.json   # содержит episode_spec
+```
+
+```python
+import json
+from pathlib import Path
+
+import my_scenes  # регистрирует project environments
+from utils.episode_replay import EpisodeSpec, SeededEpisodeBuilder
+
+run = Path("runs/trajectories/takeitback_seed0")
+metadata = json.loads((run / "trajectory.json").read_text())
+
+# episode_spec может находиться на верхнем уровне или внутри episodes[0].
+spec_data = metadata.get("episode_spec") or metadata["episodes"][0]["episode_spec"]
+spec = EpisodeSpec.from_dict(spec_data)
+
+builder = SeededEpisodeBuilder(spec)
+env = builder.make_env()
+try:
+    observation, info = builder.reset_env(env)
+    print(f"scene ready: {spec.env_id}, seed={spec.seed}")
+    # Здесь сцена уже собрана; можно запускать policy/planner.
+finally:
+    env.close()
+```
+
+`SeededEpisodeBuilder` берёт `env_id`, `env_kwargs`, `reset_kwargs` и `seed` из `EpisodeSpec`, создаёт fresh env и выполняет seeded reset. `trajectory.h5` и `env_states` для сборки сцены не нужны.

@@ -15,6 +15,22 @@ import numpy as np
 from mani_skill.utils import common
 
 
+def _json_default(value):
+    """Serialize common numpy/torch values used in episode metadata."""
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if hasattr(value, "detach") and hasattr(value, "cpu"):
+        return value.detach().cpu().tolist()
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            pass
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _looks_like_an_actor(value):
     """Return whether a task attribute exposes one batched pose."""
     try:
@@ -178,11 +194,23 @@ class PlannerLogger(gym.Wrapper):
             "message": message,
         }
         rec.update(extra)
-        self._events_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        self._events_f.write(
+            json.dumps(rec, ensure_ascii=False, default=_json_default) + "\n"
+        )
         self._events_written += 1
         if self._events_written % self._flush_every == 0:
             self._events_f.flush()
         return rec
+
+    def record_episode_spec(self, spec):
+        """Write immutable episode metadata once into the event log.
+
+        ``EpisodeSpec`` deliberately stays logger-agnostic: any object exposing
+        ``to_dict`` is accepted, while a plain mapping keeps this useful for
+        lightweight callers and tests.
+        """
+        payload = spec.to_dict() if hasattr(spec, "to_dict") else dict(spec)
+        return self.log_event("episode_spec", spec=payload)
 
     def log_motion(self, stage, fn, *args, **kwargs):
         """Run a motion/plan call and log an ``error`` event if it fails.
