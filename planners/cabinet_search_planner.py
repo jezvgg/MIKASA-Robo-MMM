@@ -96,7 +96,6 @@ from planners.cabinet_retrieval_planner import (
     open_the_door,
     retrace_the_door,
 )
-from planners.oracle.oracle_common import normalize_base_yaw
 from planners.oracle.oracle_common import fail as _fail
 from planners.oracle.oracle_common import say as _say
 from utils.mikasa.seeding import seed_everything
@@ -643,8 +642,8 @@ def drive_posture(env, planner, task, *, label: str):
 def drive_home(env, planner, task, *, via_south: bool):
     """Drive to the home mark facing +y and settle; the W20a tail's last legs.
 
-    Base yaw normalized first (a wound yaw feeds the rotate-sweep phantoms,
-    K109), the arm frozen on every drive (the BASE_PLAN_MASK disease: an
+    The physical yaw is preserved and rotations respect the reference URDF
+    limits. The arm is frozen on every drive (the BASE_PLAN_MASK disease: an
     unfrozen base screw folds the arm through whatever is near). With
     `via_south` the base first goes to (home_x, home_y + SOUTH_WAYPOINT_DY) so
     the final turn is ~0; a refused waypoint is non-fatal. The home drive's
@@ -665,7 +664,13 @@ def drive_home(env, planner, task, *, via_south: bool):
     cfg = task.cfg
     hx, hy = float(cfg.home_xy[0]), float(cfg.home_xy[1])
     view = np.array([0.0, 1.0, 0.0])
-    normalize_base_yaw(env, planner, task)
+    # Noise is applied only to free-floor waypoints, far inside the home disk.
+    noise = getattr(planner, "cabinet_waypoint_noise", None)
+    if noise is not None:
+        delta = noise.uniform(-planner.cabinet_waypoint_noise_m,
+                              planner.cabinet_waypoint_noise_m, size=2)
+        hx, hy = hx + float(delta[0]), hy + float(delta[1])
+        say(env, "waypoint noise", offset_m=delta.tolist())
     planner.planner.update_from_simulation()
     if via_south:
         wp = np.array([hx, hy + SOUTH_WAYPOINT_DY, 0.0])
@@ -999,7 +1004,8 @@ def nudge_the_cube(env, planner, task, res, cab=None):
 
 
 def solve(env, seed=None, debug=False, vis=False, blind=False,
-          planner_factory=common.default_planner_factory):
+          planner_factory=common.default_planner_factory,
+          waypoint_noise_seed=None, waypoint_noise_m=0.005):
     """Solve one episode. `-1` only for a refusal before the first fist closed
     on a bar; the gym 5-tuple otherwise (MISSED lines say what went wrong).
 
@@ -1027,6 +1033,12 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         env.unwrapped.control_mode
     task = env.unwrapped
     planner = planner_factory(env, debug, vis)
+    if not 0 <= waypoint_noise_m <= 0.01:
+        raise ValueError("CabinetSearch free-floor waypoint noise must be in [0, 0.01] m")
+    noise_seed = int(seed or 0) + 200003 if waypoint_noise_seed is None else int(waypoint_noise_seed)
+    planner.cabinet_waypoint_noise = np.random.default_rng(noise_seed)
+    planner.cabinet_waypoint_noise_m = float(waypoint_noise_m)
+    say(env, "waypoint noise configuration", seed=noise_seed, amplitude_m=waypoint_noise_m)
     cfg = task.cfg
     comps = tuple(cfg.compartments)
     n = len(comps)

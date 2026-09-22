@@ -765,10 +765,11 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         q = self.env_agent.controller.controllers["arm"].qpos[0].cpu().numpy().astype(np.float64)
         return float(np.max(np.abs(np.asarray(arm_target, dtype=np.float64) - q)))
 
-    def _hold_targets(self, head_zero: bool = True):
-        """The measured arm pose and body pose, as ABSOLUTE targets to hold; the head
-        at zero when `head_zero` (the drives' convention since the fork: the head is
-        parked while the base moves)."""
+    def _hold_targets(self, head_zero: bool = False):
+        """Hold measured arm/body positions; preserve both head joints by default.
+
+        An explicit head_zero is a recorded motion request, never an eval override.
+        """
         arm = self.env_agent.controller.controllers["arm"].qpos[0].cpu().numpy().astype(np.float64)
         body = self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy().astype(np.float64)
         if head_zero:
@@ -1029,7 +1030,14 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
             pairs = list(world.check_robot_collision()) + list(world.check_self_collision())
             return {f"{c.link_name1}<->{c.link_name2}" for c in pairs}
 
+        yaw_limits = self.robot.get_qlimits()[0, self.YAW_JOINT_INDEX].cpu().numpy()
+
         def colliding_at(offset: float):
+            # The reference URDF has finite yaw limits. Folding for the planning
+            # model must never make an unreachable physical branch look valid.
+            candidate = qpos[self.YAW_JOINT_INDEX] + offset
+            if not yaw_limits[0] + 0.01 <= candidate <= yaw_limits[1] - 0.01:
+                return "root_z_rotation_joint limit"
             return new_contacts(pairs_at(offset), baseline)
 
         try:
@@ -2373,6 +2381,13 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
             print("[turn_in_place] target_view_vec is zero; nothing to face")
             return -1
         goal_yaw = float(np.arctan2(goal[1], goal[0]))
+        current_yaw = float(self.robot.get_qpos()[0, 2])
+        limits = self.robot.get_qlimits()[0, 2].cpu().numpy()
+        candidates = [goal_yaw + 2 * np.pi * k for k in range(-3, 4)
+                      if limits[0] + 0.01 <= goal_yaw + 2 * np.pi * k <= limits[1] - 0.01]
+        if not candidates:
+            return -1
+        goal_yaw = min(candidates, key=lambda target: abs(target - current_yaw))
         speed = abs(float(omega))
         if max_steps is None:
             dt = float(self.base_env.control_timestep)
@@ -2383,7 +2398,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         i = -1
         for i in range(int(max_steps)):
             yaw = float(self.robot.get_qpos().cpu().numpy()[0][2])
-            err = float((goal_yaw - yaw + np.pi) % (2 * np.pi) - np.pi)
+            err = float(goal_yaw - yaw)
             if abs(err) <= tol:
                 reason = "aimed"
                 break
@@ -2460,9 +2475,9 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
 
             assert self.control_mode in self.COMPOSE_MODES, self.control_mode
 
-            body_action = np.zeros_like(
-                self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy()
-            )
+            # An arm/torso path does not request a head recenter. Preserve its
+            # measured angles; deliberate gaze changes use hold_head().
+            body_action = self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
             body_action[2] = qpos_dict[f"scene-0-{self.robot.name}_torso_lift_joint"]
 
             base_direction = (
@@ -2529,13 +2544,10 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
                     print(f"Reached max refining steps ({self.max_refine_steps})!")
                     break
 
-                body_action = np.zeros_like(
-                    self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy()
-                )
+                body_action = self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
                 body_action[2] = qpos_dict_final[
                     f"scene-0-{self.robot.name}_torso_lift_joint"
                 ]
-                body_action[0] = body_action[1] = 0.0
 
                 base_action = np.array([0.0, 0.0])
 
@@ -2943,10 +2955,9 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
 
         The base cameras ride on `head_camera_link`, so this aims them without moving
         the base or the arm — a look that leaves the base where the closing has to start
-        (W22c, 2026-09-07). Every plan the solver executes writes the head back to 0,
-        which is what the caller relies on afterwards; `idle_steps` holds whatever the
-        body controller last targeted, so a look is: hold_head(pan, tilt), read the
-        verdict, hold_head(0, 0).
+        (W22c, 2026-09-07). Arm and navigation paths preserve the measured head
+        angles. A caller that wants to return to neutral must explicitly record
+        hold_head(0, 0); evaluation never substitutes that command for the policy.
 
         `ramp` > 0 spreads the turn over that many steps (a linear ramp of the target
         from the head's current angles), then holds for the rest of `t`. Without it the

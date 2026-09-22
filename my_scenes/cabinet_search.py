@@ -12,9 +12,10 @@ There is no cue phase and no clock: the trace is erased by the agent itself
 untouched one are identical by construction — the SameDrawer detent, applied
 to hinges). What remains of the history exists only in the policy.
 
-Success = REVEAL: the cube's compartment door stands open at or past
-`theta_reveal` with no fail latch (the owner's 2026-09-01 decision; the found
-cabinet is NOT closed). Failure is instant (`fail` -> `terminated`,
+The default terminal is NUDGE: with its compartment open at or past
+`theta_reveal`, push the cube horizontally at least `cube_nudge_m` (0.02 m),
+with no fail latch. The found cabinet is NOT closed. The optional SEEN terminal
+is a separate task configuration and must not be mixed into a NUDGE dataset. Failure is instant (`fail` -> `terminated`,
 sapien_env.py:1055-1056) on any of four sticky latches:
 
   reopened      a decision on a compartment already opened this episode
@@ -109,15 +110,15 @@ TASK_STATE_OPTIONAL = ("seen_count", "cube_spawn")
 #: instruction literally (review finding).
 INSTRUCTIONS = (
     "Find the cube hidden in the wall cabinets. Go to the marked spot on the "
-    "floor before opening any cabinet, close each cabinet you open, and "
+    "floor before opening any cabinet, close empty cabinets, and "
     "return to the mark before opening the next. Never open a cabinet you "
     "have already opened.",
     "A cube is hidden in the wall cabinets. Starting from the floor mark, "
-    "open cabinets to look for it; close the cabinet behind you and come "
+    "open cabinets to look for it; close an empty cabinet behind you and come "
     "back to the mark before trying another. Do not open a cabinet you "
     "already opened.",
     "Search the wall cabinets for the cube. Every search starts at the "
-    "marked spot: shut each cabinet after looking and head back to the mark "
+    "marked spot: shut empty cabinets after looking and head back to the mark "
     "before the next. Opening the same cabinet again fails the task.",
 )
 
@@ -127,14 +128,14 @@ INSTRUCTIONS = (
 INSTRUCTIONS_NUDGE = (
     "Find the cube hidden in the wall cabinets and nudge it when you find it. "
     "Go to the marked spot on the floor before opening any cabinet, close "
-    "each cabinet you open, and return to the mark before opening the next. "
+    "empty cabinets, and return to the mark before opening the next. "
     "Never open a cabinet you have already opened.",
     "A cube is hidden in the wall cabinets. Starting from the floor mark, "
     "open cabinets to look for it and give it a push when you see it; close "
-    "the cabinet behind you and come back to the mark before trying another. "
+    "an empty cabinet behind you and come back to the mark before trying another. "
     "Do not open a cabinet you already opened.",
     "Search the wall cabinets for the cube and push it when you find it. "
-    "Every search starts at the marked spot: shut each cabinet after looking "
+    "Every search starts at the marked spot: shut empty cabinets after looking "
     "and head back to the mark before the next. Opening the same cabinet "
     "again fails the task.",
 )
@@ -162,7 +163,15 @@ UNTANGLE_BITS = {
     "stack_4_main_group_1": 25,
     "stack_4_main_group_2": 25,
 }
-"""Every kitchen-102 ARTICULATION this robot cannot touch, and the bit why.
+"""Historical W24 fixture-filter measurements for kitchen 102.
+
+The scan below used the former blanket robot exclusions (bits 25-29 on every
+link). Since the 2026-09-22 correction, `_fix_ds_fetch_collision_bits` applies
+RoboCasa's exclusions only to wheels/base. The arm and fingers can contact
+these fixtures. The fixture bits below remain relevant to door-versus-wall
+filtering, including the optional fifth compartment's wall-park rule.
+
+Historical scan: every articulation the old robot filters made intangible.
 
 MEASURED, not assumed. A SAPIEN collision shape carries four group words; a bit
 shared in the THIRD word filters the pair out of contact entirely.
@@ -523,8 +532,8 @@ class CabinetSearchConfig:
     round it closes). Inside this band a door with no hand at its bar is never
     an opening (see theta_count)."""
     theta_reveal: float = 1.2
-    """PROVISIONAL (W22): the cube's open hinge at or past this = revealed =
-    success. Must be past 0.9 (ARM_PASS, W12) and reachable by the pull
+    """The cube's open hinge at or past this makes the compartment revealed.
+    Success additionally requires the configured nudge/seen terminal. Must be past 0.9 (ARM_PASS, W12) and reachable by the pull
     (1.75 target, settles ~1.70, K108). At 0.9 the panel still covers a cube
     by the outer wall from the pull-end pose (review finding)."""
     terminal: str = os.environ.get("MIKASA_SEARCH_TERMINAL", "nudge")
@@ -704,8 +713,8 @@ class CabinetSearchConfig:
         for stem in sorted(self.untangle_stems):
             assert stem in UNTANGLE_BITS, (
                 f"untangle_stems: {stem!r} is not a measured fixture. "
-                f"`UNTANGLE_BITS` lists every kitchen-102 articulation that "
-                f"carries one of the robot's ignore bits 25-29: "
+                f"`UNTANGLE_BITS` lists the measured kitchen-102 fixture "
+                f"ignore bits that can be cleared for door-wall contact: "
                 f"{sorted(UNTANGLE_BITS)}"
             )
             assert stem not in UNTANGLE_DOORLESS, (
@@ -718,10 +727,9 @@ class CabinetSearchConfig:
         if any(c.stem == CAB_1_STEM for c in self.compartments):
             assert CAB_1_STEM in self.untangle_stems, (
                 f"{CAB_1_STEM} is among the compartments with its stem not in "
-                "untangle_stems: its door shapes carry ignore bit 26 and the "
-                "robot ignores bits 25-29, so the pads pass through the bar "
-                "(W24) — that is an unreachable compartment, i.e. a task that "
-                "cannot be solved"
+                "untangle_stems: its door and the west wall share ignore bit "
+                "26. Clear the door bit to preserve the wall-park backstop "
+                "measured for this compartment (W24)"
             )
 
         assert self.partition_y[0] < self.partition_y[1] <= 0.0
@@ -1574,7 +1582,13 @@ class CabinetSearchTask(BaseEnv):
         )
 
     def _untangle_fixture_door(self, stem: str):
-        """Make one fixture's DOOR touchable by clearing its ignore bit.
+        """Clear a fixture door's ignore bit, enabling its wall-park backstop.
+
+        With the current wheel/base-only robot adapter, the arm already
+        contacts this door. Clearing the fixture bit remains necessary for
+        door-wall contact. The W24 discussion below describes the historical
+        blanket robot exclusions; its robot-contact conclusions do not apply
+        to the corrected adapter.
 
         This is a change to the SCENE's collision mask, applied to the named
         doors and to nothing else. `stem` must be a key of `UNTANGLE_BITS`,
@@ -1651,7 +1665,7 @@ class CabinetSearchTask(BaseEnv):
             )
             for link in self.scene.articulations[key].links:
                 if "door" not in link.name.lower():
-                    continue          # the carcass keeps its exemption
+                    continue          # preserve the carcass's fixture filters
                 for body in link._bodies:
                     for shape in body.get_collision_shapes():
                         groups = shape.get_collision_groups()
@@ -1661,27 +1675,30 @@ class CabinetSearchTask(BaseEnv):
                         cleared += 1
         assert cleared, (
             f"untangle {stem!r}: no collision shape on a link named *door* — "
-            "W24 found 8 on cab_1 (link `hingedoor`); without them the bar "
-            "stays intangible and the fixture cannot be handled"
+            "W24 found 8 on cab_1 (link `hingedoor`); no door filters "
+            "can be adjusted without them"
         )
         assert carried == cleared, (
             f"untangle {stem!r}: {carried} of {cleared} door shapes carried "
-            f"ignore bit {bit}. `UNTANGLE_BITS` says this fixture is exempt "
-            "from the robot on that bit; if the live scene disagrees the table "
+            f"ignore bit {bit}. `UNTANGLE_BITS` records this fixture's "
+            "door-wall filter; if the live scene disagrees the table "
             "is stale — re-scan it rather than clearing a bit that is not there"
         )
 
     def _fix_ds_fetch_collision_bits(self):
-        """Restore the wheel/base exemption scene_builder.py:490 skips for our uid."""
-        if self.robot_uids == "fetch" or self.agent is None:
+        """Apply RoboCasa's Fetch wheel/base exclusions to its ds_fetch subclass.
+
+        RoboCasaSceneBuilder only recognizes the uid "fetch". Preserve the
+        reference robot's arm/head/finger and self-collision filters; adding
+        kitchen ignore bits to every link makes those links pass through
+        counters, walls and some cabinets.
+        """
+        if self.robot_uids != "ds_fetch" or self.agent is None:
             return
-        for link in self.agent.robot.links:
-            for body in link._bodies:
-                for shape in body.get_collision_shapes():
-                    groups = shape.get_collision_groups()
-                    for bit in range(25, 30):
-                        groups[2] |= 1 << bit
-                    shape.set_collision_groups(groups)
+        for link in (self.agent.l_wheel_link, self.agent.r_wheel_link):
+            for bit in range(25, 31):
+                link.set_collision_group_bit(group=2, bit_idx=bit, bit=1)
+        self.agent.base_link.set_collision_group_bit(group=2, bit_idx=31, bit=1)
 
     # ------------------------------------------------------------ initialize --
 

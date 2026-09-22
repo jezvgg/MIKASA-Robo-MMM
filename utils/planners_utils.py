@@ -93,7 +93,6 @@ def _rotate_base_to(env, planner, dir_world, max_rot=300, rot_gain=1.2,
     agent = unwenv.agent
     arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
     body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-    body_action[0] = body_action[1] = 0.0
     gripper_action = planner.gripper_state
     dt = np.asarray(dir_world, dtype=float).copy()
     dt[2] = 0.0
@@ -148,7 +147,6 @@ def drive_base_to_position(env, planner, target_pos, chunk=0.5, max_rot=300,
     target[2] = 0.0
     arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
     body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-    body_action[0] = body_action[1] = 0.0
     gripper_action = planner.gripper_state
 
     def heading_error():
@@ -430,7 +428,6 @@ def _yaw_sweep_with_pass_check(env, planner, bearing, plate_center, *,
     agent = unwenv.agent
     arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
     body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-    body_action[0] = body_action[1] = 0.0
     gripper_action = planner.gripper_state
 
     def hd():
@@ -543,7 +540,6 @@ def drive_base_to_object_target(env, planner, current_obj_pos, target_obj_pos,
     agent = unwenv.agent
     arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
     body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-    body_action[0] = body_action[1] = 0.0
     gripper_action = planner.gripper_state
     for _ in range(20):
         obj_now = _current_object_pos(env, planner)
