@@ -54,15 +54,23 @@ def iter_episodes(h5_file: Path):
                 if "rgb" in first[f"obs/sensor_data/{cam}"]:
                     rgb_cameras.append(cam)
         state_dim = None
+        flat_state = False
         if "obs/agent" in first and "qpos" in first["obs/agent"]:
             state_dim = first["obs/agent"]["qpos"].shape[1]
+        elif "obs" in first and isinstance(first["obs"], h5py.Dataset):
+            # obs_mode="state" is stored as one flattened (T+1, D) dataset.
+            state_dim = first["obs"].shape[1]
+            flat_state = True
         for key in keys:
             traj = f[key]
             ep = {"actions": traj["actions"][:]}
             for cam in rgb_cameras:
-                ep[f"rgb_{cam}"] = traj[f"obs/sensor_data/{cam}/rgb"][:]
+                ep[f"rgb_{cam}"] = traj[f"obs/sensor_data/{cam}/rgb"][: len(ep["actions"])]
             if state_dim:
-                ep["robot_state"] = traj["obs/agent/qpos"][: len(ep["actions"])]
+                if flat_state:
+                    ep["robot_state"] = traj["obs"][: len(ep["actions"])]
+                else:
+                    ep["robot_state"] = traj["obs/agent/qpos"][: len(ep["actions"])]
             yield ep, rgb_cameras, state_dim
 
 

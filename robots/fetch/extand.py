@@ -567,6 +567,7 @@ class PandaArmSapienSolver(PandaArmSolverV2):
         mask=_MASK_UNSET,
         n_init_qpos=20,
         base_free: bool = False,
+        disable_lift_joint: bool = False,
     ):
         """RRTConnect to `pose`, with the base masked out of the reach by default.
 
@@ -574,6 +575,11 @@ class PandaArmSapienSolver(PandaArmSolverV2):
         still wins over both.
         """
         mask, fixed = _rrt_base_defaults(mask, base_free)
+        if disable_lift_joint:
+            mask = list(RRT_BASE_MASK if mask is None else mask)
+            mask[3] = True
+            if fixed is not None:
+                fixed = sorted(set(fixed) | {3})
         pose = to_sapien_pose(pose)
         if self.grasp_pose_visual is not None:
             self.grasp_pose_visual.set_pose(pose)
@@ -660,6 +666,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         self.max_refine_steps = (
             self.MAX_REFINE_STEPS if max_refine_steps is None else int(max_refine_steps)
         )
+        self._head_target = None
 
     @property
     def elapsed_steps(self) -> int:
@@ -766,13 +773,12 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         return float(np.max(np.abs(np.asarray(arm_target, dtype=np.float64) - q)))
 
     def _hold_targets(self, head_zero: bool = True):
-        """The measured arm pose and body pose, as ABSOLUTE targets to hold; the head
-        at zero when `head_zero` (the drives' convention since the fork: the head is
-        parked while the base moves)."""
+        """The measured arm/body targets; preserve an active head look if set."""
         arm = self.env_agent.controller.controllers["arm"].qpos[0].cpu().numpy().astype(np.float64)
         body = self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy().astype(np.float64)
         if head_zero:
-            body[0] = body[1] = 0.0
+            head = getattr(self, "_head_target", None)
+            body[:2] = np.zeros(2) if head is None else head
         return arm, body
 
     # -- the base's dropped lateral velocity (the supervisor's item 3, 2026-09-08) ----
@@ -2429,7 +2435,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         qpos_dict_final = self._final_qpos_dict(result)
         n_step = result["position"].shape[0]
 
-        # In `pd_joint_delta_pos` the knot only advances once the arm is within
+        # In both control modes the knot only advances once the arm is within
         # `DELTA_LAG_GATE` of the current one (`_arm_lag`): the delta controller caps the
         # PD error at one step (0.1 rad), so it caps the torque and the speed, and an arm
         # that falls behind an open-loop clock is pulled toward knots AHEAD of it — a
@@ -2437,7 +2443,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         # 3608, 2026-09-09: the approach cut a corner and knocked the shaker 32 cm). The
         # stall re-issues the same knot with the BASE HELD, so the base still integrates
         # exactly the plan's velocities; `DELTA_LAG_MAX_STALL` bounds it per knot.
-        gate = self.control_mode == "pd_joint_delta_pos"
+        gate = self.control_mode in self.COMPOSE_MODES
         i, stalled, stalls_total = 0, 0, 0
         while i < n_step:
             arm_action = (
@@ -2463,6 +2469,8 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
             body_action = np.zeros_like(
                 self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy()
             )
+            if self._head_target is not None:
+                body_action[:2] = self._head_target
             body_action[2] = qpos_dict[f"scene-0-{self.robot.name}_torso_lift_joint"]
 
             base_direction = (
@@ -2532,10 +2540,13 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
                 body_action = np.zeros_like(
                     self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy()
                 )
+                if self._head_target is not None:
+                    body_action[:2] = self._head_target
                 body_action[2] = qpos_dict_final[
                     f"scene-0-{self.robot.name}_torso_lift_joint"
                 ]
-                body_action[0] = body_action[1] = 0.0
+                if self._head_target is None:
+                    body_action[0] = body_action[1] = 0.0
 
                 base_action = np.array([0.0, 0.0])
 
@@ -2943,10 +2954,9 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
 
         The base cameras ride on `head_camera_link`, so this aims them without moving
         the base or the arm — a look that leaves the base where the closing has to start
-        (W22c, 2026-09-07). Every plan the solver executes writes the head back to 0,
-        which is what the caller relies on afterwards; `idle_steps` holds whatever the
-        body controller last targeted, so a look is: hold_head(pan, tilt), read the
-        verdict, hold_head(0, 0).
+        (W22c, 2026-09-07). The target remains active for later solver plans, so the
+        head keeps looking until the caller explicitly calls `hold_head(0, 0)`.
+        `idle_steps` re-emits that target while the look settles.
 
         `ramp` > 0 spreads the turn over that many steps (a linear ramp of the target
         from the head's current angles), then holds for the rest of `t`. Without it the
@@ -2961,6 +2971,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         )
         start = body_action[:2].copy()                                 # the head now
         goal = np.array([float(pan), float(tilt)])                      # head_pan, head_tilt
+        self._head_target = goal.copy()
         base_action = np.array([0, 0])
         out = self._guard.last_step
         for i in range(int(t)):
@@ -2982,8 +2993,10 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
             return self._guard.last_step
         arm_action = self.env_agent.controller.controllers["arm"].qpos[0].cpu().numpy()
         body_action = (
-            self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy()
+            self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
         )
+        if self._head_target is not None:
+            body_action[:2] = self._head_target
         base_action = np.array([0, 0])
         for i in range(t):
             action = self._compose(arm_action, body_action, base_action)

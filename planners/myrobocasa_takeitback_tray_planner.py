@@ -10,24 +10,27 @@ import numpy as np
 import sapien
 import torch
 from mani_skill.agents.robots import Fetch
-from my_scenes.my_robocasa_takeitback_tray import MyRoboCasaSceneTakeItBackTray
 from mani_skill.utils.wrappers import RecordEpisode
+from my_scenes.my_robocasa_takeitback_tray import MyRoboCasaSceneTakeItBackTray
 from robots.fetch.extand import FetchMotionPlanningSapienSolver
-from planners.takeitback_common import _grasp_pose, _tcp_at, _tcp_to
-from utils.logging_utils import PlannerLogger, capture_stdout
-from utils.planners_utils import (
-    _rotate_base_to,
-    _screw_base_translate,
-    _velocity_segment,
-    _base_cmd,
-)
+from utils.logging_utils import PlannerLogger, StreamingVideoRecorder, capture_stdout
 
-# max horizontal base->cup distance at which the fallback arm re-grasp drives
-# the base so the cup is inside the arm's reachable workspace. The straight-arms
-# TCP sits ARM_OFFSET (1.128 m) north of the base but mplib's real reachable
-# horizontal is ~1.086 m, so the gripper-at-cup park (base->cup = ARM_OFFSET)
-# leaves the cup ~2-5 cm past reach on some seeds (11/32/41/47 -> "IK Failed").
-GRASP_STANDOFF = 1.00
+
+COUNTER_DIRECTION = np.array([-1.0, 0.0, 0.0])
+ALIGN_TOL = np.deg2rad(5.0)
+SAFE_TORSO = 0.30
+BASE_STANDOFF = 0.40
+CUP_X_GAP = 0.25
+CUP_BACK_GAP = 0.10
+HEAD_PAN_LIMITS = (-1.57, 1.57)
+HEAD_TILT_LIMITS = (-0.76, 1.45)
+HEAD_LOOK_TOL = np.deg2rad(12.0)
+PREGRASP_GAP = 0.12
+GRIPPER_OPEN = 1
+GRIPPER_CLOSED = -1
+TORSO_LIFT_DELTA = 0.08
+TRAY_DROP_GAP = 0.01
+TRAY_DROP_TOL = 0.03
 
 
 def _repair_trajectory_metadata(run_dir):
@@ -52,681 +55,1047 @@ def _repair_trajectory_metadata(run_dir):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Motion planner for MyRoboCasa_TakeItBackTray-v1 scene")
-    parser.add_argument("--seed", type=int, default=3, help="Random seed (default: 3)")
-    parser.add_argument("--render-mode", type=str, default="rgb_array",
-                        choices=["rgb_array", "human", "sensors"],
-                        help="Render mode (default: rgb_array)")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode in planner")
-    parser.add_argument("--info", action="store_true", help="Print environment info in planner")
-    parser.add_argument("--log-dir", type=str, default="logs", help="Directory for log output (default: logs)")
-    parser.add_argument("--log-freq", type=int, default=10, help="Write trajectory rows every N steps (default: 10)")
-    parser.add_argument(
-        "--no-video",
-        action="store_true",
-        help="Disable mp4 video recording (skip StreamingVideoRecorder: no render, faster)",
+    parser = argparse.ArgumentParser(
+        description="Incremental planner for MyRoboCasa_TakeItBackTray-v1"
     )
+    parser.add_argument("--seed", type=int, default=3)
+    parser.add_argument(
+        "--render-mode",
+        type=str,
+        default="rgb_array",
+        choices=["rgb_array", "human", "sensors"],
+    )
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--info", action="store_true")
+    parser.add_argument("--log-dir", type=str, default="logs")
+    parser.add_argument("--log-freq", type=int, default=10)
+    parser.add_argument("--no-video", action="store_true")
     return parser.parse_args()
 
-def planning(env, seed, debug=False, vis=None, info=False):
-    vis = vis or env.unwrapped.render_mode == "human"
 
+def _heading(agent: Fetch) -> np.ndarray:
+    direction = agent.base_link.pose.sp.to_transformation_matrix()[:3, 0].copy()
+    direction[2] = 0.0
+    return direction / np.linalg.norm(direction)
+
+
+def _head_look_at(agent: Fetch, target_pos: np.ndarray) -> tuple[float, float]:
+    head = next(
+        link for link in agent.robot.get_links()
+        if link.get_name() == "head_camera_link"
+    )
+    head_pos = np.asarray(head.pose.sp.p, dtype=float)
+    target = np.asarray(target_pos, dtype=float).reshape(3)
+    delta = target - head_pos
+    base_forward = agent.base_link.pose.sp.to_transformation_matrix()[:3, 0]
+    base_yaw = float(np.arctan2(base_forward[1], base_forward[0]))
+    pan = np.arctan2(delta[1], delta[0]) - base_yaw
+    pan = (pan + np.pi) % (2 * np.pi) - np.pi
+    horizontal = float(np.hypot(delta[0], delta[1]))
+    tilt = float(np.arctan2(-delta[2], horizontal))
+    return (
+        float(np.clip(pan, *HEAD_PAN_LIMITS)),
+        float(np.clip(tilt, *HEAD_TILT_LIMITS)),
+    )
+
+
+def planning(env, seed, debug=False, vis=None, info=False) -> bool:
+    """Execute waypoints 1-16; later waypoints are added after review."""
     unwenv: MyRoboCasaSceneTakeItBackTray = env.unwrapped
-    obs, _ = env.reset(seed=seed, options={"reconfigure": True})
-    agent: Fetch = cast(Fetch, unwenv.agent)  # captured after reconfigure reset
-
-    tray_center = unwenv.tray.pose.p[0].cpu().numpy()
+    env.reset(seed=seed, options={"reconfigure": True})
+    agent: Fetch = cast(Fetch, unwenv.agent)
 
     planner = FetchMotionPlanningSapienSolver(
         env,
         base_pose=agent.robot.pose.sp,
-        vis=vis,
+        vis=bool(vis),
         print_env_info=info,
         debug=debug,
     )
 
-    # mplib emits absolute arm targets. Convert only those seven slots to raw
-    # joint deltas; remaining canonical action layout stays unchanged.
+    # Solver and environment both use absolute joint targets.
     planner.control_mode = "pd_joint_pos"
-    _step_absolute = env.step
-
-    def _step_delta(action):
-        action = np.asarray(action)
-        if action.shape == (13,):
-            action = action.copy()
-            arm_qpos = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-            action[:7] -= arm_qpos
-        return _step_absolute(action)
-
-    env.step = _step_delta
-
-    def _sync():
-        getattr(planner.planner, "update_from_simulation")()
     env.track_object(unwenv.cup, "cup")
     env.track_object(unwenv.tray, "tray")
-    env.track_object(agent.tcp, "robot_tcp")
     env.track_object(agent.base_link, "robot_base")
-    env.log_event("start", "Planning started")
+    env.track_object(agent.tcp, "robot_tcp")
+    env.log_event("start", "Incremental planner started")
 
-    # ==================================================================== #
-    # STRAIGHT-ARM GEOMETRY: the arm stays in the home (straight) config for
-    # the WHOLE task. The TCP rides at (1.128, 0, 0.786 + torso) in the base
-    # frame (measured), so the cup offset from the base is constant and all
-    # horizontal positioning uses turn-then-forward base motion; vertical
-    # positioning uses the torso only.
-    # The robot rotates ONCE to face north (the arm into the counter) with
-    # the empty gripper, then never rotates again. No arm reconfiguration,
-    # no mplib arm motions, no sharp moves: every stage is a smooth scripted
-    # drive / torso ramp, verified (cup z, TCP-cup gap) before the next one.
-    # ==================================================================== #
-    ARM_OFFSET = 1.128    # straight-arm TCP offset from the base center (m);
-    # the arm points NORTH (into the counter) via the shoulder pan, while
-    # the robot itself faces EAST (parallel to the counter)
-    TORSO_TRANSPORT = 0.386  # the torso MAX: the arm ~1.19 m high - well above
-    # the stove top (1.08) and the stack cabinets (0.89) that the straight
-    # arm sweeps past during the base drives (the mplib collision models are
-    # conservative, so the extra height reduces the false positives)
-    TORSO_GRASP = 0.21      # the jaws' mid at the cup center (~1.0 m)
-    TORSO_LOW = 0.02        # the torso floor for the placement ramps
-
-    def hold_a():
-        return getattr(agent.controller, "controllers")["arm"].qpos[0].cpu().numpy()
-
-    def hold_b():
-        return getattr(agent.controller, "controllers")["body"].qpos[0].cpu().numpy().copy()
-
-    def step_hold(torso_target=None):
-        a = np.zeros(13)
-        a[:7] = hold_a()
-        a[7] = planner.gripper_state
-        b = hold_b()
-        if torso_target is not None:
-            b[2] = torso_target
-        a[8:11] = b
-        env.step(a)
-
-    def ramp_torso(target, steps=150):
-        # ramp the torso TARGET gradually: a fixed target makes the PD snap
-        # the torso (and the arm with it) fast, which shoves the base around;
-        # stepping the target by small increments keeps the motion slow
-        start = hold_b()[2]
-        for i in range(steps):
-            b = hold_b()
-            b[2] = start + (target - start) * ((i + 1) / steps)
-            env.step(np.hstack([hold_a(), planner.gripper_state, b, _base_cmd()]))
-        _sync()
-        # pi-lens-ignore: unchecked-throwing-call-python
-        return float(agent.tcp.pose.p[0][2])
-
-    def ramp_arm(target, steps=120):
-        """Move arm to a joint waypoint without teleporting its target."""
-        target = np.asarray(target, dtype=float)
-        start = hold_a()
-        for i in range(steps):
-            arm = start + (target - start) * ((i + 1) / steps)
-            env.step(np.hstack([arm, planner.gripper_state, hold_b(), _base_cmd()]))
-        _sync()
-
-    def settle_gripper(steps=12):
-        """Let a closed contact settle before testing or lifting it."""
-        for _ in range(steps):
-            step_hold()
-        _sync()
-
-    def descend_to_grasp(target_pose, xy_tol=0.05):
-        """Use torso for final vertical closure when arm IK stalls."""
-        target = np.asarray(target_pose.p, dtype=float)
-        tcp = agent.tcp.pose.p[0].cpu().numpy()
-        if np.linalg.norm(tcp[:2] - target[:2]) > xy_tol:
-            return False
-        # pi-lens-ignore: unchecked-throwing-call-python
-        drop = float(tcp[2] - target[2])
-        if drop > 0.015:
-            body_z = max(0.0, hold_b()[2] - drop)
-            ramp_torso(body_z, steps=30)
-        return _tcp_to(agent, target) <= 0.05
-
-    def drive_to(tgt, tol=0.04, min_improve=0.02):
-        """Axis-aligned base drive, holding the arm + current torso,
-        heading fixed north. Returns 0 on convergence (final dist < tol)."""
-        return _velocity_segment(
-            env, planner, np.asarray(tgt, dtype=float), hold_a(), hold_b(),
-            planner.gripper_state, target_yaw=0.0, tol=tol,
-            min_improve=min_improve,
-        )
-
-    def l_drive(aim_xy, tol=0.04):
-        """Use one straight payload leg; keep L corridor for empty approach."""
-        aim = np.asarray(aim_xy, dtype=float)
-        base = agent.base_link.pose.p[0].cpu().numpy()
-        if cup_held():
-            # A held cup should cross the transfer in one orbit rather than
-            # sweeping around the base at every L-corner.
-            targets = (np.array([aim[0], aim[1], 0.0]),)
-        else:
-            targets = (
-                np.array([base[0], aim[1] + 0.05, 0.0]),
-                np.array([aim[0], aim[1] + 0.05, 0.0]),
-                np.array([aim[0], aim[1], 0.0]),
+    def drive_fixed_arm(distance, v=0.10, max_steps=350):
+        """Drive base while keeping arm/body joint targets fixed."""
+        arm_target = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+        body_target = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
+        start_xy = agent.base_link.pose.sp.p[:2].copy()
+        heading = _heading(agent)[:2]
+        sign = -1.0 if distance < 0.0 else 1.0
+        out = None
+        for _ in range(max_steps):
+            action = planner._compose(
+                arm_target,
+                body_target,
+                np.array([sign * abs(v), 0.0]),
             )
-        for target in targets:
-            current = agent.base_link.pose.p[0].cpu().numpy()
-            if np.linalg.norm(target[:2] - current[:2]) <= tol:
-                continue
-            if _screw_base_translate(planner, target) != 0:
-                return -1
-            _sync()
-        final = agent.base_link.pose.p[0].cpu().numpy()[:2]
-        return 0 if np.linalg.norm(final - aim[:2]) <= max(tol, 0.06) else -1
-
-    def lower_torso_until_cup_rests(surface_top_z):
-        """Slowly lower the torso (grasped cup descends with the jaws) until
-        the cup rests on the surface below (cup z stops decreasing)."""
-        # pi-lens-ignore: unchecked-throwing-call-python
-        rest_z = float(surface_top_z + unwenv.cup_half[2])
-        for _ in range(300):
-            # pi-lens-ignore: unchecked-throwing-call-python
-            cz = float(unwenv.cup.pose.p[0][2])
-            if cz <= rest_z + 0.01:
+            out = planner._step(action)
+            if planner.truncated:
                 break
-            b = hold_b()
-            if b[2] <= TORSO_LOW + 0.001:
-                # No further torso motion is possible; avoid repeating no-op
-                # steps when a held cup cannot reach the surface.
+            progress = float(
+                np.dot(agent.base_link.pose.sp.p[:2] - start_xy, heading)
+            )
+            if (distance >= 0.0 and progress >= distance - 0.02) or (
+                distance < 0.0 and progress <= distance + 0.02
+            ):
                 break
-            b[2] -= 0.005
-            a = np.zeros(13)
-            a[:7] = hold_a()
-            a[7] = planner.gripper_state
-            a[8:11] = b
-            env.step(a)
-        _sync()
-        # pi-lens-ignore: unchecked-throwing-call-python
-        return float(unwenv.cup.pose.p[0][2])
+        return out
 
-    def cup_held():
-        return bool(unwenv.agent.is_grasping(unwenv.cup).item())
+    def rotate_direct(direction, max_steps=240):
+        """Fallback yaw-only turn when conservative sweep rejects a quarter turn."""
+        arm_target = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+        body_target = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
+        out = None
+        for _ in range(max_steps):
+            angle = planner._yaw_to(direction)
+            if abs(angle) <= ALIGN_TOL:
+                return out
+            action = planner._compose(
+                arm_target,
+                body_target,
+                np.array([0.0, np.clip(np.sign(angle) * 0.25, -1.0, 1.0)]),
+            )
+            out = planner._step(action)
+            if planner.truncated:
+                return out
+        return out if abs(planner._yaw_to(direction)) <= ALIGN_TOL else -1
 
-    def tcp_cup_gap():
-        t = agent.tcp.pose.p[0].cpu().numpy()
-        c = unwenv.cup.pose.p[0].cpu().numpy()
-        # pi-lens-ignore: unchecked-throwing-call-python
-        return float(np.linalg.norm(t - c))
+    direction = COUNTER_DIRECTION.copy()
 
-    def report_stage(name):
-        b = agent.base_link.pose.p[0].cpu().numpy()
-        c = unwenv.cup.pose.p[0].cpu().numpy()
-        print(f"[STAGE] {name}: base ({b[0]:.3f},{b[1]:.3f}) "
-              f"cup ({c[0]:.3f},{c[1]:.3f},{c[2]:.3f}) gap {tcp_cup_gap():.3f} "
-              f"grasped={cup_held()}")
-
-    # ------------------------------------------------------------------ #
-    # STAGE 0: raise torso above counter, rotate ONCE to face north, then
-    # fold elbow slightly. The bent carry pose shortens the arm offset while
-    # keeping elbow and gripper above fixtures.
-    # ------------------------------------------------------------------ #
-    env.log_event("phase", "Stage 0: raise torso, align along the counter")
-    ramp_torso(TORSO_TRANSPORT, steps=150)
-    # the robot faces EAST (parallel to the counter front edge): its
-    # forward/backward drives then run along the counter (left/right of the
-    # countertop) and its side faces the counter. The straight arm is then
-    # swung 90 deg at the shoulder (pan) so it points INTO the counter
-    # (north), then bend the elbow in a high, compact carry pose.
-    _rotate_base_to(env, planner, np.array([1.0, 0.0, 0.0]))
-    _sync()
-    # 85 deg, NOT 90: the shoulder pan limit is +-1.6056 rad (+-92 deg), and
-    # a pan pinned at exactly 90 deg leaves the IK no room to swing the arm
-    # to the cup (the align failed with "IK Failed" - the pan was at the
-    # joint limit). 85 deg keeps the arm pointing into the counter while
-    # giving the IK ~7 deg of swing room. The pan target is ramped gradually
-    # so the arm swing is slow and does not shove the base.
-    _pan1 = np.deg2rad(85)
-    _bent_arm = hold_a()
-    _bent_arm[0] = _pan1
-    _bent_arm[1] = -0.40
-    _bent_arm[3] = 0.80
-    _bent_arm[5] = -0.40
-    # Pan and bend together: same safe high-torso corridor, one arm path
-    # instead of two sequential ramps.
-    ramp_arm(_bent_arm, steps=180)
-    report_stage("0 raise+align+bend")
-
-    # ------------------------------------------------------------------ #
-    # STAGE 1: turn and drive along the counter to the cup's x
-    # at the safe south line (y = cup_y - ARM_OFFSET - 0.4), then STAGE 2:
-    # lower the torso to the grasp height and drive to the PRE-GRASP along a
-    # SAFE corridor. The jaws' plates span +-6.45 cm from the gripper, so any
-    # drive that passes closer than ~10 cm to the cup pushes it with a plate
-    # edge (verified: the cup slid 0.2 m). The offset corridor (cup_x + 0.15)
-    # keeps the plates clear during the y-leg and the x-leg.
-    # The screw drive (drive_base_to_position) is used instead of the closed-
-    # loop velocity segment: it converges reliably (~0.15 m, the arm's fine
-    # alignment covers the rest) and keeps the heading fixed.
-    # ------------------------------------------------------------------ #
-    env.log_event("phase", "Stage 1: drive to the cup x")
-    cup_xy = unwenv.cup.pose.p[0].cpu().numpy()[:2]
-    south_line = cup_xy[1] - ARM_OFFSET - 0.40
-    # the base parks WEST of the cup: the pan-85 arm puts the gripper 10 cm
-    # west of the base, so the y-leg must pass WEST of the cup (the plates
-    # bracket it with 2.6-3.1 cm clearance); an east corridor would drive
-    # the plates through the cup (verified: the cup was knocked over).
-    # L-path: drive SOUTH first (away from the counter) to the line, then
-    # EAST/WEST to the cup's x - a direct diagonal let the base cross the
-    # y=-0.95 counter guard on seed 9 (the screw's rotate-retry slides)
-    _b1 = agent.base_link.pose.p[0].cpu().numpy()
-    # y_guard=False for the south leg: the robot can SPAWN north of the
-    # counter line (y > -0.95) and must be allowed to drive away from the
-    # counter first (verified: seed 9 aborted before moving - the guard fired
-    # on the starting position)
-    res = env.log_motion(
-        "Stage 1 drive", l_drive, np.array([_b1[0], south_line])
+    env.log_event(
+        "waypoint",
+        "1: align base parallel to countertop",
+        target_direction=direction.tolist(),
     )
-    if res == 0:
-        res = env.log_motion(
-            "Stage 1 drive", l_drive,
-            np.array([cup_xy[0] - 0.15, south_line])
-        )
-    if res != 0:
-        print("Stage 1 drive failed; aborting")
-        env.log_event("error", "Stage 1 drive failed")
-        success = bool(unwenv.evaluate()["success"].item())
-        env.log_event("result", "Task aborted", success=success)
-        env.reset()
-        return success
-    # Turn-drive-turn preserves base heading, but the absolute arm controller
-    # can retain yaw-induced tracking error; restore existing bent carry pose
-    # before computing the next live TCP offset.
-    ramp_arm(_bent_arm, steps=60)
-    report_stage("1 at cup x")
-
-    env.log_event("phase", "Stage 2: pre-grasp position")
-    # allow the cup in the planning world from here on: the screw drives near
-    # the cup fail their start-state collision check (gripper <-> cup) and
-    # fling the base around (verified: the correction drive ended 0.5 m away)
-    from mplib.sapien_utils.conversion import convert_object_name
-    _acm = planner.planner.planning_world.get_allowed_collision_matrix()
-    _acm.set_default_entry(convert_object_name(unwenv.cup._objs[0]), True)
-    # allow the straight arm vs the counter fixtures (the stack doors, the
-    # dishwasher, the stove...): the arm rides ~1.19 m high - physically
-    # above them - but the mplib collision models are conservative and flag
-    # false positives that fail every screw plan near the counter (verified:
-    # seeds 9/17 - the gripper vs the stack hingedoor / the dishwasher).
-    # NOT the walls/floor - those collisions are real.
-    for _nm, _act in unwenv.scene.actors.items():
-        if any(_k in _nm for _k in ("counter", "stack", "stove", "dishwasher",
-                                    "sink", "cab", "fridge", "paper_towel",
-                                    "tray")):
-            try:
-                _acm.set_default_entry(convert_object_name(_act._objs[0]), True)
-            except Exception:
-                pass
-    # drive with arm HIGH (the plates cannot touch cup), lower torso to grasp
-    # height only AFTER base is parked. Recompute pre-grasp from live bent-arm
-    # TCP offset; fixed straight-arm geometry is no longer valid.
-    cc = unwenv.cup.pose.p[0].cpu().numpy()
-    arm_xy = (
-        agent.tcp.pose.p[0].cpu().numpy()[:2]
-        - agent.base_link.pose.p[0].cpu().numpy()[:2]
+    result = env.log_motion(
+        "Waypoint 1 rotate",
+        planner.rotate_base_z,
+        direction,
     )
-    pre = np.r_[cc[:2] - arm_xy, 0.0]
-    res = env.log_motion("Stage 2 pre-grasp", l_drive, pre)
-    _sync()
-    # correction loop: the screw drive lands ~15 cm off, but the arm's align
-    # (pan-85, near the +-92 deg joint limit) can only cover ~8-10 cm, so
-    # re-aim the base until the GRIPPER is within ~5 cm of the cup
-    for _c in range(3):
-        _g = agent.tcp.pose.p[0].cpu().numpy()[:2]
-        _cc2 = unwenv.cup.pose.p[0].cpu().numpy()[:2]
-        # pi-lens-ignore: unchecked-throwing-call-python
-        if float(np.linalg.norm(_g - _cc2)) <= 0.05:
+    if result == -1:
+        env.log_event("error", "Waypoint 1 failed")
+        return False
+
+    planner.idle_steps(t=30)
+    actual = _heading(agent)
+    aligned = float(np.dot(actual, direction)) >= np.cos(ALIGN_TOL)
+    env.log_event(
+        "waypoint_complete" if aligned else "error",
+        "Waypoint 1 complete" if aligned else "Waypoint 1 heading outside tolerance",
+        heading=actual.tolist(),
+        error_rad=float(np.arccos(np.clip(np.dot(actual, direction), -1.0, 1.0))),
+    )
+    print(
+        "[WAYPOINT 1]",
+        "ok" if aligned else "failed",
+        "target=", np.round(direction, 3),
+        "actual=", np.round(actual, 3),
+    )
+    if not aligned:
+        return False
+
+    env.log_event(
+        "waypoint",
+        "2: drive parallel, stopping 25 cm before the cup",
+    )
+    cup_x = float(unwenv.cup.pose.p[0].cpu().numpy()[0])
+    target_x = cup_x + direction[0] * CUP_X_GAP
+    for attempt in range(3):
+        base = agent.base_link.pose.sp.p.copy()
+        error_x = target_x - float(base[0])
+        if abs(error_x) <= 0.04:
             break
-        _b = agent.base_link.pose.p[0].cpu().numpy()[:2]
-        # aim the gripper 6 cm west-south of the cup: the drives' overshoot
-        # keeps the plates clear of the cup (a 3 cm aim let the plates push
-        # the cup ~12 cm)
-        _aim2 = np.array([_b[0] + (_cc2[0] - 0.06 - _g[0]),
-                          _b[1] + (_cc2[1] - 0.06 - _g[1]), 0.0])
-        env.log_motion("Stage 2 correction", l_drive, _aim2)
-        _sync()
-    # Leave torso high; first Stage 3 screw can lower torso and align arm in
-    # one geometry path. Failed reach falls back to the old torso ramp.
-    report_stage("2 high pre-grasp")
+        heading = _heading(agent)
+        distance = float(np.dot(np.array([error_x, 0.0]), heading[:2]))
+        result = env.log_motion(
+            f"Waypoint 2 drive {attempt + 1}",
+            drive_fixed_arm,
+            distance,
+            v=0.10,
+        )
+        if result == -1:
+            env.log_event("error", "Waypoint 2 drive failed", attempt=attempt + 1)
+            return False
+        planner.idle_steps(t=10)
 
-    # ------------------------------------------------------------------ #
-    # STAGE 3: grasp - a SHORT two-step straight-arm motion (inter 5 cm
-    # above the cup, then the final 5 cm drop; the arm stays straight, a
-    # micro-translation) aligns the jaws on the cup's measured position,
-    # then close. Retry with height variations and re-measurement.
-    # ------------------------------------------------------------------ #
-    env.log_event("phase", "Stage 3: grasp")
-    def run_grasp():
-        got = False
-        torso_ready = False
-        for attempt in range(10):
-            cc = unwenv.cup.pose.p[0].cpu().numpy()
-            raise_z = [0.02, 0.06, 0.02, 0.08, 0.04, 0.0, 0.05, 0.03, 0.07, 0.01][attempt]
-            q_now = agent.tcp.pose.q[0].cpu().numpy()
-            final = sapien.Pose(p=[cc[0], cc[1], cc[2] + raise_z], q=q_now)
-            inter = sapien.Pose(p=[cc[0], cc[1], cc[2] + raise_z + 0.05], q=q_now)
-            r1 = env.log_motion("Stage 3 align", planner.static_manipulation,
-                                inter, n_init_qpos=100, disable_lift_joint=False)
-            _sync()
-            if not torso_ready and (r1 == -1 or not _tcp_at(agent, inter, tol=0.05)):
-                # The high-to-intermediate screw was not accurate; restore the
-                # proven low-torso contract before retrying live geometry.
-                ramp_torso(TORSO_GRASP, steps=120)
-                torso_ready = True
-                continue
-            torso_ready = True
-            r2 = -1 if r1 == -1 else env.log_motion(
-                "Stage 3 align", planner.static_manipulation, final,
-                n_init_qpos=100, disable_lift_joint=False)
-            _sync()
-            aligned = r2 != -1 and _tcp_to(agent, final.p) <= 0.04
-            if not aligned:
-                cc_live = unwenv.cup.pose.p[0].cpu().numpy()
-                live_final = sapien.Pose(
-                    p=[cc_live[0], cc_live[1], cc_live[2] + raise_z],
-                    q=agent.tcp.pose.q[0].cpu().numpy(),
+    base = agent.base_link.pose.sp.p.copy()
+    error_x = target_x - float(base[0])
+    cup_gap = abs(float(np.dot(np.array([base[0] - cup_x, 0.0]), -direction[:2])))
+    staged = abs(error_x) <= 0.04 and abs(abs(cup_gap) - CUP_X_GAP) <= 0.04
+    env.log_event(
+        "waypoint_complete" if staged else "error",
+        "Waypoint 2 complete" if staged else "Waypoint 2 standoff outside tolerance",
+        base_xy=base[:2].tolist(),
+        cup_x=cup_x,
+        target_base_x=target_x,
+        cup_gap=cup_gap,
+    )
+    print(
+        "[WAYPOINT 2]",
+        "ok" if staged else "failed",
+        "base_x=", round(float(base[0]), 3),
+        "cup_x=", round(cup_x, 3),
+        "cup_gap=", round(cup_gap, 3),
+    )
+    if not staged:
+        return False
+
+    # Raise torso only enough for the straight hand to clear the counter.
+    # With the arm folded, the base turn becomes much larger than 90 degrees.
+    body = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
+    start_torso = float(body[2])
+    arm_hold = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+    for i in range(60):
+        body = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
+        body[2] = start_torso + (SAFE_TORSO - start_torso) * ((i + 1) / 60)
+        env.step(np.hstack([arm_hold, planner.gripper_state, body, [0.0, 0.0]]))
+    planner.planner.update_from_simulation()
+    env.log_event("support", f"Raise torso to {SAFE_TORSO:.3f} for straight-arm turn")
+
+    env.log_event("waypoint", "3: turn right toward cup")
+    # Counter normal is +y; from the fixed -x parallel heading this is exactly
+    # the minimal right-hand quarter turn.
+    target = np.array([direction[1], -direction[0], 0.0])
+    result = env.log_motion(
+        "Waypoint 3 rotate right toward cup",
+        planner.rotate_base_z,
+        target,
+    )
+    if result == -1:
+        result = env.log_motion(
+            "Waypoint 3 direct yaw fallback",
+            rotate_direct,
+            target,
+        )
+    if result == -1:
+        env.log_event("error", "Waypoint 3 failed")
+        return False
+
+    planner.idle_steps(t=30)
+    actual = _heading(agent)
+    facing = float(np.dot(actual, target)) >= np.cos(ALIGN_TOL)
+    env.log_event(
+        "waypoint_complete" if facing else "error",
+        "Waypoint 3 complete" if facing else "Waypoint 3 heading outside tolerance",
+        target_direction=target.tolist(),
+        heading=actual.tolist(),
+        error_rad=float(np.arccos(np.clip(np.dot(actual, target), -1.0, 1.0))),
+    )
+    print(
+        "[WAYPOINT 3]",
+        "ok" if facing else "failed",
+        "target=", np.round(target, 3),
+        "actual=", np.round(actual, 3),
+    )
+    if not facing:
+        return False
+
+    env.log_event("waypoint", "4: approach counter with a 40 cm base standoff")
+    counter_front_y = float(
+        unwenv.counter_pos[1] - unwenv.counter_size[1] / 2
+    )
+    base_radius = float(getattr(unwenv, "ROBOT_RADIUS", 0.35))
+    target_y = counter_front_y - base_radius - BASE_STANDOFF
+    base_before = agent.base_link.pose.sp.p.copy()
+    cup_before = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    result = env.log_motion(
+        "Waypoint 4 drive to counter standoff",
+        drive_fixed_arm,
+        target_y - float(base_before[1]),
+        v=0.10,
+        max_steps=500,
+    )
+    if result == -1:
+        env.log_event("error", "Waypoint 4 drive failed")
+        return False
+    planner.idle_steps(t=20)
+
+    base_after = agent.base_link.pose.sp.p.copy()
+    cup_after = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    actual_gap = counter_front_y - (float(base_after[1]) + base_radius)
+    cup_shift = float(np.linalg.norm(cup_after[:2] - cup_before[:2]))
+    cup_reach = float(np.linalg.norm(cup_after[:2] - base_after[:2]))
+    tray_reach = float(
+        np.linalg.norm(unwenv.tray.pose.p[0].cpu().numpy()[:2] - base_after[:2])
+    )
+    positioned = (
+        abs(float(base_after[1]) - target_y) <= 0.05
+        and cup_shift <= 0.02
+        and cup_reach <= 1.10
+    )
+    env.log_event(
+        "waypoint_complete" if positioned else "error",
+        "Waypoint 4 complete" if positioned else "Waypoint 4 position/cup check failed",
+        target_base_y=target_y,
+        base_y=float(base_after[1]),
+        counter_gap=actual_gap,
+        cup_shift=cup_shift,
+        cup_reach=cup_reach,
+        tray_reach=tray_reach,
+    )
+    print(
+        "[WAYPOINT 4]",
+        "ok" if positioned else "failed",
+        "base_y=", round(float(base_after[1]), 3),
+        "counter_gap=", round(actual_gap, 3),
+        "cup_reach=", round(cup_reach, 3),
+        "tray_reach=", round(tray_reach, 3),
+        "cup_shift=", round(cup_shift, 3),
+    )
+    if not positioned:
+        return False
+
+    env.log_event("support", "Keep straight arm during turn")
+    env.log_event("waypoint", "5: turn parallel toward tray")
+    tray_x = float(unwenv.tray.pose.p[0].cpu().numpy()[0])
+    cup_x = float(unwenv.cup.pose.p[0].cpu().numpy()[0])
+    target = np.array([1.0 if tray_x >= cup_x else -1.0, 0.0, 0.0])
+    turn_direction = target.copy()
+    result = env.log_motion(
+        "Waypoint 5 rotate toward tray",
+        planner.rotate_base_z,
+        turn_direction,
+    )
+    if result == -1:
+        result = env.log_motion(
+            "Waypoint 5 direct yaw fallback",
+            rotate_direct,
+            turn_direction,
+        )
+    if result == -1:
+        env.log_event("error", "Waypoint 5 failed")
+        return False
+
+    planner.idle_steps(t=30)
+    actual = _heading(agent)
+    aligned = float(np.dot(actual, target)) >= np.cos(ALIGN_TOL)
+    tcp_z = float(agent.tcp.pose.p[0].cpu().numpy()[2])
+    cup_z = float(unwenv.cup.pose.p[0].cpu().numpy()[2])
+    level_error = abs(tcp_z - cup_z)
+    env.log_event(
+        "waypoint_complete" if aligned else "error",
+        "Waypoint 5 complete" if aligned else "Waypoint 5 heading/height outside tolerance",
+        target_direction=target.tolist(),
+        heading=actual.tolist(),
+        error_rad=float(np.arccos(np.clip(np.dot(actual, target), -1.0, 1.0))),
+        tcp_z=tcp_z,
+        cup_z=cup_z,
+        level_error=level_error,
+        tray_x=tray_x,
+    )
+    print(
+        "[WAYPOINT 5]",
+        "ok" if aligned else "failed",
+        "target=", np.round(target, 3),
+        "actual=", np.round(actual, 3),
+    )
+    if not aligned:
+        return False
+
+    env.log_event(
+        "waypoint",
+        "6: reverse to 10 cm behind the cup",
+    )
+    base_before = agent.base_link.pose.sp.p.copy()
+    cup_x = float(unwenv.cup.pose.p[0].cpu().numpy()[0])
+    target_x = cup_x - turn_direction[0] * CUP_BACK_GAP
+    distance = float(
+        np.dot(
+            np.array([target_x - float(base_before[0]), 0.0]),
+            _heading(agent)[:2],
+        )
+    )
+    result = env.log_motion(
+        "Waypoint 6 reverse past cup",
+        drive_fixed_arm,
+        distance,
+        v=0.10,
+        max_steps=500,
+    )
+    if result == -1:
+        env.log_event("error", "Waypoint 6 reverse failed")
+        return False
+    planner.idle_steps(t=20)
+
+    base_after = agent.base_link.pose.sp.p.copy()
+    cup_after = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    tray_after = unwenv.tray.pose.p[0].cpu().numpy().copy()
+    cup_shift = float(np.linalg.norm(cup_after[:2] - cup_before[:2]))
+    cup_reach = float(np.linalg.norm(cup_after[:2] - base_after[:2]))
+    tray_reach = float(np.linalg.norm(tray_after[:2] - base_after[:2]))
+    reversed_past = (
+        abs(float(base_after[0]) - target_x) <= 0.05
+        and cup_shift <= 0.02
+        and cup_reach <= 1.10
+    )
+    env.log_event(
+        "waypoint_complete" if reversed_past else "error",
+        "Waypoint 6 complete" if reversed_past else "Waypoint 6 reverse/check failed",
+        target_base_x=target_x,
+        base_x=float(base_after[0]),
+        cup_x=cup_x,
+        cup_shift=cup_shift,
+        cup_reach=cup_reach,
+        tray_reach=tray_reach,
+    )
+    print(
+        "[WAYPOINT 6]",
+        "ok" if reversed_past else "failed",
+        "base_x=", round(float(base_after[0]), 3),
+        "target_x=", round(target_x, 3),
+        "cup_reach=", round(cup_reach, 3),
+        "tray_reach=", round(tray_reach, 3),
+    )
+    if not reversed_past:
+        return False
+
+    env.log_event("waypoint", "7: turn head toward cup")
+    arm_before = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+    base_before = agent.base_link.pose.sp.p.copy()
+    cup_pos = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    pan, tilt = _head_look_at(agent, cup_pos)
+    planner.hold_head(pan, tilt, t=40, ramp=20)
+
+    head = next(
+        link for link in agent.robot.get_links()
+        if link.get_name() == "head_camera_link"
+    )
+    look_direction = head.pose.sp.to_transformation_matrix()[:3, 0]
+    target_direction = cup_pos - np.asarray(head.pose.sp.p, dtype=float)
+    look_error = float(
+        np.arccos(
+            np.clip(
+                np.dot(look_direction, target_direction)
+                / (np.linalg.norm(look_direction) * np.linalg.norm(target_direction)),
+                -1.0,
+                1.0,
+            )
+        )
+    )
+    arm_after = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
+    base_after = agent.base_link.pose.sp.p.copy()
+    arm_error = float(np.max(np.abs(arm_after - arm_before)))
+    base_shift = float(np.linalg.norm(base_after[:2] - base_before[:2]))
+    looked = look_error <= HEAD_LOOK_TOL and arm_error <= 0.03 and base_shift <= 0.01
+    env.log_event(
+        "waypoint_complete" if looked else "error",
+        "Waypoint 7 complete" if looked else "Waypoint 7 head/look check failed",
+        pan=pan,
+        tilt=tilt,
+        look_error_rad=look_error,
+        arm_error=arm_error,
+        base_shift=base_shift,
+    )
+    print(
+        "[WAYPOINT 7]",
+        "ok" if looked else "failed",
+        "pan=", round(pan, 3),
+        "tilt=", round(tilt, 3),
+        "look_error_deg=", round(float(np.degrees(look_error)), 2),
+        "arm_error=", round(arm_error, 4),
+    )
+    if not looked:
+        return False
+
+    env.log_event("waypoint", "8: RRT open hand to 12 cm pregrasp")
+    planner.planner.update_from_simulation()
+    arm_before = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+    base_before = agent.base_link.pose.sp.p.copy()
+    cup_before = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    approach = cup_before - base_before
+    approach[2] = 0.0
+    approach /= np.linalg.norm(approach)
+    closing = np.cross(np.array([0.0, 0.0, 1.0]), approach)
+    closing /= np.linalg.norm(closing)
+    grasp_pose = agent.build_grasp_pose(approach, closing, cup_before)
+    pregrasp_pose = grasp_pose * sapien.Pose([0.0, 0.0, -PREGRASP_GAP])
+
+    # Keep gripper open while RRT moves only the arm/body; head is restored after
+    # follow_path because the solver's arm path parks head joints at zero.
+    planner.gripper_state = GRIPPER_OPEN
+    result = env.log_motion(
+        "Waypoint 8 RRT pregrasp",
+        planner.move_to_pose_with_RRTConnect,
+        pregrasp_pose,
+        n_init_qpos=100,
+        disable_lift_joint=False,
+    )
+    rrt_ok = result != -1
+    if rrt_ok:
+        planner.hold_head(pan, tilt, t=20, ramp=10)
+
+    tcp = agent.tcp.pose.p[0].cpu().numpy()
+    cup_after = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    base_after = agent.base_link.pose.sp.p.copy()
+    tcp_error = float(np.linalg.norm(tcp - pregrasp_pose.p))
+    tcp_to_cup = cup_after - tcp
+    standoff = float(np.dot(tcp_to_cup, approach))
+    lateral_error = float(np.linalg.norm(tcp_to_cup - approach * standoff))
+    arm_error = float(
+        np.max(
+            np.abs(
+                agent.controller.controllers["arm"].qpos[0].cpu().numpy()
+                - arm_before
+            )
+        )
+    )
+    base_shift = float(np.linalg.norm(base_after[:2] - base_before[:2]))
+    cup_shift = float(np.linalg.norm(cup_after[:2] - cup_before[:2]))
+    pregrasped = (
+        rrt_ok
+        and 0.08 <= standoff <= 0.16
+        and lateral_error <= 0.05
+        and tcp_error <= 0.06
+        and base_shift <= 0.03
+        and cup_shift <= 0.02
+        and not bool(unwenv.agent.is_grasping(unwenv.cup).item())
+    )
+    env.log_event(
+        "waypoint_complete" if pregrasped else "error",
+        "Waypoint 8 complete" if pregrasped else "Waypoint 8 RRT pregrasp check failed",
+        rrt_ok=rrt_ok,
+        target_gap=PREGRASP_GAP,
+        standoff=standoff,
+        lateral_error=lateral_error,
+        tcp_error=tcp_error,
+        arm_error=arm_error,
+        base_shift=base_shift,
+        cup_shift=cup_shift,
+    )
+    print(
+        "[WAYPOINT 8]",
+        "ok" if pregrasped else "failed",
+        "standoff=", round(standoff, 3),
+        "lateral=", round(lateral_error, 3),
+        "tcp_error=", round(tcp_error, 3),
+        "arm_error=", round(arm_error, 4),
+    )
+    if not pregrasped:
+        return False
+
+    env.log_event("waypoint", "9: IK/RRT move open hand to grasp pose")
+    planner.planner.update_from_simulation()
+    arm_before = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+    base_before = agent.base_link.pose.sp.p.copy()
+    cup_before = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    planner.gripper_state = GRIPPER_OPEN
+
+    rrt_check = env.log_motion(
+        "Waypoint 9 RRT dry-run",
+        planner.move_to_pose_with_RRTConnect,
+        grasp_pose,
+        dry_run=True,
+        n_init_qpos=100,
+        disable_lift_joint=False,
+    )
+    rrt_ok = rrt_check != -1
+    motion = env.log_motion(
+        "Waypoint 9 IK grasp approach",
+        planner.static_manipulation,
+        grasp_pose,
+        n_init_qpos=100,
+        disable_lift_joint=False,
+    )
+    motion_ok = motion != -1
+    # Keep head target active after the arm solver and do not close the gripper yet.
+    planner.hold_head(pan, tilt, t=20, ramp=10)
+    tcp = agent.tcp.pose.p[0].cpu().numpy()
+    cup_after = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    base_after = agent.base_link.pose.sp.p.copy()
+    body_now = agent.controller.controllers["body"].qpos[0].cpu().numpy()
+    tcp_error = float(np.linalg.norm(tcp - grasp_pose.p))
+    head_error = float(np.max(np.abs(body_now[:2] - np.array([pan, tilt]))))
+    arm_error = float(
+        np.max(
+            np.abs(
+                agent.controller.controllers["arm"].qpos[0].cpu().numpy()
+                - arm_before
+            )
+        )
+    )
+    base_shift = float(np.linalg.norm(base_after[:2] - base_before[:2]))
+    cup_shift = float(np.linalg.norm(cup_after[:2] - cup_before[:2]))
+    at_grasp = (
+        motion_ok
+        and tcp_error <= 0.06
+        and head_error <= 0.03
+        and base_shift <= 0.03
+        and cup_shift <= 0.02
+        and not bool(unwenv.agent.is_grasping(unwenv.cup).item())
+    )
+    env.log_event(
+        "waypoint_complete" if at_grasp else "error",
+        (
+            "Waypoint 9 complete via IK fallback"
+            if at_grasp and not rrt_ok
+            else "Waypoint 9 complete"
+            if at_grasp
+            else "Waypoint 9 grasp-pose check failed"
+        ),
+        rrt_ok=rrt_ok,
+        motion_ok=motion_ok,
+        tcp_error=tcp_error,
+        head_error=head_error,
+        arm_error=arm_error,
+        base_shift=base_shift,
+        cup_shift=cup_shift,
+        gripper_open=not bool(unwenv.agent.is_grasping(unwenv.cup).item()),
+    )
+    print(
+        "[WAYPOINT 9]",
+        "ok" if at_grasp else "failed",
+        "rrt=", rrt_ok,
+        "motion=", motion_ok,
+        "mode=", "IK fallback" if not rrt_ok else "RRT/IK",
+        "tcp_error=", round(tcp_error, 3),
+        "head_error=", round(head_error, 4),
+    )
+    if not at_grasp:
+        return False
+
+    env.log_event("waypoint", "10: close gripper on cup")
+    planner.gripper_state = GRIPPER_CLOSED
+    arm_hold = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+    body_hold = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
+    body_hold[:2] = np.array([pan, tilt])
+    base_before = agent.base_link.pose.sp.p.copy()
+    cup_before = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    close_arm_drift = 0.0
+    for _ in range(20):
+        planner._compose(arm_hold, body_hold, np.array([0.0, 0.0]))
+        planner._step(planner._from_abs(planner._last_abs))
+        close_arm_drift = max(
+            close_arm_drift,
+            float(
+                np.max(
+                    np.abs(
+                        agent.controller.controllers["arm"].qpos[0].cpu().numpy()
+                        - arm_hold
+                    )
                 )
-                aligned = descend_to_grasp(live_final)
-            if aligned:
-                planner.close_gripper()
-                settle_gripper()
-                if cup_held():
-                    got = True
-                    break
-                planner.open_gripper()
-                _sync()
-        return got
-
-    def verify_load_bearing_grasp():
-        """Reject contact that closes around the cup but cannot lift it."""
-        if not cup_held() or tcp_cup_gap() > 0.08:
-            return False
-        torso_z = float(hold_b()[2])
-        cup_z = float(unwenv.cup.pose.p[0][2])
-        ramp_torso(torso_z + 0.04, steps=40)
-        valid = (
-            cup_held()
-            and float(unwenv.cup.pose.p[0][2]) >= cup_z + 0.015
-            and tcp_cup_gap() <= 0.12
+            ),
         )
-        ramp_torso(torso_z, steps=40)
-        return valid and cup_held() and tcp_cup_gap() <= 0.12
-
-    def fallback_grasp():
-        # drive the base closer (arm HIGH - the mid-grasp low-torso drive near
-        # the counter fails to move the base) so the cup is inside the
-        # workspace, then re-run the arm align. Returns True only after a
-        # measured lift proves the fallback contact is load-bearing.
-        ramp_torso(TORSO_TRANSPORT, steps=150)
-        _b = agent.base_link.pose.p[0].cpu().numpy()[:2]
-        _cc = unwenv.cup.pose.p[0].cpu().numpy()[:2]
-        # pi-lens-ignore: unchecked-throwing-call-python
-        if float(np.linalg.norm(_cc - _b)) > GRASP_STANDOFF:
-            _aim = np.array([_cc[0] + 0.10, _cc[1] - GRASP_STANDOFF, 0.0])
-            env.log_motion("fallback reach", l_drive, _aim[:2], 0.04)
-            _sync()
-        # Move the base using the measured TCP/cup offset, then close from the
-        # already aligned carry orientation before attempting a new IK pose.
-        for _ in range(2):
-            tcp_xy = agent.tcp.pose.p[0].cpu().numpy()[:2]
-            cup_xy = unwenv.cup.pose.p[0].cpu().numpy()[:2]
-            # pi-lens-ignore: unchecked-throwing-call-python
-            if float(np.linalg.norm(tcp_xy - cup_xy)) <= 0.05:
-                break
-            base_xy = agent.base_link.pose.p[0].cpu().numpy()[:2]
-            env.log_motion(
-                "fallback center", l_drive,
-                base_xy + cup_xy - tcp_xy, 0.04
-            )
-            _sync()
-        ramp_torso(TORSO_GRASP, steps=120)
-        for _ in range(3):
-            planner.close_gripper()
-            settle_gripper()
-            if verify_load_bearing_grasp():
-                return True
-            planner.open_gripper()
-            _sync()
-        if run_grasp():
-            if verify_load_bearing_grasp():
-                return True
-            planner.open_gripper()
-            _sync()
-        if alternate_grasp():
-            if verify_load_bearing_grasp():
-                return True
-            planner.open_gripper()
-            _sync()
+        if planner.truncated:
+            break
+    planner.planner.update_from_simulation()
+    grasped = bool(unwenv.agent.is_grasping(unwenv.cup).item())
+    env.log_event(
+        "waypoint_complete" if grasped else "error",
+        "Waypoint 10 complete" if grasped else "Waypoint 10 grasp failed",
+        grasped=grasped,
+        arm_drift=close_arm_drift,
+        cup_shift=float(
+            np.linalg.norm(unwenv.cup.pose.p[0].cpu().numpy()[:2] - cup_before[:2])
+        ),
+    )
+    print(
+        "[WAYPOINT 10]",
+        "ok" if grasped else "failed",
+        "arm_drift=", round(close_arm_drift, 4),
+    )
+    if not grasped:
         return False
 
-    def alternate_grasp():
-        """Try a live front-facing grasp after repeated vertical stalls."""
-        mesh = unwenv.cup.get_first_collision_mesh(to_world_frame=True)
-        if mesh is None:
-            return False
-        obb = mesh.bounding_box_oriented
-        cc = obb.center_mass.copy()
-        ed = cc - agent.tcp.pose.p[0].cpu().numpy()
-        ed[2] = 0.0
-        if np.linalg.norm(ed) < 1e-6:
-            ed = np.array([0.0, 1.0, 0.0])
-        ed /= np.linalg.norm(ed)
-        closing = np.cross(np.array([0.0, 0.0, 1.0]), ed)
-        closing /= np.linalg.norm(closing)
-        for raise_z in (0.02, 0.06, 0.04):
-            grasp_pose, reach_pose = _grasp_pose(
-                agent, obb, cc, ed, closing,
-                raise_z=raise_z, back_off=0.06, force_front=True,
+    env.log_event("waypoint", "11: lift torso with cup")
+    cup_z_before = float(unwenv.cup.pose.p[0].cpu().numpy()[2])
+    torso_before = float(body_hold[2])
+    torso_target = min(torso_before + TORSO_LIFT_DELTA, 0.386)
+    lift_arm_drift = 0.0
+    lift_steps = 80
+    for i in range(lift_steps):
+        body = body_hold.copy()
+        body[2] = torso_before + (torso_target - torso_before) * ((i + 1) / lift_steps)
+        planner._compose(arm_hold, body, np.array([0.0, 0.0]))
+        planner._step(planner._from_abs(planner._last_abs))
+        lift_arm_drift = max(
+            lift_arm_drift,
+            float(
+                np.max(
+                    np.abs(
+                        agent.controller.controllers["arm"].qpos[0].cpu().numpy()
+                        - arm_hold
+                    )
+                )
+            ),
+        )
+        if planner.truncated:
+            break
+    planner.planner.update_from_simulation()
+    cup_after = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    base_after = agent.base_link.pose.sp.p.copy()
+    torso_after = float(agent.controller.controllers["body"].qpos[0].cpu().numpy()[2])
+    cup_rise = float(cup_after[2] - cup_z_before)
+    cup_xy_shift = float(np.linalg.norm(cup_after[:2] - cup_before[:2]))
+    base_shift = float(np.linalg.norm(base_after[:2] - base_before[:2]))
+    head_error = float(
+        np.max(
+            np.abs(
+                agent.controller.controllers["body"].qpos[0].cpu().numpy()[:2]
+                - np.array([pan, tilt])
             )
-            r1 = env.log_motion(
-                "Stage 3 alternate approach", planner.static_manipulation,
-                reach_pose, n_init_qpos=100, disable_lift_joint=False,
-            )
-            _sync()
-            r2 = -1 if r1 == -1 else env.log_motion(
-                "Stage 3 alternate grasp", planner.static_manipulation,
-                grasp_pose, n_init_qpos=100, disable_lift_joint=False,
-            )
-            _sync()
-            if r2 != -1 and _tcp_at(agent, grasp_pose, tol=0.05):
-                planner.close_gripper()
-                _sync()
-                if cup_held():
-                    return True
-                planner.open_gripper()
-                _sync()
+        )
+    )
+    lifted = (
+        cup_rise >= 0.04
+        and bool(unwenv.agent.is_grasping(unwenv.cup).item())
+        and lift_arm_drift <= 0.03
+        and cup_xy_shift <= 0.03
+        and base_shift <= 0.03
+        and head_error <= 0.03
+    )
+    env.log_event(
+        "waypoint_complete" if lifted else "error",
+        "Waypoint 11 complete" if lifted else "Waypoint 11 lift check failed",
+        torso_before=torso_before,
+        torso_target=torso_target,
+        torso_after=torso_after,
+        cup_z_before=cup_z_before,
+        cup_z_after=float(cup_after[2]),
+        cup_rise=cup_rise,
+        arm_drift=lift_arm_drift,
+        cup_xy_shift=cup_xy_shift,
+        base_shift=base_shift,
+        head_error=head_error,
+    )
+    print(
+        "[WAYPOINT 11]",
+        "ok" if lifted else "failed",
+        "cup_rise=", round(cup_rise, 3),
+        "arm_drift=", round(lift_arm_drift, 4),
+        "torso=", round(torso_after, 3),
+    )
+    if not lifted:
         return False
 
-    got = run_grasp()
-    if not got:
-        got = alternate_grasp()
-    if not got:
-        # FALLBACK: the primary straight-arm grasp could not reach the cup - it
-        # sits just past the arm's reachable envelope (base->cup = ARM_OFFSET
-        # ~2-5 cm beyond mplib's real reach). Drive the base closer so the cup
-        # is inside the workspace, then re-run the arm align. Only fires when
-        # the primary grasp failed, so seeds that grasp fine are untouched.
-        env.log_event("phase", "Stage 3: fallback arm regrasp")
-        got = fallback_grasp()
-    if not got:
-        print("Grasp failed after retries; aborting")
-        env.log_event("error", "Grasp failed")
-        success = bool(unwenv.evaluate()["success"].item())
-        env.log_event("result", "Task aborted", success=success)
-        env.reset()
-        return success
-    report_stage("3 grasped")
+    env.log_event("waypoint", "12: drive cup to tray x alignment")
+    arm_hold = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+    base_before = agent.base_link.pose.sp.p.copy()
+    cup_before = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    tray_before = unwenv.tray.pose.p[0].cpu().numpy().copy()
+    distance = float(
+        np.dot(tray_before[:2] - cup_before[:2], _heading(agent)[:2])
+    )
+    result = env.log_motion(
+        "Waypoint 12 drive toward tray",
+        drive_fixed_arm,
+        distance,
+        v=0.10,
+        max_steps=500,
+    )
+    if result == -1:
+        env.log_event("error", "Waypoint 12 drive failed")
+        return False
+    planner.idle_steps(t=20)
+    planner.planner.update_from_simulation()
 
-    # ------------------------------------------------------------------ #
-    # STAGE 4: lift - raise the torso to the transport height, verify the
-    # cup rose with the jaws (>= 0.08 m) and stays near the TCP.
-    # ------------------------------------------------------------------ #
-    env.log_event("phase", "Stage 4: lift")
-    # pi-lens-ignore: unchecked-throwing-call-python
-    cup_z0 = float(unwenv.cup.pose.p[0][2])
-    ramp_torso(TORSO_GRASP + 0.04, steps=40)
-    # pi-lens-ignore: unchecked-throwing-call-python
-    probe_cz = float(unwenv.cup.pose.p[0][2])
-    if probe_cz >= cup_z0 + 0.015 and tcp_cup_gap() <= 0.12:
-        ramp_torso(TORSO_TRANSPORT, steps=110)
-    else:
-        ramp_torso(TORSO_GRASP, steps=40)
-    # pi-lens-ignore: unchecked-throwing-call-python
-    cz = float(unwenv.cup.pose.p[0][2])
-    if cz < cup_z0 + 0.05 or tcp_cup_gap() > 0.12:
-        # RE-GRASP FALLBACK: the cup didn't ride up with the jaws - a
-        # false-positive grasp (`is_grasping` fired but the cup never clamped,
-        # slipping out on the raise) - seed 48. Instead of aborting, re-grasp
-        # (drive base closer + re-run the align) and retry the lift once.
-        env.log_event("phase", "Stage 4: re-grasp (lift detect)")
-        ramp_torso(TORSO_GRASP, steps=80)
-        if fallback_grasp():
-            # pi-lens-ignore: unchecked-throwing-call-python
-            cup_z0 = float(unwenv.cup.pose.p[0][2])
-            ramp_torso(TORSO_TRANSPORT, steps=150)
-            # pi-lens-ignore: unchecked-throwing-call-python
-            cz = float(unwenv.cup.pose.p[0][2])
-    if cz < cup_z0 + 0.05 or tcp_cup_gap() > 0.12:
-        print(f"Lift failed (cup z {cz:.3f} vs {cup_z0 + 0.05:.3f}, "
-              f"gap {tcp_cup_gap():.3f}); aborting")
-        env.log_event("error", "Lift failed")
-        success = bool(unwenv.evaluate()["success"].item())
-        env.log_event("result", "Task aborted", success=success)
-        env.reset()
-        return success
-    report_stage("4 lifted")
+    cup_after = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    tray_after = unwenv.tray.pose.p[0].cpu().numpy().copy()
+    base_after = agent.base_link.pose.sp.p.copy()
+    arm_after = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
+    heading_after = _heading(agent)
+    cup_tray_x_error = abs(float(cup_after[0] - tray_after[0]))
+    cup_tray_y_error = abs(float(cup_after[1] - tray_after[1]))
+    tray_shift = float(np.linalg.norm(tray_after[:2] - tray_before[:2]))
+    base_shift = float(np.linalg.norm(base_after[:2] - base_before[:2]))
+    arm_drift = float(np.max(np.abs(arm_after - arm_hold)))
+    aligned = (
+        cup_tray_x_error <= 0.05
+        and cup_tray_y_error <= 0.35
+        and tray_shift <= 0.02
+        and arm_drift <= 0.05
+        and bool(unwenv.agent.is_grasping(unwenv.cup).item())
+        and float(np.dot(heading_after[:2], turn_direction[:2])) >= np.cos(ALIGN_TOL)
+    )
+    env.log_event(
+        "waypoint_complete" if aligned else "error",
+        "Waypoint 12 complete" if aligned else "Waypoint 12 tray alignment failed",
+        cup_before=cup_before[:2].tolist(),
+        cup_after=cup_after[:2].tolist(),
+        tray_xy=tray_after[:2].tolist(),
+        cup_tray_x_error=cup_tray_x_error,
+        cup_tray_y_error=cup_tray_y_error,
+        tray_shift=tray_shift,
+        base_shift=base_shift,
+        arm_drift=arm_drift,
+        grasped=bool(unwenv.agent.is_grasping(unwenv.cup).item()),
+        heading=heading_after.tolist(),
+    )
+    print(
+        "[WAYPOINT 12]",
+        "ok" if aligned else "failed",
+        "cup_tray_x_error=", round(cup_tray_x_error, 3),
+        "cup_tray_y_error=", round(cup_tray_y_error, 3),
+        "arm_drift=", round(arm_drift, 4),
+    )
+    if not aligned:
+        return False
 
-    # ------------------------------------------------------------------ #
-    # STAGE 5: transport to the tray - back up (south) for clearance, then
-    # the L-drive to (tray_x, tray_y - ARM_OFFSET): the cup over the tray
-    # center. Cup-attach monitor after each leg.
-    # ------------------------------------------------------------------ #
-    env.log_event("phase", "Stage 5: transport to tray")
-    b = agent.base_link.pose.p[0].cpu().numpy()
-    res = env.log_motion("Stage 5 back up", drive_to,
-                         np.array([b[0], b[1] - 0.15, 0.0]), 0.10, 0.01)
-    # the cup's z must stay near the stage-4 reference (the arm already
-    # lifted it; the back-up does not change the z - the old check compared
-    # against a pre-raise reference and falsely fired after the arm lift)
-    # pi-lens-ignore: unchecked-throwing-call-python
-    if res != 0 or tcp_cup_gap() > 0.15 or float(unwenv.cup.pose.p[0][2]) < cup_z0 + 0.04:
-        print("Stage 5 back-up failed / cup lost; aborting")
-        env.log_event("error", "Stage 5 back-up failed")
-        success = bool(unwenv.evaluate()["success"].item())
-        env.log_event("result", "Task aborted", success=success)
-        env.reset()
-        return success
-    # aim the BASE so the CUP (at its live offset from the base - the arm
-    # config after the grasp differs from the ideal straight offset) lands
-    # on the tray center
-    _off = unwenv.cup.pose.p[0].cpu().numpy()[:2] - agent.base_link.pose.p[0].cpu().numpy()[:2]
-    aim_tray = np.array([tray_center[0] - _off[0], tray_center[1] - _off[1]])
-    res = env.log_motion("Stage 5 drive to tray", l_drive, aim_tray, 0.10)
-    # closed-loop correction: the base drives land 3-30 cm off, but the cup's
-    # base must sit fully on the tray (center within ~0.105 m); re-aim at the
-    # CUP's live error and re-drive up to twice
-    for _c in range(2):
-        # pi-lens-ignore: unchecked-throwing-call-python
-        if float(np.linalg.norm(unwenv.cup.pose.p[0].cpu().numpy()[:2] - tray_center[:2])) <= 0.02:
+    env.log_event("waypoint", "13: RRT move cup over tray center")
+    from planners.oracle.oracle_common import hold_object_in_planner
+
+    hold_object_in_planner(
+        env,
+        planner,
+        unwenv,
+        unwenv.cup,
+        held=True,
+        who="takeitback_tray",
+    )
+    tcp_before = agent.tcp.pose.sp
+    cup_before = unwenv.cup.pose.sp
+    tray_before = unwenv.tray.pose.sp
+    tcp_to_cup = tcp_before.inv() * cup_before
+    target_cup = sapien.Pose(
+        p=[float(tray_before.p[0]), float(tray_before.p[1]), float(cup_before.p[2])],
+        q=cup_before.q,
+    )
+    target_tcp = target_cup * tcp_to_cup.inv()
+    base_before = agent.base_link.pose.sp.p.copy()
+    torso_before = float(agent.controller.controllers["body"].qpos[0].cpu().numpy()[2])
+    planner.gripper_state = GRIPPER_CLOSED
+    result = env.log_motion(
+        "Waypoint 13 RRT cup over tray",
+        planner.move_to_pose_with_RRTConnect,
+        target_tcp,
+        n_init_qpos=100,
+        disable_lift_joint=True,
+    )
+    rrt_ok = result != -1
+    planner.hold_head(pan, tilt, t=20, ramp=10)
+    cup_after = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    tray_after = unwenv.tray.pose.p[0].cpu().numpy().copy()
+    base_after = agent.base_link.pose.sp.p.copy()
+    torso_after = float(agent.controller.controllers["body"].qpos[0].cpu().numpy()[2])
+    head_error = float(
+        np.max(
+            np.abs(
+                agent.controller.controllers["body"].qpos[0].cpu().numpy()[:2]
+                - np.array([pan, tilt])
+            )
+        )
+    )
+    cup_tray_xy_error = float(np.linalg.norm(cup_after[:2] - tray_after[:2]))
+    cup_z_error = abs(float(cup_after[2] - cup_before.p[2]))
+    tray_shift = float(np.linalg.norm(tray_after[:2] - tray_before.p[:2]))
+    base_shift = float(np.linalg.norm(base_after[:2] - base_before[:2]))
+    aligned_over_tray = (
+        rrt_ok
+        and cup_tray_xy_error <= 0.06
+        and cup_z_error <= 0.03
+        and tray_shift <= 0.02
+        and base_shift <= 0.03
+        and abs(torso_after - torso_before) <= 0.03
+        and head_error <= 0.03
+        and bool(unwenv.agent.is_grasping(unwenv.cup).item())
+    )
+    env.log_event(
+        "waypoint_complete" if aligned_over_tray else "error",
+        "Waypoint 13 complete" if aligned_over_tray else "Waypoint 13 RRT tray placement failed",
+        rrt_ok=rrt_ok,
+        cup_tray_xy_error=cup_tray_xy_error,
+        cup_z_error=cup_z_error,
+        tray_shift=tray_shift,
+        base_shift=base_shift,
+        torso_shift=abs(torso_after - torso_before),
+        head_error=head_error,
+        grasped=bool(unwenv.agent.is_grasping(unwenv.cup).item()),
+    )
+    print(
+        "[WAYPOINT 13]",
+        "ok" if aligned_over_tray else "failed",
+        "rrt=", rrt_ok,
+        "cup_tray_error=", round(cup_tray_xy_error, 3),
+        "cup_z_error=", round(cup_z_error, 3),
+    )
+    if not aligned_over_tray:
+        return False
+
+    env.log_event("waypoint", "14: lower cup to 1 cm above tray")
+    arm_hold = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+    body_hold = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
+    body_hold[:2] = np.array([pan, tilt])
+    torso_before_lower = float(body_hold[2])
+    cup_before_lower = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    tray_pose = unwenv.tray.pose.p[0].cpu().numpy().copy()
+    tray_top = float(tray_pose[2] + unwenv.tray_half[2])
+    target_cup_z = float(tray_top + unwenv.cup_half[2] + TRAY_DROP_GAP)
+    torso_target = max(0.0, torso_before_lower - (cup_before_lower[2] - target_cup_z))
+    lower_arm_drift = 0.0
+    lower_steps = 100
+    for i in range(lower_steps):
+        body = body_hold.copy()
+        body[2] = torso_before_lower + (torso_target - torso_before_lower) * ((i + 1) / lower_steps)
+        planner._compose(arm_hold, body, np.array([0.0, 0.0]))
+        planner._step(planner._from_abs(planner._last_abs))
+        lower_arm_drift = max(
+            lower_arm_drift,
+            float(
+                np.max(
+                    np.abs(
+                        agent.controller.controllers["arm"].qpos[0].cpu().numpy()
+                        - arm_hold
+                    )
+                )
+            ),
+        )
+        if planner.truncated:
             break
-        _off = unwenv.cup.pose.p[0].cpu().numpy()[:2] - agent.base_link.pose.p[0].cpu().numpy()[:2]
-        _aim2 = np.array([tray_center[0] - _off[0], tray_center[1] - _off[1]])
-        res = env.log_motion("Stage 5 correction", l_drive, _aim2, 0.10)
-        _sync()
-    # pi-lens-ignore: unchecked-throwing-call-python
-    if res != 0 or tcp_cup_gap() > 0.15 or float(unwenv.cup.pose.p[0][2]) < cup_z0 + 0.04:
-        print("Stage 5 drive to tray failed / cup lost; aborting")
-        env.log_event("error", "Stage 5 drive to tray failed")
-        success = bool(unwenv.evaluate()["success"].item())
-        env.log_event("result", "Task aborted", success=success)
-        env.reset()
-        return success
-    report_stage("5 at tray")
+    planner.planner.update_from_simulation()
+    cup_after_lower = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    gap_after_lower = float(cup_after_lower[2] - unwenv.cup_half[2] - tray_top)
+    lowered = (
+        abs(gap_after_lower - TRAY_DROP_GAP) <= TRAY_DROP_TOL
+        and bool(unwenv.agent.is_grasping(unwenv.cup).item())
+        and lower_arm_drift <= 0.05
+    )
+    env.log_event(
+        "waypoint_complete" if lowered else "error",
+        "Waypoint 14 complete" if lowered else "Waypoint 14 lowering failed",
+        tray_top=tray_top,
+        target_cup_z=target_cup_z,
+        cup_z=float(cup_after_lower[2]),
+        gap=gap_after_lower,
+        torso_before=torso_before_lower,
+        torso_target=torso_target,
+        arm_drift=lower_arm_drift,
+    )
+    print(
+        "[WAYPOINT 14]",
+        "ok" if lowered else "failed",
+        "gap=", round(gap_after_lower, 3),
+        "arm_drift=", round(lower_arm_drift, 4),
+    )
+    if not lowered:
+        return False
 
-    # ------------------------------------------------------------------ #
-    # STAGE 6: place - lower the torso SLOWLY until the cup rests on the
-    # tray (the cup z stops decreasing).
-    # ------------------------------------------------------------------ #
-    env.log_event("phase", "Stage 6: lower onto tray")
-    # pi-lens-ignore: unchecked-throwing-call-python
-    tray_top = float(unwenv.tray.pose.p[0][2] + unwenv.tray_half[2])
-    lower_torso_until_cup_rests(tray_top)
-    report_stage("6 on tray")
-
-    # ------------------------------------------------------------------ #
-    # STAGE 7: release - partial open (the jaws just off the cup), no motion.
-    # ------------------------------------------------------------------ #
-    env.log_event("phase", "Stage 7: release")
-    # VERTICAL release: open the jaws slightly (the squeeze released), then
-    # LIFT the torso so the plates rise off the cup. A lateral jaw-open pops
-    # the round cup sideways and spins it (measured: 6 cm pop, av ~2.6 rad/s
-    # that never decays on the smooth tray - the is_static latch can never
-    # pass), because the plates' edges wedge the off-center cup. The vertical
-    # lift presses the cup DOWN onto the tray (no lateral kick) and leaves it
-    # free, so the cup stays put and quiet.
-    for _i in range(30):
-        _frac = (_i + 1) / 30
-        planner.change_gripper_state(t=1, gripper_state=-1.0 + _frac * 1.85)  # pyright: ignore[reportArgumentType]
-    _sync()
-    # NO torso lift here: lifting the plates catches the cup's rim and drags
-    # it up (measured: the cup rode up to z 1.09 with the rising plates and
-    # stayed there, precariously held - the is_static latch failed). The jaw
-    # open alone frees the cup at the rest height (measured pop ~1 cm, cup
-    # quiet - the same behaviour as the old design's release that latched
-    # with av 0.002).
-    if cup_held():
-        print("Release failed (still grasping); aborting")
-    if cup_held():
-        print("Release failed (still grasping); aborting")
-        env.log_event("error", "Release failed")
-        success = bool(unwenv.evaluate()["success"].item())
-        env.log_event("result", "Task aborted", success=success)
-        env.reset()
-        return success
-    # let the cup settle (the latch needs is_static); the release's pop can
-    # spin the cup and the spin decays slowly (measured: av 0.14 after 125 s),
-    # so wait long enough for the is_static latch
-    for _ in range(2500):
-        env.step(np.hstack([hold_a(), planner.gripper_state, hold_b(), _base_cmd()]))
-        # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
-        if (float(torch.linalg.norm(unwenv.cup.linear_velocity, dim=1)[0]) <= 0.1
-                # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
-                and float(torch.linalg.norm(unwenv.cup.angular_velocity, dim=1)[0]) <= 0.2):
+    env.log_event("waypoint", "15: release cup")
+    planner.gripper_state = GRIPPER_OPEN
+    release_body = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
+    release_body[:2] = np.array([pan, tilt])
+    release_arm_drift = 0.0
+    for _ in range(30):
+        planner._compose(arm_hold, release_body, np.array([0.0, 0.0]))
+        planner._step(planner._from_abs(planner._last_abs))
+        release_arm_drift = max(
+            release_arm_drift,
+            float(
+                np.max(
+                    np.abs(
+                        agent.controller.controllers["arm"].qpos[0].cpu().numpy()
+                        - arm_hold
+                    )
+                )
+            ),
+        )
+        if planner.truncated:
             break
-    unwenv.evaluate()
-    report_stage("7 released")
+    planner.planner.update_from_simulation()
+    hold_object_in_planner(
+        env,
+        planner,
+        unwenv,
+        unwenv.cup,
+        held=False,
+        who="takeitback_tray",
+    )
+    cup_after_release = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    tray_after_release = unwenv.tray.pose.p[0].cpu().numpy().copy()
+    released = (
+        not bool(unwenv.agent.is_grasping(unwenv.cup).item())
+        and float(np.linalg.norm(cup_after_release[:2] - tray_after_release[:2])) <= 0.12
+        and release_arm_drift <= 0.05
+    )
+    env.log_event(
+        "waypoint_complete" if released else "error",
+        "Waypoint 15 complete" if released else "Waypoint 15 release failed",
+        grasped=bool(unwenv.agent.is_grasping(unwenv.cup).item()),
+        cup_xy_error=float(np.linalg.norm(cup_after_release[:2] - tray_after_release[:2])),
+        arm_drift=release_arm_drift,
+    )
+    print(
+        "[WAYPOINT 15]",
+        "ok" if released else "failed",
+        "cup_xy_error=", round(float(np.linalg.norm(cup_after_release[:2] - tray_after_release[:2])), 3),
+    )
+    if not released:
+        return False
 
-    print("Task completed. Closing env...")
-    ev = unwenv.evaluate()
-    success = bool(ev["success"].item())
-    print("Success:", success,
-          "| cup xy:", np.round(unwenv.cup.pose.p[0].cpu().numpy()[:2], 3),
-          "z:", round(float(unwenv.cup.pose.p[0][2]), 3),
-          "| v:", round(float(torch.linalg.norm(unwenv.cup.linear_velocity, dim=1)[0]), 4),
-          "av:", round(float(torch.linalg.norm(unwenv.cup.angular_velocity, dim=1)[0]), 4))
-    env.log_event("result", "Task completed", success=success)
-    env.reset()
+    env.log_event("waypoint", "16: raise torso back")
+    restore_body = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
+    restore_body[:2] = np.array([pan, tilt])
+    torso_before_restore = float(restore_body[2])
+    restore_arm_drift = 0.0
+    restore_steps = 80
+    for i in range(restore_steps):
+        body = restore_body.copy()
+        body[2] = torso_before_restore + (torso_before_lower - torso_before_restore) * ((i + 1) / restore_steps)
+        planner._compose(arm_hold, body, np.array([0.0, 0.0]))
+        planner._step(planner._from_abs(planner._last_abs))
+        restore_arm_drift = max(
+            restore_arm_drift,
+            float(
+                np.max(
+                    np.abs(
+                        agent.controller.controllers["arm"].qpos[0].cpu().numpy()
+                        - arm_hold
+                    )
+                )
+            ),
+        )
+        if planner.truncated:
+            break
+    planner.planner.update_from_simulation()
+    final_body = agent.controller.controllers["body"].qpos[0].cpu().numpy()
+    final_cup = unwenv.cup.pose.p[0].cpu().numpy().copy()
+    final_tray = unwenv.tray.pose.p[0].cpu().numpy().copy()
+    final_head_error = float(np.max(np.abs(final_body[:2] - np.array([pan, tilt]))))
+    final_torso_error = abs(float(final_body[2]) - torso_before_lower)
+    final_xy_error = float(np.linalg.norm(final_cup[:2] - final_tray[:2]))
+    success = (
+        final_torso_error <= 0.03
+        and final_head_error <= 0.03
+        and restore_arm_drift <= 0.05
+        and final_xy_error <= 0.12
+        and not bool(unwenv.agent.is_grasping(unwenv.cup).item())
+    )
+    env.log_event(
+        "waypoint_complete" if success else "error",
+        "Waypoint 16 complete" if success else "Waypoint 16 torso restore failed",
+        torso_error=final_torso_error,
+        head_error=final_head_error,
+        arm_drift=restore_arm_drift,
+        cup_xy_error=final_xy_error,
+        grasped=bool(unwenv.agent.is_grasping(unwenv.cup).item()),
+        task_success=bool(unwenv.evaluate()["success"].item()),
+    )
+    print(
+        "[WAYPOINT 16]",
+        "ok" if success else "failed",
+        "torso_error=", round(final_torso_error, 3),
+        "cup_xy_error=", round(final_xy_error, 3),
+    )
     return success
 
 
 if __name__ == "__main__":
     args = parse_args()
-    SEED = args.seed
-    random.seed(SEED)
-    np.random.seed(SEED)
+    seed = args.seed
+    random.seed(seed)
+    np.random.seed(seed)
     from mplib.pymp import set_global_seed
-    set_global_seed(SEED)
-    torch.manual_seed(SEED)
+
+    set_global_seed(seed)
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
+        torch.cuda.manual_seed_all(seed)
 
-    print(f"[INFO] seed={SEED}, render_mode='{args.render_mode}', "
-          f"debug={args.debug}, info={args.info}, log_dir='{args.log_dir}'")
-
-    run_id = f"takeitback_tray_seed{SEED}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_id = f"takeitback_tray_wp16_seed{seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir = Path(args.log_dir) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -736,15 +1105,11 @@ if __name__ == "__main__":
         render_mode=None if args.no_video else args.render_mode,
         obs_mode="state" if args.no_video else "rgb",
         robot_uids="ds_fetch",
-        control_mode="pd_joint_delta_pos",
+        control_mode="pd_joint_pos",
         sim_config=dict(scene_config=dict(cpu_workers=1, enable_enhanced_determinism=True)),
     )
-    # mp4 side-videos from the three EXTERNAL scene cameras are NOT recorded:
-    # trajectory weight. The h5 keeps RGB observations from the robot-mounted
-    # cameras (obs_mode="rgb"), which is what the LeRobot converter encodes
-    # into per-camera videos.
-    if args.no_video:
-        print("[INFO] video recording disabled (--no-video)")
+    if not args.no_video:
+        env = StreamingVideoRecorder(env, output_dir=str(run_dir), video_fps=30)
     env = RecordEpisode(
         env,
         output_dir=str(run_dir),
@@ -752,20 +1117,24 @@ if __name__ == "__main__":
         save_trajectory=True,
         save_video=False,
         source_type="motionplanning",
-        source_desc="TakeItBack tray Fetch motion-planning demonstration",
+        source_desc="TakeItBack tray waypoints 1-16 review run",
     )
     env = PlannerLogger(
         env,
         log_dir=str(run_dir),
-        name=f"takeitback_tray_seed{SEED}",
+        name=f"takeitback_tray_wp16_seed{seed}",
         log_freq=args.log_freq,
         run_dir=run_dir,
     )
 
-    env.action_space.seed(SEED)
+    env.action_space.seed(seed)
     with capture_stdout(env.dir / "console.log"):
-        planning(env, SEED, debug=args.debug, info=args.info)
+        ok = planning(env, seed, debug=args.debug, info=args.info)
     env.close()
     _repair_trajectory_metadata(run_dir)
+
+    print(f"[INFO] waypoints_1_16={'ok' if ok else 'failed'}")
+    print(f"[INFO] run_dir={run_dir}")
     if not args.no_video:
-        print(f"[INFO] Video recording saved in '{run_dir}/'")
+        for video in sorted(run_dir.glob("video_*.mp4")):
+            print(f"[INFO] video={video}")
