@@ -1,14 +1,14 @@
 """Replay state-only ManiSkill trajectories with RGB rendering (post-pass).
 
 Reads a state-mode RecordEpisode trajectory (flattened obs, env_states) and
-reproduces it on another robot (e.g. upstream `fetch`) by setting env_states
-step by step; renders RGB sensor observations every `--stride`-th step and
+reproduces it on the project `ds_fetch` robot by setting env_states step by
+step; renders RGB sensor observations every `--stride`-th step and
 writes a NEW trajectory.h5 with dict-style obs (agent qpos/qvel + sensor rgb).
 The planner and the source env are never touched.
 
 Usage:
     uv run python -m utils.replay_rgb <source_run_dir> --output-dir <dir> \
-        --robot fetch --stride 10
+        --robot ds_fetch --stride 10
 """
 
 import argparse
@@ -29,7 +29,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_run_dir", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--robot", default="fetch")
+    parser.add_argument("--robot", default="ds_fetch")
     parser.add_argument("--stride", type=int, default=10)
     parser.add_argument("--episode", type=int, default=0,
                         help="trajectory index inside the source h5")

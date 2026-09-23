@@ -8,7 +8,7 @@ float32 memory.
 
 Usage:
     uv run python -m utils.convert_to_lerobot_stream --traj-path M.h5 \
-        --output-dir DIR --task-name "..." --fps 10 --image-size 128x128
+        --output-dir DIR --task-name "..." --fps 10
 """
 
 import json
@@ -25,7 +25,6 @@ import tyro
 
 from mani_skill.trajectory.convert_to_lerobot import (
     create_video_from_frames,
-    parse_image_size,
     process_episode,
 )
 
@@ -47,8 +46,7 @@ class Args:
     fps: int = 10
     task_name: str = "Unknown task"
     chunks_size: int = 100
-    image_size: str = "128x128"
-    robot_type: str = "fetch"
+    robot_type: str = "ds_fetch"
 
 
 def iter_episodes(h5_file: Path):
@@ -159,7 +157,9 @@ def vector_quantiles(
         offset += count
 
     if offset != total_frames:
-        raise ValueError(f"expected {total_frames} frames in {data_dir}, found {offset}")
+        raise ValueError(
+            f"expected {total_frames} frames in {data_dir}, found {offset}"
+        )
 
     result = {}
     for key, matrix in values.items():
@@ -178,11 +178,18 @@ def main(args: Args):
     if not input_path.exists():
         raise FileNotFoundError(input_path)
     base_path = Path(args.output_dir)
-    image_width, image_height = parse_image_size(args.image_size)
 
     it = iter_episodes(input_path)
     first_ep, rgb_cameras, state_dim = next(it)
     action_dim = first_ep["actions"].shape[1]
+    camera_sizes = {}
+    for cam in rgb_cameras:
+        frames = first_ep[f"rgb_{cam}"]
+        if frames.ndim != 4 or frames.shape[-1] != 3:
+            raise ValueError(
+                f"expected RGB frames (T, H, W, 3) for {cam}, got {frames.shape}"
+            )
+        camera_sizes[cam] = (frames.shape[2], frames.shape[1])  # width, height
 
     a_mom = [Moments() for _ in range(action_dim)]
     s_mom = [Moments() for _ in range(state_dim)] if state_dim else []
@@ -210,12 +217,17 @@ def main(args: Args):
 
         chunk_idx = ep_idx // args.chunks_size
         for cam in rgb_cameras:
+            frames = ep_data[f"rgb_{cam}"]
+            width, height = camera_sizes[cam]
+            if frames.shape[1:3] != (height, width):
+                raise ValueError(
+                    f"{cam} resolution changed: expected {height}x{width}, "
+                    f"got {frames.shape[1]}x{frames.shape[2]}"
+                )
             video_path = (base_path / "videos" / f"observation.images.{cam}" /
                           f"chunk-{chunk_idx:03d}" / f"file-{ep_idx:03d}.mp4")
-            create_video_from_frames(
-                ep_data[f"rgb_{cam}"], video_path, args.fps,
-                image_width, image_height)
-            sample = ep_data[f"rgb_{cam}"][:: max(1, length // 20)]
+            create_video_from_frames(frames, video_path, args.fps, width, height)
+            sample = frames[:: max(1, length // 20)]
             pix = (sample.astype(np.float32) / 255.0).reshape(-1, 3)
             for c in range(3):
                 cam_mom[cam][c].add(pix[:, c])
@@ -318,6 +330,8 @@ def main(args: Args):
             p = f"videos/observation.images.{cam}"
             em[f"{p}/chunk_index"] = chunk_idx
             em[f"{p}/file_index"] = i
+            em[f"{p}/from_timestamp"] = 0.0
+            em[f"{p}/to_timestamp"] = episode_lengths[i] / args.fps
         ep_rows.append(em)
     pd.DataFrame(ep_rows).to_parquet(
         base_path / "meta" / "episodes" / "chunk-000" / "file-000.parquet", index=False)
@@ -342,6 +356,7 @@ def main(args: Args):
             "dtype": "float32", "shape": [state_dim],
             "names": [f"joint_{i}" for i in range(state_dim)], "fps": float(args.fps)}
     for cam in rgb_cameras:
+        image_width, image_height = camera_sizes[cam]
         features[f"observation.images.{cam}"] = {
             "dtype": "video", "shape": [image_height, image_width, 3],
             "names": ["height", "width", "channels"],

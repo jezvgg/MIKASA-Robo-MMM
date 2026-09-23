@@ -121,7 +121,13 @@ runs/traces/takeitback_tray/seed_3/
 
 Для 100 сидов поменяйте `--num-episodes 1` на `--num-episodes 100`; все непустые эпизоды будут `traj_0`, `traj_1`, ... в одном HDF5. `--log-dir` необязателен. `--video-dir` — отдельная запись MP4, не RGB-данные в HDF5.
 
-`MyRoboCasa_TakeItBackTray-v1` всегда записывается в `pd_joint_pos` на 20 Hz (`control_timestep=0.05`). Для LeRobot 10 Hz сначала используйте `utils.subsample_h5 --stride 2`, затем `utils.convert_to_lerobot_stream --fps 10`; одного изменения `--fps` недостаточно — оно только меняет timestamps.
+`MyRoboCasa_TakeItBackTray-v1` всегда записывается в `pd_joint_pos` на 20 Hz
+(`control_timestep=0.05`). Для LeRobot 10 Hz сначала используйте
+`utils.subsample_h5 --stride 2`, затем `utils.convert_to_lerobot_stream --fps 10`;
+одного изменения `--fps` недостаточно — оно только меняет timestamps. Конвертер
+сохраняет native resolution каждого RGB sensor (DSFetch: `fetch_hand` 128×128,
+камеры на head 256×256) и записывает для каждой episode-camera `chunk_index`,
+`file_index`, `from_timestamp`, `to_timestamp`.
 
 ## Перезапись траекторий с RGB
 
@@ -134,7 +140,7 @@ uv run python -m utils.replay_rgb \
   runs/trajectories/takeitback_tray_seed3 \
   --output-dir runs/trajectories/takeitback_tray_seed3_rgb \
   --episode 0 \
-  --robot fetch \
+  --robot ds_fetch \
   --stride 10
 ```
 

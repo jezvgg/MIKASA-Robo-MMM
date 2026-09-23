@@ -5,6 +5,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from utils import convert_to_lerobot_stream as converter
 from utils.convert_to_lerobot_stream import Args, main, vector_quantiles
 
 
@@ -41,18 +42,44 @@ def test_vector_quantiles_reads_all_parquet_chunks(tmp_path):
             np.testing.assert_allclose(result[key][name], expected[i])
 
 
-def test_converter_writes_vector_quantiles(tmp_path):
+def test_converter_preserves_camera_sizes_and_writes_video_ranges(
+    tmp_path, monkeypatch
+):
     source = tmp_path / "trajectory.h5"
     output = tmp_path / "lerobot"
     actions = np.arange(3 * 13, dtype=np.float32).reshape(3, 13)
     states = np.arange(3 * 15, dtype=np.float32).reshape(3, 15)
+    camera_sizes = {
+        "fetch_hand": (128, 128),
+        "head_left": (256, 256),
+        "side_aux": (96, 160),
+    }
+    encoded_sizes = {}
+
+    def record_video(frames, path, fps, width, height):
+        camera = path.parts[-3].removeprefix("observation.images.")
+        assert frames.shape[1:3] == (height, width)
+        encoded_sizes[camera] = (width, height)
+
+    monkeypatch.setattr(converter, "create_video_from_frames", record_video)
     with h5py.File(source, "w") as file:
         episode = file.create_group("traj_0")
         episode.create_dataset("actions", data=actions)
-        episode.create_dataset("obs", data=states)
+        episode.create_group("obs/agent").create_dataset("qpos", data=states)
+        sensor_data = episode.create_group("obs/sensor_data")
+        for camera, (height, width) in camera_sizes.items():
+            sensor_data.create_group(camera).create_dataset(
+                "rgb", data=np.zeros((3, height, width, 3), dtype=np.uint8)
+            )
 
-    assert main(Args(str(source), str(output), task_name="test", robot_type="ds_fetch")) == 0
+    assert main(Args(str(source), str(output), task_name="test")) == 0
+    assert encoded_sizes == {
+        camera: (width, height)
+        for camera, (height, width) in camera_sizes.items()
+    }
     stats = json.loads((output / "meta" / "stats.json").read_text())
+    info = json.loads((output / "meta" / "info.json").read_text())
+    assert info["robot_type"] == "ds_fetch"
     episode = pq.read_table(
         output / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
     ).to_pydict()
@@ -62,6 +89,15 @@ def test_converter_writes_vector_quantiles(tmp_path):
         )
         for i, name in enumerate(("q01", "q10", "q50", "q90", "q99")):
             np.testing.assert_allclose(stats[key][name], expected[i])
-            np.testing.assert_allclose(
-                episode[f"stats/{key}/{name}"][0], expected[i]
-            )
+            np.testing.assert_allclose(episode[f"stats/{key}/{name}"][0], expected[i])
+
+    for camera, (height, width) in camera_sizes.items():
+        feature = info["features"][f"observation.images.{camera}"]
+        assert feature["shape"] == [height, width, 3]
+        assert feature["info"]["video.height"] == height
+        assert feature["info"]["video.width"] == width
+        video = f"videos/observation.images.{camera}"
+        assert episode[f"{video}/chunk_index"] == [0]
+        assert episode[f"{video}/file_index"] == [0]
+        assert episode[f"{video}/from_timestamp"] == [0.0]
+        assert episode[f"{video}/to_timestamp"] == [0.3]
