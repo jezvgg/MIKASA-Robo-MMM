@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "MIKASA Robo MMM benchmark"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    "mani_skill",
+    "mani_skill==3.0.0b22",
+    "mplib==0.2.1; sys_platform == 'linux'",
     "torch>=2.0",
     "pillow",
     "pandas",
@@ -16,6 +17,4 @@ dev = ["pytest"]
 
 [tool.uv]
 package = false
-
-[tool.uv.sources]
-mani_skill = { path = "../ManiSkill", editable = true }
+override-dependencies = ["mplib==0.2.1; sys_platform == 'linux'"]

@@ -1,6 +1,6 @@
 # MIKASA-Robo-MMM
 
-Benchmark VLA-памяти на базе ManiSkill. ManiSkill находится в `../ManiSkill` и подключается как editable-зависимость.
+Benchmark VLA-памяти на базе официального пакета ManiSkill 3.0.0b22 с PyPI; локальный `../ManiSkill` не используется. Для Linux motion-planning MPlib 0.2.1 намеренно переопределяет upstream-зависимость MPlib 0.1.1.
 
 ## Установка
 
