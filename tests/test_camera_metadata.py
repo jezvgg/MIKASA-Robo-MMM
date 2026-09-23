@@ -6,7 +6,7 @@ import h5py
 import numpy as np
 
 from utils.merge_replays import main as merge_replays
-from utils.replay_rgb import camera_config_metadata
+from utils.replay_rgb import camera_config_metadata, episode_outcome_metadata
 
 
 def test_camera_config_metadata_is_json_safe():
@@ -38,6 +38,23 @@ def test_camera_config_metadata_is_json_safe():
     assert metadata["pose"]["position"] == [1.0, 2.0, 3.0]
 
 
+def test_episode_outcome_uses_full_rate_rewards():
+    metadata = episode_outcome_metadata(
+        rewards=[1.0, 2.0, 3.0, 4.0],
+        success=[False, True, False, False],
+        terminated=[False, False, False, True],
+        truncated=[False, False, False, False],
+    )
+    assert metadata == {
+        "reward_sum": 10.0,
+        "reward_mean": 2.5,
+        "success": False,
+        "success_once": True,
+        "terminated": True,
+        "truncated": False,
+    }
+
+
 def test_merge_replays_preserves_camera_configs(tmp_path, monkeypatch):
     source = tmp_path / "replays"
     output = tmp_path / "merged"
@@ -52,7 +69,7 @@ def test_merge_replays_preserves_camera_configs(tmp_path, monkeypatch):
                 {
                     "env_info": {"env_id": "test"},
                     "commit_info": None,
-                    "episodes": [{"episode_seed": seed}],
+                    "episodes": [{"episode_id": seed + 10, "episode_seed": seed}],
                     "camera_configs": configs,
                 }
             )
@@ -64,4 +81,5 @@ def test_merge_replays_preserves_camera_configs(tmp_path, monkeypatch):
     merge_replays()
     merged = json.loads((output / "trajectory.json").read_text())
     assert merged["camera_configs"] == configs
-    assert len(merged["episodes"]) == 2
+    assert [episode["episode_id"] for episode in merged["episodes"]] == [0, 1]
+    assert [episode["source_episode_id"] for episode in merged["episodes"]] == [10, 11]

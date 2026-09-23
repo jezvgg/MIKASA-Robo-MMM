@@ -25,6 +25,26 @@ from mani_skill.trajectory import utils as trajectory_utils
 from mani_skill.utils import common
 
 
+def episode_outcome_metadata(rewards, success, terminated, truncated):
+    """Summarize full-rate episode outcomes before RGB stride subsampling."""
+    result = {}
+    rewards = np.asarray(rewards, dtype=np.float64).reshape(-1)
+    if rewards.size:
+        result["reward_sum"] = float(rewards.sum())
+        result["reward_mean"] = float(rewards.mean())
+    for name, values in (
+        ("success", success),
+        ("terminated", terminated),
+        ("truncated", truncated),
+    ):
+        values = np.asarray(values).reshape(-1)
+        if values.size:
+            result[name] = bool(values[-1])
+            if name == "success":
+                result["success_once"] = bool(values.any())
+    return result
+
+
 def camera_config_metadata(config):
     """Return the active sensor's JSON-safe CameraConfig fields."""
     def array(value):
@@ -124,6 +144,16 @@ def main():
         truncated = arrays["truncated"]
         src_flat_obs = traj["obs"][:] if traj["obs"].ndim == 2 else None
     T = len(actions)
+    episode_metadata = dict(
+        episode,
+        stride=args.stride,
+        replay_robot=args.robot,
+        obs="rgb",
+        elapsed_steps=(T - 1) // args.stride + 1,
+    )
+    episode_metadata.update(
+        episode_outcome_metadata(rewards, success, terminated, truncated)
+    )
 
     out_h5 = args.output_dir / "trajectory.h5"
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -182,8 +212,7 @@ def main():
     out_h5_path_tmp.replace(out_h5)
 
     meta = dict(src_json)
-    meta["episodes"] = [dict(episode, stride=args.stride, replay_robot=args.robot,
-                             obs="rgb", elapsed_steps=(T - 1) // args.stride + 1)]
+    meta["episodes"] = [episode_metadata]
     meta["camera_configs"] = camera_configs
     meta["source_desc"] = (f"state-only demo replayed on {args.robot}; "
                            f"rgb rendered from env_states every {args.stride} steps")

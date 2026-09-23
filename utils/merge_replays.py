@@ -46,6 +46,7 @@ def main():
             elif meta.get("camera_configs") != camera_configs:
                 raise ValueError(f"camera configs differ in {src_dir}")
             ep = meta["episodes"][0]
+            ep.setdefault("source_episode_id", ep.get("episode_id"))
             ep["episode_id"] = ep_id
             episodes.append(ep)
     meta = dict(env_info=env_info, commit_info=commit_info, episodes=episodes)

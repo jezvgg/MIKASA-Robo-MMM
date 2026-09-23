@@ -51,7 +51,10 @@ class Args:
 
 def iter_episodes(h5_file: Path):
     with h5py.File(h5_file, "r") as f:
-        keys = sorted(k for k in f.keys() if k.startswith("traj_"))
+        keys = sorted(
+            (k for k in f.keys() if k.startswith("traj_")),
+            key=lambda k: int(k[5:]),
+        )
         first = f[keys[0]]
         rgb_cameras = []
         if "obs/sensor_data" in first:
@@ -76,6 +79,9 @@ def iter_episodes(h5_file: Path):
                     ep["robot_state"] = traj["obs"][: len(ep["actions"])]
                 else:
                     ep["robot_state"] = traj["obs/agent/qpos"][: len(ep["actions"])]
+            for name in ("rewards", "success", "terminated", "truncated"):
+                if name in traj:
+                    ep[name] = traj[name][:]
             yield ep, rgb_cameras, state_dim
 
 
@@ -133,17 +139,20 @@ def quantile_stats(values: np.ndarray) -> dict[str, list[float]]:
     return {name: quantiles[i].tolist() for i, (_, name) in enumerate(QUANTILES)}
 
 
-def load_camera_configs(
-    traj_path: Path, camera_sizes: dict[str, tuple[int, int]]
-) -> dict[str, dict]:
-    """Load and validate camera settings from the HDF5 trajectory sidecar."""
+def load_trajectory_metadata(traj_path: Path) -> tuple[dict, Path]:
     metadata_path = traj_path.with_suffix(".json")
     if not metadata_path.is_file():
-        raise FileNotFoundError(
-            f"RGB trajectory needs camera config metadata: {metadata_path}; "
-            "create replay data with utils.replay_rgb"
-        )
+        raise FileNotFoundError(f"trajectory metadata not found: {metadata_path}")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if not isinstance(metadata.get("episodes"), list):
+        raise ValueError(f"{metadata_path} has no episodes list")
+    return metadata, metadata_path
+
+
+def load_camera_configs(
+    metadata: dict, metadata_path: Path, camera_sizes: dict[str, tuple[int, int]]
+) -> dict[str, dict]:
+    """Load and validate camera settings from trajectory metadata."""
     configs = metadata.get("camera_configs")
     if not isinstance(configs, dict):
         raise ValueError(f"{metadata_path} has no camera_configs mapping")
@@ -208,6 +217,15 @@ def main(args: Args):
     if not input_path.exists():
         raise FileNotFoundError(input_path)
     base_path = Path(args.output_dir)
+    source_metadata, metadata_path = load_trajectory_metadata(input_path)
+    source_episodes = source_metadata["episodes"]
+    with h5py.File(input_path, "r") as source_h5:
+        n_probe = sum(key.startswith("traj_") for key in source_h5.keys())
+    if len(source_episodes) != n_probe:
+        raise ValueError(
+            f"{metadata_path} has {len(source_episodes)} episodes, "
+            f"but {input_path} has {n_probe} trajectories"
+        )
 
     it = iter_episodes(input_path)
     first_ep, rgb_cameras, state_dim = next(it)
@@ -221,7 +239,9 @@ def main(args: Args):
             )
         camera_sizes[cam] = (frames.shape[2], frames.shape[1])  # width, height
     camera_configs = (
-        load_camera_configs(input_path, camera_sizes) if camera_sizes else {}
+        load_camera_configs(source_metadata, metadata_path, camera_sizes)
+        if camera_sizes
+        else {}
     )
 
     a_mom = [Moments() for _ in range(action_dim)]
@@ -231,12 +251,13 @@ def main(args: Args):
 
     episode_lengths = []
     episode_states = []
+    episode_metadata = []
     dfs = []
     global_index = 0
     total_frames = 0
     ep_idx = -1
 
-    def handle(ep_data):
+    def handle(ep_data, source_episode):
         nonlocal ep_idx, global_index, total_frames
         ep_idx += 1
         df = process_episode(
@@ -291,8 +312,54 @@ def main(args: Args):
                       if state is not None else None),
         })
 
+        rewards = np.asarray(ep_data.get("rewards", []), dtype=np.float64).reshape(-1)
+        reward_sum = source_episode.get("reward_sum")
+        reward_mean = source_episode.get("reward_mean")
+        if rewards.size:
+            if reward_sum is None:
+                reward_sum = float(rewards.sum())
+            if reward_mean is None:
+                reward_mean = float(rewards.mean())
+        success_values = np.asarray(ep_data.get("success", [])).reshape(-1)
+        success = source_episode.get("success")
+        success_once = source_episode.get("success_once")
+        if success is None and success_values.size:
+            success = bool(success_values[-1])
+        if success_once is None and success_values.size:
+            success_once = bool(success_values.any())
+        terminated = source_episode.get("terminated")
+        truncated = source_episode.get("truncated")
+        if terminated is None:
+            values = np.asarray(ep_data.get("terminated", [])).reshape(-1)
+            if values.size:
+                terminated = bool(values[-1])
+        if truncated is None:
+            values = np.asarray(ep_data.get("truncated", [])).reshape(-1)
+            if values.size:
+                truncated = bool(values[-1])
+        elapsed_steps = source_episode.get("elapsed_steps")
+        if elapsed_steps is None:
+            elapsed_steps = length
+
+        details = dict(source_episode)
+        details.update({
+            "episode_index": ep_idx,
+            "source_episode_id": source_episode.get(
+                "source_episode_id", source_episode.get("episode_id")
+            ),
+            "episode_length": length,
+            "elapsed_steps": int(elapsed_steps),
+            "duration_s": length / args.fps,
+            "success": None if success is None else bool(success),
+            "success_once": None if success_once is None else bool(success_once),
+            "reward_sum": None if reward_sum is None else float(reward_sum),
+            "reward_mean": None if reward_mean is None else float(reward_mean),
+            "terminated": None if terminated is None else bool(terminated),
+            "truncated": None if truncated is None else bool(truncated),
+        })
+        episode_metadata.append(details)
+
     # pre-create directories for the full episode count
-    n_probe = sum(1 for _ in h5py.File(input_path, "r").keys())
     num_chunks = (n_probe + args.chunks_size - 1) // args.chunks_size
     (base_path / "meta" / "episodes" / "chunk-000").mkdir(parents=True, exist_ok=True)
     for c in range(num_chunks):
@@ -302,10 +369,10 @@ def main(args: Args):
              f"chunk-{c:03d}").mkdir(parents=True, exist_ok=True)
 
     # process the first episode, then the rest
-    handle(first_ep)
+    handle(first_ep, source_episodes[0])
     del first_ep
-    for ep_data, _cams, _sd in it:
-        handle(ep_data)
+    for source_index, (ep_data, _cams, _sd) in enumerate(it, start=1):
+        handle(ep_data, source_episodes[source_index])
         del ep_data
         if (ep_idx + 1) % 50 == 0:
             logger.info(f"episodes processed: {ep_idx + 1}/{n_probe}")
@@ -335,11 +402,25 @@ def main(args: Args):
     ep_rows = []
     for i, st in enumerate(episode_states):
         chunk_idx = chunk_of_i(i, args.chunks_size)
+        details = episode_metadata[i]
         em = {
             "episode_index": i, "data/chunk_index": chunk_idx, "data/file_index": 0,
             "dataset_from_index": sum(episode_lengths[:i]),
             "dataset_to_index": sum(episode_lengths[: i + 1]),
             "tasks": [args.task_name], "length": episode_lengths[i],
+            "source_episode_id": details.get(
+                "source_episode_id", details.get("episode_id")
+            ),
+            "episode_seed": details.get("episode_seed"),
+            "elapsed_steps": details["elapsed_steps"],
+            "duration_s": details["duration_s"],
+            "success": details["success"],
+            "success_once": details["success_once"],
+            "reward_sum": details["reward_sum"],
+            "reward_mean": details["reward_mean"],
+            "terminated": details["terminated"],
+            "truncated": details["truncated"],
+            "control_mode": details.get("control_mode"),
             "meta/episodes/chunk_index": chunk_idx, "meta/episodes/file_index": 0,
             "stats/action/min": st["actions"]["min"],
             "stats/action/max": st["actions"]["max"],
@@ -371,7 +452,31 @@ def main(args: Args):
 
     pd.DataFrame({"task_index": [0]}, index=[args.task_name]).to_parquet(
         base_path / "meta" / "tasks.parquet", index=True)
-    del episode_states, ep_rows
+
+    source_rlds_metadata = dict(source_metadata)
+    source_rlds_metadata.update({
+        "env_id": source_metadata.get("env_id")
+        or source_metadata.get("env_info", {}).get("env_id"),
+        "task_name": args.task_name,
+        "num_episodes": len(episode_metadata),
+        "episode_lengths": episode_lengths,
+        "episode_durations_s": [details["duration_s"] for details in episode_metadata],
+        "success_once": [details["success_once"] for details in episode_metadata],
+        "episode_seeds": [details.get("episode_seed") for details in episode_metadata],
+        "episodes": episode_metadata,
+    })
+    if any(details["reward_sum"] is not None for details in episode_metadata):
+        source_rlds_metadata["reward_sums"] = [
+            details["reward_sum"] for details in episode_metadata
+        ]
+        source_rlds_metadata["reward_means"] = [
+            details["reward_mean"] for details in episode_metadata
+        ]
+    (base_path / "meta" / "source_rlds_metadata.json").write_text(
+        json.dumps(source_rlds_metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    del episode_states, episode_metadata, ep_rows
 
     features = {
         "action": {"dtype": "float32", "shape": [action_dim],

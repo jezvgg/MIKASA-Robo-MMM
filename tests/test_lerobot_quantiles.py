@@ -6,7 +6,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from utils import convert_to_lerobot_stream as converter
-from utils.convert_to_lerobot_stream import Args, main, vector_quantiles
+from utils.convert_to_lerobot_stream import Args, iter_episodes, main, vector_quantiles
 
 
 def test_vector_quantiles_reads_all_parquet_chunks(tmp_path):
@@ -42,6 +42,19 @@ def test_vector_quantiles_reads_all_parquet_chunks(tmp_path):
             np.testing.assert_allclose(result[key][name], expected[i])
 
 
+def test_iter_episodes_uses_numeric_trajectory_order(tmp_path):
+    source = tmp_path / "trajectory.h5"
+    with h5py.File(source, "w") as file:
+        for episode_id in (10, 2):
+            episode = file.create_group(f"traj_{episode_id}")
+            episode.create_dataset(
+                "actions", data=np.full((1, 13), episode_id, dtype=np.float32)
+            )
+
+    episodes = [episode["actions"][0, 0] for episode, _, _ in iter_episodes(source)]
+    assert episodes == [2, 10]
+
+
 def test_converter_preserves_camera_sizes_and_writes_video_ranges(
     tmp_path, monkeypatch
 ):
@@ -66,6 +79,10 @@ def test_converter_preserves_camera_sizes_and_writes_video_ranges(
     with h5py.File(source, "w") as file:
         episode = file.create_group("traj_0")
         episode.create_dataset("actions", data=actions)
+        episode.create_dataset("rewards", data=np.array([1.0, 2.0, 3.0]))
+        episode.create_dataset("success", data=np.array([False, False, True]))
+        episode.create_dataset("terminated", data=np.array([False, False, True]))
+        episode.create_dataset("truncated", data=np.array([False, False, False]))
         episode.create_group("obs/agent").create_dataset("qpos", data=states)
         sensor_data = episode.create_group("obs/sensor_data")
         for camera, (height, width) in camera_sizes.items():
@@ -92,9 +109,24 @@ def test_converter_preserves_camera_sizes_and_writes_video_ranges(
                     "shader_pack_config": {},
                 },
             }
-    source.with_suffix(".json").write_text(
-        json.dumps({"camera_configs": camera_configs})
-    )
+    source_metadata = {
+        "env_info": {"env_id": "test-env"},
+        "episodes": [
+            {
+                "episode_id": 7,
+                "episode_seed": 42,
+                "elapsed_steps": 3,
+                "success": True,
+                "success_once": True,
+                "reward_sum": 6.0,
+                "reward_mean": 2.0,
+                "control_mode": "pd_joint_pos",
+                "reset_kwargs": {"seed": 42},
+            }
+        ],
+        "camera_configs": camera_configs,
+    }
+    source.with_suffix(".json").write_text(json.dumps(source_metadata))
 
     assert main(Args(str(source), str(output), task_name="test")) == 0
     assert encoded_sizes == {
@@ -107,6 +139,16 @@ def test_converter_preserves_camera_sizes_and_writes_video_ranges(
     episode = pq.read_table(
         output / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
     ).to_pydict()
+    assert episode["source_episode_id"] == [7]
+    assert episode["episode_seed"] == [42]
+    assert episode["elapsed_steps"] == [3]
+    assert episode["duration_s"] == [0.3]
+    assert episode["success"] == [True]
+    assert episode["success_once"] == [True]
+    assert episode["reward_sum"] == [6.0]
+    assert episode["reward_mean"] == [2.0]
+    assert episode["terminated"] == [True]
+    assert episode["truncated"] == [False]
     for key, values in (("action", actions), ("observation.state", states)):
         expected = np.quantile(
             values, (0.01, 0.10, 0.50, 0.90, 0.99), axis=0, method="linear"
@@ -114,6 +156,18 @@ def test_converter_preserves_camera_sizes_and_writes_video_ranges(
         for i, name in enumerate(("q01", "q10", "q50", "q90", "q99")):
             np.testing.assert_allclose(stats[key][name], expected[i])
             np.testing.assert_allclose(episode[f"stats/{key}/{name}"][0], expected[i])
+
+    source_rlds = json.loads(
+        (output / "meta" / "source_rlds_metadata.json").read_text()
+    )
+    assert source_rlds["env_id"] == "test-env"
+    assert source_rlds["num_episodes"] == 1
+    assert source_rlds["episode_lengths"] == [3]
+    assert source_rlds["episode_durations_s"] == [0.3]
+    assert source_rlds["episode_seeds"] == [42]
+    assert source_rlds["success_once"] == [True]
+    assert source_rlds["reward_sums"] == [6.0]
+    assert source_rlds["episodes"][0]["reset_kwargs"] == {"seed": 42}
 
     for camera, (height, width) in camera_sizes.items():
         feature = info["features"][f"observation.images.{camera}"]

@@ -127,7 +127,8 @@ runs/traces/takeitback_tray/seed_3/
 одного изменения `--fps` недостаточно — оно только меняет timestamps. Конвертер
 сохраняет native resolution каждого RGB sensor (DSFetch: `fetch_hand` 128×128,
 камеры на head 256×256) и записывает для каждой episode-camera `chunk_index`,
-`file_index`, `from_timestamp`, `to_timestamp`.
+`file_index`, `from_timestamp`, `to_timestamp`. Seed, duration, success и reward
+сохраняются в `meta/source_rlds_metadata.json` и episode metadata parquet.
 
 ## Перезапись траекторий с RGB
 
