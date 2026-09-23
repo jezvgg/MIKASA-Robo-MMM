@@ -1,0 +1,104 @@
+{
+  "profile_version": 1,
+  "env_id": "MikasaSameDrawer-v0",
+  "task_variant": "three_drawers_apple_interlude",
+  "robot_reference": {
+    "repository": "https://github.com/jezvgg/MIKASA-Robo-MMM",
+    "commit": "4c5c8b3de941565ee2d57b153a10254fe64c2849",
+    "class": "DSFetch",
+    "uid": "ds_fetch"
+  },
+  "env_kwargs": {
+    "robot_uids": "ds_fetch",
+    "control_mode": "pd_joint_pos",
+    "num_envs": 1,
+    "scene_idx": 0,
+    "sim_backend": "cpu",
+    "render_backend": "sapien_cuda",
+    "sim_config": {
+      "control_freq": 20,
+      "sim_freq": 100
+    }
+  },
+  "task": {
+    "horizon": 1600,
+    "n_drawers": 4,
+    "drawer_choices": [
+      1,
+      2,
+      3
+    ],
+    "init_open_range": [
+      0.1,
+      0.16
+    ],
+    "closed_tol": 0.005,
+    "wrong_open_tol": 0.02,
+    "open_success": 0.1,
+    "hold_steps": 10,
+    "apple_z_band": [
+      0.0,
+      0.12
+    ],
+    "plate_radius": 0.1,
+    "apple_along": 0.85,
+    "apple_dock_toward": 0.15,
+    "plate_from_centre": 0.125,
+    "apple_from_plate": 0.28,
+    "robot_jitter_xy": 0.02,
+    "robot_jitter_yaw": 0.03,
+    "spawn_jitter_xy": 0.02
+  },
+  "data": {
+    "control_hz": 20,
+    "policy_hz": 10,
+    "action_repeat": 2,
+    "action_dim": 13,
+    "proprio_dim": 12,
+    "debug_global_state_dim": 3,
+    "lerobot_format": "v3.0",
+    "rgb_only": true,
+    "max_instruction_tokens": 100
+  },
+  "cameras": {
+    "left_base_camera_link": {
+      "width": 256,
+      "height": 256,
+      "fov": 1.5
+    },
+    "fetch_hand": {
+      "width": 128,
+      "height": 128,
+      "fov": 2.0
+    },
+    "right_base_camera_link": {
+      "width": 256,
+      "height": 256,
+      "fov": 1.5
+    }
+  },
+  "validation": {
+    "successful_unique_seeds": 100,
+    "exclude_all_training_attempts": true,
+    "exclude_development_seeds": true,
+    "replace_after_policy_failure": false
+  },
+  "runtime_packages": {
+    "mani_skill": "3.0.0b22",
+    "sapien": "3.0.3",
+    "mplib": "0.2.1",
+    "numpy": "1.26.4",
+    "torch": "2.14.0",
+    "gymnasium": "0.29.1",
+    "h5py": "3.16.0"
+  },
+  "planner": {
+    "module": "planners.same_drawer_planner",
+    "waypoint_noise_m": 0.005,
+    "noise_seed_offset": 200003,
+    "noise_scope": "free_approach_stow_base_lift_hover_retract",
+    "noise_distribution": "independent_uniform_world_axes",
+    "contact_grasp_noise": false,
+    "cue_gaze": "drawer_column_independent_of_answer"
+  }
+}
