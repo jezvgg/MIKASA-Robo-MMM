@@ -133,6 +133,36 @@ def quantile_stats(values: np.ndarray) -> dict[str, list[float]]:
     return {name: quantiles[i].tolist() for i, (_, name) in enumerate(QUANTILES)}
 
 
+def load_camera_configs(
+    traj_path: Path, camera_sizes: dict[str, tuple[int, int]]
+) -> dict[str, dict]:
+    """Load and validate camera settings from the HDF5 trajectory sidecar."""
+    metadata_path = traj_path.with_suffix(".json")
+    if not metadata_path.is_file():
+        raise FileNotFoundError(
+            f"RGB trajectory needs camera config metadata: {metadata_path}; "
+            "create replay data with utils.replay_rgb"
+        )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    configs = metadata.get("camera_configs")
+    if not isinstance(configs, dict):
+        raise ValueError(f"{metadata_path} has no camera_configs mapping")
+
+    missing = set(camera_sizes) - configs.keys()
+    if missing:
+        raise ValueError(f"{metadata_path} lacks camera configs: {sorted(missing)}")
+    for camera, (width, height) in camera_sizes.items():
+        config = configs[camera]
+        if not isinstance(config, dict):
+            raise ValueError(f"invalid camera config for {camera} in {metadata_path}")
+        if (config.get("width"), config.get("height")) != (width, height):
+            raise ValueError(
+                f"{camera} config resolution does not match RGB frames: "
+                f"{config.get('height')}x{config.get('width')} vs {height}x{width}"
+            )
+    return {camera: configs[camera] for camera in camera_sizes}
+
+
 def vector_quantiles(
     data_dir: Path, feature_dims: dict[str, int], total_frames: int
 ) -> dict[str, dict[str, list[float]]]:
@@ -190,6 +220,9 @@ def main(args: Args):
                 f"expected RGB frames (T, H, W, 3) for {cam}, got {frames.shape}"
             )
         camera_sizes[cam] = (frames.shape[2], frames.shape[1])  # width, height
+    camera_configs = (
+        load_camera_configs(input_path, camera_sizes) if camera_sizes else {}
+    )
 
     a_mom = [Moments() for _ in range(action_dim)]
     s_mom = [Moments() for _ in range(state_dim)] if state_dim else []
@@ -363,7 +396,8 @@ def main(args: Args):
             "info": {"video.fps": float(args.fps), "video.height": image_height,
                      "video.width": image_width, "video.channels": 3,
                      "video.codec": "mp4v", "video.pix_fmt": "yuv420p",
-                     "video.is_depth_map": False, "has_audio": False},
+                     "video.is_depth_map": False, "has_audio": False,
+                     "camera_config": camera_configs[cam]},
         }
 
     data_mb = int(sum(f.stat().st_size for f in (base_path / "data").rglob("*.parquet")) / 1048576)

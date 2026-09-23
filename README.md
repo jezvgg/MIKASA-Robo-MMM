@@ -144,7 +144,7 @@ uv run python -m utils.replay_rgb \
   --stride 10
 ```
 
-Скрипт восстанавливает `env_states`, рендерит RGB каждые 10 control steps и пишет новый `trajectory.h5`/`trajectory.json`. Исходный файл не изменяется. `--stride 1` сохраняет каждый шаг. `--episode` — индекс `traj_N` в исходном HDF5.
+Скрипт восстанавливает `env_states`, рендерит RGB каждые 10 control steps и пишет новый `trajectory.h5`/`trajectory.json`. Sidecar сохраняет активные `CameraConfig` каждого sensor; `utils.subsample_h5` и `utils.merge_replays` сохраняют эти настройки. Конвертер требует этот sidecar для RGB input и переносит параметры в `meta/info.json` под `features[observation.images.<camera>].info.camera_config`. Исходный файл не изменяется. `--stride 1` сохраняет каждый шаг. `--episode` — индекс `traj_N` в исходном HDF5.
 
 ### Все эпизоды: upstream replayer
 

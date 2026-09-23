@@ -25,6 +25,44 @@ from mani_skill.trajectory import utils as trajectory_utils
 from mani_skill.utils import common
 
 
+def camera_config_metadata(config):
+    """Return the active sensor's JSON-safe CameraConfig fields."""
+    def array(value):
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().numpy()
+        return np.asarray(value)
+
+    pose = config.pose
+    shader = config.shader_config
+    mount_name = (
+        None
+        if config.mount is None
+        else str(getattr(config.mount, "name", config.mount))
+    )
+    return {
+        "uid": config.uid,
+        "width": int(config.width),
+        "height": int(config.height),
+        "fov": None if config.fov is None else float(config.fov),
+        "intrinsic": (
+            None if config.intrinsic is None else array(config.intrinsic).tolist()
+        ),
+        "near": float(config.near),
+        "far": float(config.far),
+        "pose": {
+            "position": array(pose.p).reshape(-1).tolist(),
+            "quaternion_wxyz": array(pose.q).reshape(-1).tolist(),
+        },
+        "entity_uid": config.entity_uid,
+        "mount_name": mount_name,
+        "shader_config": {
+            "shader_pack": shader.shader_pack,
+            "texture_names": shader.texture_names,
+            "shader_pack_config": shader.shader_pack_config,
+        },
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_run_dir", type=Path)
@@ -52,6 +90,17 @@ def main():
     env = gym.make(env_info["env_id"], **env_kwargs)
     base_env = env.unwrapped
     obs, _ = env.reset(seed=seed, options={"reconfigure": True})
+    sensor_names = list(obs["sensor_data"].keys())
+    sensor_configs = base_env._sensor_configs
+    missing_configs = set(sensor_names) - sensor_configs.keys()
+    if missing_configs:
+        env.close()
+        raise ValueError(
+            f"missing camera configs for sensors: {sorted(missing_configs)}"
+        )
+    camera_configs = {
+        name: camera_config_metadata(sensor_configs[name]) for name in sensor_names
+    }
 
     with h5py.File(src_h5_path, "r") as src:
         traj = src[f"traj_{args.episode}"]
@@ -93,7 +142,6 @@ def main():
         # not necessarily stride-aligned; carry the terminal values over
         for name in ("success", "terminated", "truncated"):
             g[name][-1] = bool(arrays[name][-1])
-        sensor_names = [k for k in obs["sensor_data"].keys()]
         cam_groups = {}
         for cam in sensor_names:
             grp = g.create_group(f"obs/sensor_data/{cam}")
@@ -136,6 +184,7 @@ def main():
     meta = dict(src_json)
     meta["episodes"] = [dict(episode, stride=args.stride, replay_robot=args.robot,
                              obs="rgb", elapsed_steps=(T - 1) // args.stride + 1)]
+    meta["camera_configs"] = camera_configs
     meta["source_desc"] = (f"state-only demo replayed on {args.robot}; "
                            f"rgb rendered from env_states every {args.stride} steps")
     (args.output_dir / "trajectory.json").write_text(

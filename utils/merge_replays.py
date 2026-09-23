@@ -1,8 +1,8 @@
 """Merge per-seed replay h5 files into one RecordEpisode-style trajectory.
 
 Reads tmp_test/replay_dataset/seed*/trajectory.{h5,json} and writes
-tmp_test/lerobot_src/trajectory.h5 with groups traj_0..traj_N plus a merged
-trajectory.json (episode_id remapped, reset_kwargs/seeds preserved).
+`tmp_test/lerobot_src/trajectory.h5` with groups traj_0..traj_N. The merged
+trajectory.json preserves episode metadata and shared camera configs.
 
 Usage:
     uv run python -m utils.merge_replays --src tmp_test/replay_dataset \
@@ -30,6 +30,7 @@ def main():
     episodes = []
     env_info = None
     commit_info = None
+    camera_configs = None
     with h5py.File(out_h5, "w") as dst:
         for ep_id, seed in enumerate(seeds):
             src_dir = args.src / f"seed{seed}"
@@ -40,10 +41,16 @@ def main():
                     commit_info = meta.get("commit_info")
                 src.copy(src["traj_0"], dst, name=f"traj_{ep_id}")
             meta = json.loads((src_dir / "trajectory.json").read_text())
+            if ep_id == 0:
+                camera_configs = meta.get("camera_configs")
+            elif meta.get("camera_configs") != camera_configs:
+                raise ValueError(f"camera configs differ in {src_dir}")
             ep = meta["episodes"][0]
             ep["episode_id"] = ep_id
             episodes.append(ep)
     meta = dict(env_info=env_info, commit_info=commit_info, episodes=episodes)
+    if camera_configs is not None:
+        meta["camera_configs"] = camera_configs
     # merged metadata comes from the seed file that produced it; keep global
     # source_type/desc from the first seed's json
     first = json.loads(

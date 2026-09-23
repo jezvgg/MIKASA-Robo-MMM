@@ -62,6 +62,7 @@ def test_converter_preserves_camera_sizes_and_writes_video_ranges(
         encoded_sizes[camera] = (width, height)
 
     monkeypatch.setattr(converter, "create_video_from_frames", record_video)
+    camera_configs = {}
     with h5py.File(source, "w") as file:
         episode = file.create_group("traj_0")
         episode.create_dataset("actions", data=actions)
@@ -71,6 +72,29 @@ def test_converter_preserves_camera_sizes_and_writes_video_ranges(
             sensor_data.create_group(camera).create_dataset(
                 "rgb", data=np.zeros((3, height, width, 3), dtype=np.uint8)
             )
+            camera_configs[camera] = {
+                "uid": camera,
+                "width": width,
+                "height": height,
+                "fov": 1.5,
+                "intrinsic": None,
+                "near": 0.01,
+                "far": 100.0,
+                "pose": {
+                    "position": [0.0, 0.0, 0.0],
+                    "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                },
+                "entity_uid": "head_camera_link",
+                "mount_name": None,
+                "shader_config": {
+                    "shader_pack": "minimal",
+                    "texture_names": {},
+                    "shader_pack_config": {},
+                },
+            }
+    source.with_suffix(".json").write_text(
+        json.dumps({"camera_configs": camera_configs})
+    )
 
     assert main(Args(str(source), str(output), task_name="test")) == 0
     assert encoded_sizes == {
@@ -96,6 +120,7 @@ def test_converter_preserves_camera_sizes_and_writes_video_ranges(
         assert feature["shape"] == [height, width, 3]
         assert feature["info"]["video.height"] == height
         assert feature["info"]["video.width"] == width
+        assert feature["info"]["camera_config"] == camera_configs[camera]
         video = f"videos/observation.images.{camera}"
         assert episode[f"{video}/chunk_index"] == [0]
         assert episode[f"{video}/file_index"] == [0]
