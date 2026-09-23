@@ -90,6 +90,7 @@ from mani_skill.utils.wrappers import RecordEpisode
 
 from planners.oracle import oracle_common as common
 from utils.mikasa.seeding import seed_everything
+from utils.mikasa.waypoint_noise import WaypointNoise
 
 # The mplib-dependent imports live inside oracle_common's factories, so this module
 # imports on a Mac and tests/test_season_dish_oracle.py runs the *real* solve()
@@ -1272,6 +1273,8 @@ def solve(
     *,
     planner_factory=default_planner_factory,
     grasp_info=approach_aligned_grasp_info,
+    waypoint_noise_seed=None,
+    waypoint_noise_m=0.005,
 ):
     """`_solve` under this oracle's own RRT budget (`PLANNING_TIME_S`).
 
@@ -1282,6 +1285,7 @@ def solve(
         return _solve(
             env, seed=seed, debug=debug, vis=vis, blind=blind,
             planner_factory=planner_factory, grasp_info=grasp_info,
+            waypoint_noise_seed=waypoint_noise_seed, waypoint_noise_m=waypoint_noise_m,
         )
 
 
@@ -1294,6 +1298,8 @@ def _solve(
     *,
     planner_factory=default_planner_factory,
     grasp_info=approach_aligned_grasp_info,
+    waypoint_noise_seed=None,
+    waypoint_noise_m=0.005,
 ):
     """Season the dish with the condiment the recipe asked for. `-1` on a failed
     plan, the gym 5-tuple otherwise (a physical miss included, D6).
@@ -1314,9 +1320,21 @@ def _solve(
     planner = planner_factory(env, debug, vis)
     task = env.unwrapped
     rng = np.random.default_rng(seed)  # the blind arm's draw, deterministic per seed
+    noise = WaypointNoise(
+        int(seed or 0) + 200003 if waypoint_noise_seed is None else waypoint_noise_seed,
+        waypoint_noise_m, lambda message, **data: say(env, message, **data),
+    )
 
     # -- STAGE 0: sit through the cue -------------------------------------------
-    info = wait_cue(env, planner, info)
+    # Look at the station midpoint, independent of which condiment the cue names.
+    # Thus head proprioception does not encode the answer after the cue disappears.
+    mid = (_np(task.shaker.pose.p)[0] + _np(task.condiment_bottle.pose.p)[0]) / 2
+    local = (task.agent.base_link.pose[0].sp.inv() * sapien.Pose(mid)).p
+    pan = float(np.clip(np.arctan2(local[1], local[0]), -0.6, 0.6))
+    gaze = planner.hold_head(pan=pan, tilt=0.45, t=12, ramp=10)
+    if gaze == -1:
+        return fail(env, "look at the cue station")
+    info = wait_cue(env, planner, gaze[-1])
     if info == -1:
         return info
 
@@ -1389,6 +1407,8 @@ def _solve(
     line_now = [APPROACH_BY_LINE]
 
     def try_grasp(env_, planner_, task_, obj_, grasp_, reach_):     # the stage's pad and line
+        # Perturb only the free approach; the contact grasp remains geometry-derived.
+        reach_ = noise.pose("grasp_approach", reach_)
         return _try_grasp_with_pad(env_, planner_, task_, obj_, grasp_, reach_,
                                    target_pad=pad_now[0], by_line=line_now[0])
 
@@ -1884,6 +1904,8 @@ def _solve(
         hang = max(0.0, float(grasp.p[2]) - float(mesh.bounds[0][2]))
     lift_z = max(float(grasp.p[2]) + LIFT_ABOVE_GRASP, tallest_top + LIFT_OVER_NEIGHBOUR,
                  tallest_top + hang + LIFT_BOTTOM_CLEAR)
+    lift_z = float(noise.point("lift_height", [grasp.p[0], grasp.p[1], lift_z],
+                               axes=(False, False, True))[2])
     say(env, "lift", lift_z=round(lift_z, 3), tallest_top=round(tallest_top, 3), hang=round(hang, 3))
     # Planned with the same keep-out as the approach (K77). It was missing here, and the
     # lift is where an unguarded RRT does the most damage: the payload hangs up to
@@ -2036,7 +2058,7 @@ def _solve(
     # -- STAGE 4: drive to the bowl dock -----------------------------------------------------
     dock = _np(task._bowl_dock_np)[0].astype(np.float64)
     face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.0])
-    dock_xyz = np.array([dock[0], dock[1], 0.0])
+    dock_xyz = noise.point("bowl_dock", [dock[0], dock[1], 0.0], axes=(True, True, False))
     say(env, "drive to bowl dock", dock=[round(float(v), 3) for v in dock_xyz])
     # `freeze_arm=True` plans the translation with the base's three joints and nothing
     # else (`BASE_ONLY_PLAN_MASK`). Without it `move_base_forward` asks fifteen joints to
@@ -2114,6 +2136,7 @@ def _solve(
              * sapien.Pose(q=obj_q)).q
         )
         hover = common.pose_over(aim, HOVER_ABOVE + extra, obj_q_try) * T_tcp_obj.inv()
+        hover = noise.pose("hover", hover)
         if not hovered and (extra, back, spin) == HOVER_RUNGS[0]:
             # The waypoint exists to break one long RRT motion into two (seed 12 came
             # back `Approximate solution` / `IK Failed` without it). If the hover itself
@@ -2136,6 +2159,7 @@ def _solve(
                 for up in ups:
                     pre = sapien.Pose(p=np.asarray(hover.p) - PRE_HOVER_BACK * face
                                       + np.array([0.0, 0.0, up]), q=hover.q)
+                    pre = noise.pose("pre_hover", pre)
                     say(env, "pre-hover", pre=[round(float(v), 3) for v in pre.p],
                         up=round(float(up), 3))
                     # The bowl is guarded for this transit leg only: seed 62's pre-hover RRT
@@ -2222,6 +2246,7 @@ def _solve(
         bowl_moved = float(np.linalg.norm(bowl_live[:2] - bowl_p[:2]))
         aim0 = bowl_live - back0 * face
         hover2 = common.pose_over(aim0, HOVER_ABOVE + extra0, obj_q_held) * T_live.inv()
+        hover2 = noise.pose("hover_correction", hover2)
         say(env, "hover corrected for the object as held and the bowl as it stands",
             xy_before=round(float(_np(hinfo["xy_to_bowl"]).reshape(-1)[0]), 3),
             bowl_moved=round(bowl_moved, 3),
@@ -2260,15 +2285,16 @@ def _solve(
     cands = list(pour_candidates(face, along))
     # Indices, not membership: a candidate is `(numpy axis, tilt)` and `in` would compare
     # the arrays element-wise and raise on the ambiguous truth value.
-    straight = [i for i, (axis, tilt) in enumerate(cands)
-                if common.screw_plans(
-                    planner, pour_pose_for(bowl_p, POUR_ABOVE, obj_q_held, T_tcp_obj, axis, tilt))]
-    if straight:
-        rest = [i for i in range(len(cands)) if i not in straight]
-        cands = [cands[i] for i in straight + rest]
+    # Sample each candidate once, then probe and execute that exact pose.
+    poses = [noise.pose("pour", pour_pose_for(bowl_p, POUR_ABOVE, obj_q_held,
+                                             T_tcp_obj, axis, tilt))
+             for axis, tilt in cands]
+    straight = [i for i, pose in enumerate(poses) if common.screw_plans(planner, pose)]
+    order = straight + [i for i in range(len(cands)) if i not in straight]
     say(env, "pour candidates ordered", straight=len(straight), total=len(cands))
-    for axis, tilt in cands:
-        pour = pour_pose_for(bowl_p, POUR_ABOVE, obj_q_held, T_tcp_obj, axis, tilt)
+    for index in order:
+        axis, tilt = cands[index]
+        pour = poses[index]
         say(env, "pour", axis=[round(float(v), 2) for v in axis], tilt_deg=tilt,
             tcp=[round(float(v), 3) for v in pour.p])
         with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):

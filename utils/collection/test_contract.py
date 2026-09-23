@@ -170,10 +170,13 @@ def test_campaign_stops_queued_workers_after_storage_error(tmp_path, monkeypatch
     assert calls == [("oracle", 0)]
 
 
-def test_cabinet_robot_adapter_keeps_finger_counter_contact():
+@pytest.mark.parametrize("task_name", ["cabinet_search", "season_dish"])
+def test_robot_adapter_keeps_finger_counter_contact(task_name):
     """The old all-link ignore mask makes the penetrating finger fall through."""
     import sapien
     from my_scenes.cabinet_search import CabinetSearchTask
+    from my_scenes.season_dish import SeasonDishTask
+    task_class = {"cabinet_search": CabinetSearchTask, "season_dish": SeasonDishTask}[task_name]
 
     system = sapien.physx.PhysxCpuSystem()
     scene = sapien.Scene([system])
@@ -211,9 +214,64 @@ def test_cabinet_robot_adapter_keeps_finger_counter_contact():
         l_wheel_link=left, r_wheel_link=right, base_link=base,
         robot=SimpleNamespace(links=[left, right, base, Link(finger)]),
     ))
-    CabinetSearchTask._fix_ds_fetch_collision_bits(env)
+    task_class._fix_ds_fetch_collision_bits(env)
     scene.step()
     contacts = [contact for contact in system.get_contacts()
                 if finger in contact.bodies and counter in contact.bodies]
     assert contacts, "The scene adapter disabled finger contact with the counter"
     assert any(np.linalg.norm(point.impulse) > 0 for c in contacts for point in c.points)
+
+
+def test_waypoint_noise_repeats_by_seed_without_mutating_goals():
+    import sapien
+    from utils.mikasa.waypoint_noise import WaypointNoise
+    logs = []
+    noise = WaypointNoise(200007, .005, lambda msg, **data: logs.append((msg, data)))
+    original = sapien.Pose([.4, .6, .8], [1, 0, 0, 0])
+    first = noise.pose("approach", original)
+    second = noise.point("dock", [1, 2, 0], axes=(True, True, False))
+    repeated = WaypointNoise(200007, .005, lambda *args, **kwargs: None)
+    np.testing.assert_array_equal(first.p, repeated.pose("approach", original).p)
+    np.testing.assert_array_equal(second, repeated.point("dock", [1, 2, 0], axes=(True, True, False)))
+    np.testing.assert_allclose(original.p, [.4, .6, .8])
+    np.testing.assert_array_equal(first.q, original.q)
+    assert second[2] == 0
+    assert all(abs(x) <= .005 for _, e in logs[1:] for x in e["offset_m"])
+    assert all(any(x != 0 for x in e["offset_m"]) for _, e in logs[1:])
+    with pytest.raises(ValueError, match="0.01"):
+        WaypointNoise(0, .02, lambda *a, **kw: None)
+
+
+def test_season_collection_requires_instruction_preflight():
+    from .profile import validate_instructions
+    with pytest.raises(ValueError, match="PaliGemma"):
+        validate_instructions({"env_id": "MikasaSeasonDish-v0"}, None)
+
+
+def test_export_retains_failed_source_summary_and_unknown_incomplete_worker(tmp_path):
+    import h5py
+    import json
+    from .export_lerobot import source_episode_outcomes
+    for seed in (7, 8):
+        directory = tmp_path / "oracle" / str(seed)
+        directory.mkdir(parents=True)
+        (directory / "result.json").write_text(json.dumps({"status": "missed" if seed == 7 else "error"}))
+    directory = tmp_path / "oracle" / "7"
+    with h5py.File(directory / "failed-trajectory.h5", "w") as h5:
+        h5.create_dataset("traj_0/actions", data=np.zeros((2, 13)))
+        h5.create_dataset("traj_0/rewards", data=[0., 1.])
+        h5.create_dataset("traj_0/success", data=[True, False])
+        h5.create_dataset("traj_0/terminated", data=[False, False])
+        h5.create_dataset("traj_0/truncated", data=[False, True])
+    (directory / "failed-trajectory.json").write_text('{"mikasa_data": {"stage": "oracle"}}')
+    directory = tmp_path / "oracle" / "8"
+    (directory / "trajectory.h5").write_bytes(b"interrupted, not a complete H5")
+    (directory / "trajectory.json").write_text('{"episodes": []}')
+    completed, incomplete = source_episode_outcomes(tmp_path, {
+        "seeds": [7, 8], "signature": {"code_sha256": "source-version"}})
+    assert completed["success"] is False and completed["success_once"] is True
+    assert completed["terminated"] is False and completed["truncated"] is True
+    assert completed["reward_sum"] == 1 and completed["control_steps"] == 2
+    assert incomplete["status"] == "error" and "source_h5" not in incomplete
+    for key in ("success", "success_once", "reward_sum", "terminated", "truncated"):
+        assert incomplete[key] is None

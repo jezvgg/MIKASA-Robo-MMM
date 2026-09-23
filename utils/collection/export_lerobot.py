@@ -1,4 +1,4 @@
-"""Export successful CabinetSearch RGB recordings with the genuine LeRobot v3 API."""
+"""Export successful task RGB recordings with the genuine LeRobot v3 API."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,7 @@ from .contract import (ACTION_NAMES, ACTION_REPEAT, CAMERAS, POLICY_FPS, ROBOT,
 
 
 def sources(root, seeds=None):
+    run = read_json(root / "run.json")
     report = read_json(root / "attempts.json")
     selected = report["ready_seeds"] if seeds is None else seeds
     if not selected or len(set(selected)) != len(selected):
@@ -27,6 +28,10 @@ def sources(root, seeds=None):
         meta = recording_info(path, stage="rgb")
         if meta["episodes"][0]["episode_seed"] != seed:
             raise ValueError("Source seed disagrees with episode metadata")
+        contract = meta["mikasa_data"]
+        if (contract["signature_sha256"] != run["signature"]["code_sha256"]
+                or contract["profile"] != run["signature"]["profile"]):
+            raise ValueError("RGB episode belongs to another task/robot/source implementation")
         yield seed, path, meta
 
 
@@ -68,6 +73,35 @@ def dataset_class():
             shutil.rmtree(images)
             return target
     return Dataset
+
+
+def source_episode_outcomes(root, run):
+    """Keep completed physical summaries and explicit unknown worker outcomes."""
+    # Preserve physical termination outcomes for failed source attempts too.
+    source_episodes = []
+    for seed in run["seeds"]:
+        directory = root / "oracle" / str(seed)
+        result_path = directory / "result.json"
+        result = read_json(result_path) if result_path.exists() else {"status": "not_run"}
+        item = dict(scene_seed=seed, status=result["status"],
+                    source_sha256=run["signature"]["code_sha256"],
+                    terminated=None, truncated=None, control_steps=None,
+                    duration_seconds=None, reward_sum=None, success=None, success_once=None)
+        for name in ("trajectory.h5", "failed-trajectory.h5"):
+            path = directory / name
+            if path.exists() and path.with_suffix(".json").exists():
+                if "mikasa_data" not in read_json(path.with_suffix(".json")):
+                    continue  # Interrupted recorder without a finalized contract.
+                with h5py.File(path, "r") as h5:
+                    if "traj_0" in h5 and len(h5["traj_0/actions"]):
+                        trajectory = h5["traj_0"]
+                        item.update(episode_summary(trajectory),
+                            source_h5=str(path.relative_to(root)),
+                            terminated=bool(trajectory["terminated"][-1]),
+                            truncated=bool(trajectory["truncated"][-1]))
+                break
+        source_episodes.append(item)
+    return source_episodes
 
 
 def export(root, output, repo_id, tokenizer, seeds=None):
@@ -112,6 +146,8 @@ def export(root, output, repo_id, tokenizer, seeds=None):
                     source_h5=str(path), control_steps=n, frames=n // 2,
                     duration_seconds=summary["duration_seconds"], success=summary["success"],
                     success_once=summary["success_once"],
+                    terminated=bool(trajectory["terminated"][-1]),
+                    truncated=bool(trajectory["truncated"][-1]),
                     reward_sum=summary["reward_sum"], instruction=instruction,
                     instruction_tokens=tokens,
                     source_sha256=run["signature"]["code_sha256"]))
@@ -119,8 +155,11 @@ def export(root, output, repo_id, tokenizer, seeds=None):
     finally:
         dataset.finalize()
         dataset.stop_image_writer()
+    source_episodes = source_episode_outcomes(root, run)
     metadata = dict(version=1, format="LeRobotDataset-v3.0", repository_id=repo_id,
         source_run=run, source_attempts=read_json(root / "attempts.json"), episodes=mapping,
+        source_episode_outcomes=source_episodes, source_root=str(root),
+        exporter=dict(module="utils.collection.export_lerobot", source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()),
         control_hz=20, policy_hz=10, action_repeat=2,
         resampling="first_target_two_step_hold_physically_validated",
         policy_inputs=["observation.state", "task"] + [f"observation.images.{name}" for name in CAMERAS],
@@ -148,6 +187,9 @@ def verify(output):
         with h5py.File(episode["source_h5"], "r") as h5:
             traj = h5["traj_0"]
             summary = episode_summary(traj)
+            for key in ("terminated", "truncated"):
+                if key in episode and episode[key] != bool(traj[key][-1]):
+                    raise ValueError(f"{key} summary differs from source H5")
             for key in ("control_steps", "duration_seconds", "reward_sum", "success", "success_once"):
                 if episode.get(key) != summary[key]:
                     raise ValueError(f"Exported {key} metadata disagrees with H5")
@@ -155,10 +197,18 @@ def verify(output):
                 "action": traj["actions"][::2],
                 "observation.state": traj["obs/agent/qpos"][::2][:-1, 3:],
                 "global_state": traj["obs/agent/qpos"][::2][:-1, :3],
+                "next.reward": traj["rewards"][:].reshape(n, 2).sum(axis=1).astype(np.float32),
+                "next.success": traj["success"][1::2],
+                "frame_index": np.arange(n),
+                "episode_index": np.full(n, episode["episode_index"]),
+                "index": np.arange(offset, offset+n),
             }
             rows = table.select(range(offset, offset+n))
             for key, array in expected.items():
                 np.testing.assert_array_equal(np.stack([np.asarray(v) for v in rows[key]]), array)
+            task_indices = np.asarray([int(v) for v in rows["task_index"]])
+            if not np.all(task_indices == task_indices[0]):
+                raise ValueError("Instruction index changed within an episode")
             timestamps = np.asarray([float(v) for v in rows["timestamp"]])
             np.testing.assert_allclose(timestamps, np.arange(n) / 10, atol=1e-4, rtol=0)
             image_checks = []
@@ -179,6 +229,21 @@ def verify(output):
         offset += n
     if len(dataset) != offset:
         raise ValueError("Dataset has extra or missing frames")
+    source_outcomes = metadata.get("source_episode_outcomes")
+    if source_outcomes is not None:
+        seeds = [item["scene_seed"] for item in source_outcomes]
+        if seeds != metadata["source_run"]["seeds"]:
+            raise ValueError("Source summaries omitted or reordered candidate seeds")
+        for item in source_outcomes:
+            if "source_h5" not in item:
+                continue  # Explicitly unknown after an incomplete worker recording.
+            with h5py.File(Path(metadata["source_root"]) / item["source_h5"], "r") as h5:
+                trajectory = h5["traj_0"]
+                expected = episode_summary(trajectory)
+                expected.update(terminated=bool(trajectory["terminated"][-1]),
+                                truncated=bool(trajectory["truncated"][-1]))
+                if any(item.get(key) != value for key, value in expected.items()):
+                    raise ValueError(f"Source outcome differs from H5: seed {item['scene_seed']}")
     write_json(output / "readback.json", dict(status="success", episodes=len(checks), frames=offset,
                                               all_numeric_samples_checked=True, results=checks))
     print(f"LeRobot v3 readback: {len(checks)} episodes, {offset} frames", flush=True)

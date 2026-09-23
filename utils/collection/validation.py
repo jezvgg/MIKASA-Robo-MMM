@@ -1,4 +1,4 @@
-"""Freeze exactly 100 independent, planner-success CabinetSearch validation seeds."""
+"""Freeze exactly 100 independent, planner-success task validation seeds."""
 from __future__ import annotations
 
 import argparse
@@ -50,7 +50,13 @@ def freeze(roots, excluded_roots, output, extra_excluded=()):
             result = read_json(directory / "result.json")
             success = result["status"] == "success"
             if success:
-                recording_info(directory / "trajectory.h5", stage="oracle")
+                meta = recording_info(directory / "trajectory.h5", stage="oracle")
+                contract = meta["mikasa_data"]
+                if (contract["signature_sha256"] != signature["code_sha256"]
+                        or contract["profile"] != signature["profile"]
+                        or meta["episodes"][0]["episode_seed"] != seed
+                        or result.get("source_sha256") != signature["code_sha256"]):
+                    raise ValueError("Validation recording does not match the declared run")
                 if not result.get("task_metrics", {}).get("success", False):
                     raise ValueError("Planner success is not backed by physical task metrics")
             replay_path = root / "validated" / str(seed) / "result.json"
@@ -66,6 +72,7 @@ def freeze(roots, excluded_roots, output, extra_excluded=()):
         seeds=[item["seed"] for item in selected], selected=selected,
         candidate_attempts=candidates, exclusions=exclusions,
         extra_excluded_seeds=sorted(extra_excluded), signature=signature)
+    output.parent.mkdir(parents=True, exist_ok=True)
     write_json(output, manifest)
     print(f"Frozen {len(selected)} validation seeds from {len(candidates)} candidates: {output}")
     return manifest

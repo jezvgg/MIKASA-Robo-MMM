@@ -1,4 +1,4 @@
-"""CabinetSearch: state-only attempts, action replay, then success-only RGB."""
+"""State-only attempts, action replay, then success-only RGB."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,7 @@ import numpy as np
 from .contract import (ACTION_NAMES, ACTION_REPEAT, CAMERAS, CONTROL_FPS,
                        POLICY_FPS, episode_summary, read_json, recording_info, write_json)
 from .client import as_numpy, execute_actions, scalar_bool
-from .profile import REPO, load_profile, make_env, runtime_signature
+from .profile import REPO, TASKS, load_profile, make_env, runtime_signature, validate_instructions
 
 PHASES = ("oracle", "native", "validated", "native_rgb", "rgb")
 
@@ -57,6 +57,9 @@ def collection_contract(base, *, run: dict, seed: int, stage: str, source=None, 
     instruction = base.get_language_instruction()[0]
     if not isinstance(instruction, str) or not instruction.strip():
         raise ValueError("The task must supply a nonempty get_language_instruction()")
+    language = run.get("language_validation")
+    if language and instruction not in language["instruction_tokens"]:
+        raise ValueError("Task instruction was not checked before collection")
     native = stage in {"oracle", "native"}
     return {
         "version": 3,
@@ -74,6 +77,7 @@ def collection_contract(base, *, run: dict, seed: int, stage: str, source=None, 
         "policy_fps": CONTROL_FPS if native else POLICY_FPS,
         "action_repeat": 1 if native else ACTION_REPEAT,
         "instruction": instruction,
+        "language_validation": language,
         "action_names": ACTION_NAMES,
         "state_joint_names": [j.name for j in base.agent.robot.get_active_joints()],
         "source": source,
@@ -387,7 +391,7 @@ def render_one(
 
 
 def assert_signature(run):
-    if runtime_signature() != run["signature"]:
+    if runtime_signature(load_profile(run["signature"]["profile"]["env_id"])) != run["signature"]:
         raise ValueError("Source, robot, task settings or engine changed since run creation")
 
 
@@ -493,6 +497,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="command", required=True)
     collect = subs.add_parser("collect")
+    collect.add_argument("--profile", choices=TASKS, default="cabinet_search")
+    collect.add_argument("--tokenizer", type=Path)
     collect.add_argument("--output", type=Path, required=True)
     collect.add_argument("--start-seed", type=int, required=True)
     collect.add_argument("--num-seeds", type=int, required=True)
@@ -514,9 +520,10 @@ def main():
     if args.command == "collect":
         if args.num_seeds < 1 or args.start_seed < 0:
             raise ValueError("Positive candidate count and nonnegative seeds required")
-        signature = runtime_signature()
+        signature = runtime_signature(load_profile(args.profile))
+        language = validate_instructions(signature["profile"], args.tokenizer)
         root.mkdir(parents=True, exist_ok=False)
-        run = dict(version=1, purpose=args.purpose,
+        run = dict(version=1, purpose=args.purpose, language_validation=language,
                    seeds=list(range(args.start_seed, args.start_seed + args.num_seeds)),
                    signature=signature, scene=signature["profile"]["env_id"],
                    env_kwargs=signature["profile"]["env_kwargs"],

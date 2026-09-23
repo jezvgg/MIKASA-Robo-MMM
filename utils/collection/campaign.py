@@ -9,11 +9,11 @@ from threading import Event
 
 from .contract import read_json, write_json
 from .pipeline import PHASES, assert_signature, run_worker, summarize
-from .profile import runtime_signature
+from .profile import TASKS, load_profile, runtime_signature, validate_instructions
 
 
 def campaign(root, *, start_seed, num_seeds, purpose, jobs, through, timeout,
-             skip_native_rgb=False):
+             skip_native_rgb=False, profile=None, tokenizer=None):
     if not 1 <= jobs <= 8 or num_seeds < 1 or start_seed < 0:
         raise ValueError("Use 1–8 workers, a positive candidate count and nonnegative seeds")
     seeds = list(range(start_seed, start_seed + num_seeds))
@@ -23,12 +23,15 @@ def campaign(root, *, start_seed, num_seeds, purpose, jobs, through, timeout,
             raise ValueError("Cannot change the candidate pool or purpose on resume")
         if run.get("skip_native_rgb", False) != skip_native_rgb:
             raise ValueError("Cannot change native RGB retention on resume")
+        if profile and run["scene"] != load_profile(profile)["env_id"]:
+            raise ValueError("Cannot change task profile on resume")
         assert_signature(run)
     else:
-        signature = runtime_signature()
+        signature = runtime_signature(load_profile(profile)) if profile else runtime_signature()
+        language = validate_instructions(signature["profile"], tokenizer) if profile else None
         root.mkdir(parents=True, exist_ok=False)
         run = dict(version=1, purpose=purpose, seeds=seeds, signature=signature,
-                   skip_native_rgb=skip_native_rgb,
+                   skip_native_rgb=skip_native_rgb, language_validation=language,
                    scene=signature["profile"]["env_id"], env_kwargs=signature["profile"]["env_kwargs"],
                    created_utc=datetime.now(timezone.utc).isoformat())
         write_json(root / "run.json", run)
@@ -73,6 +76,8 @@ def campaign(root, *, start_seed, num_seeds, purpose, jobs, through, timeout,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--profile", choices=TASKS, default=None)
+    parser.add_argument("--tokenizer", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--start-seed", type=int, required=True)
     parser.add_argument("--num-seeds", type=int, required=True)
@@ -85,7 +90,7 @@ def main():
     args = parser.parse_args()
     campaign(args.output.resolve(), start_seed=args.start_seed, num_seeds=args.num_seeds,
              purpose=args.purpose, jobs=args.jobs, through=args.through, timeout=args.timeout,
-             skip_native_rgb=args.skip_native_rgb)
+             skip_native_rgb=args.skip_native_rgb, profile=args.profile, tokenizer=args.tokenizer)
 
 
 if __name__ == "__main__":

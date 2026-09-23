@@ -7,14 +7,14 @@ from pathlib import Path
 import numpy as np
 
 from .contract import write_json
-from .profile import make_env, runtime_signature
+from .profile import TASKS, load_profile, make_env, runtime_signature
 
 
-def qualify(output):
+def qualify(output, profile="cabinet_search"):
     import gymnasium as gym
     from planners.oracle.oracle_common import default_planner_factory
 
-    signature = runtime_signature()
+    signature = runtime_signature(load_profile(profile))
     class Trace(gym.Wrapper):
         def __init__(self, env):
             super().__init__(env)
@@ -40,7 +40,11 @@ def qualify(output):
         planner.follow_forward_path_w_refinement(result, refine=False)
         after_arm = len(env.actions)
         planner.idle_steps(t=8)
-        planner.turn_in_place(np.array([np.cos(np.pi/2+0.04), np.sin(np.pi/2+0.04), 0.]), max_steps=30)
+        before_drive = len(env.actions)
+        planner.drive_straight(0.02)
+        drive_actions = np.asarray(env.actions[before_drive:])
+        if not len(drive_actions) or not np.any(np.abs(drive_actions[:,11]) > 1e-6):
+            raise AssertionError("The base-motion part of the head test did not execute")
         actions = np.asarray(env.actions[start:])
         if not len(actions) or not np.all(actions[:, 8] > 0.2) or not np.all(actions[:, 9] < -0.15):
             raise AssertionError(f"An arm/base primitive recentered the head: {actions[:, 8:10].tolist()}")
@@ -57,4 +61,6 @@ def qualify(output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    qualify(parser.parse_args().output.resolve())
+    parser.add_argument("--profile", choices=TASKS, default="cabinet_search")
+    args = parser.parse_args()
+    qualify(args.output.resolve(), args.profile)

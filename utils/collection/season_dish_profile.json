@@ -1,0 +1,114 @@
+{
+  "profile_version": 1,
+  "env_id": "MikasaSeasonDish-v0",
+  "task_variant": "two_condiments_tilt_155",
+  "robot_reference": {
+    "repository": "https://github.com/jezvgg/MIKASA-Robo-MMM",
+    "commit": "4c5c8b3de941565ee2d57b153a10254fe64c2849",
+    "class": "DSFetch",
+    "uid": "ds_fetch"
+  },
+  "env_kwargs": {
+    "robot_uids": "ds_fetch",
+    "control_mode": "pd_joint_pos",
+    "num_envs": 1,
+    "scene_idx": 0,
+    "sim_backend": "cpu",
+    "render_backend": "sapien_cuda",
+    "sim_config": {
+      "control_freq": 20,
+      "sim_freq": 100
+    }
+  },
+  "task": {
+    "horizon": 1100,
+    "cue_steps": 40,
+    "delay_steps": 40,
+    "hold_steps": 15,
+    "bowl_along": 0.85,
+    "station_along": 0.46,
+    "across": -0.1,
+    "station_spacing": 0.24,
+    "spawn_clearance": 0.02,
+    "spawn_jitter_xy": 0.02,
+    "randomize_placements": true,
+    "reach_band": [
+      0.74,
+      0.88
+    ],
+    "min_object_gap": 0.04,
+    "dock_wall_clear": 0.46,
+    "station_dock_wall_clear": 0.36,
+    "contact_band": 0.04,
+    "placement_draw_tries": 2000,
+    "placement_draw": "joint",
+    "dock_toward": 0.15,
+    "bowl_dock_toward": null,
+    "pour_xy_radius": 0.1,
+    "pour_min_clearance": 0.05,
+    "pour_max_clearance": 0.3,
+    "pour_tilt_deg": 155.0,
+    "pour_axis_body": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "grasp_min_force": 0.5,
+    "distractor_move_tol": 0.1,
+    "marker_height": 0.14,
+    "marker_radius": 0.025,
+    "require_return": false
+  },
+  "data": {
+    "control_hz": 20,
+    "policy_hz": 10,
+    "action_repeat": 2,
+    "action_dim": 13,
+    "proprio_dim": 12,
+    "debug_global_state_dim": 3,
+    "lerobot_format": "v3.0",
+    "rgb_only": true,
+    "max_instruction_tokens": 100
+  },
+  "cameras": {
+    "left_base_camera_link": {
+      "width": 256,
+      "height": 256,
+      "fov": 1.5
+    },
+    "fetch_hand": {
+      "width": 128,
+      "height": 128,
+      "fov": 2.0
+    },
+    "right_base_camera_link": {
+      "width": 256,
+      "height": 256,
+      "fov": 1.5
+    }
+  },
+  "validation": {
+    "successful_unique_seeds": 100,
+    "exclude_all_training_attempts": true,
+    "exclude_development_seeds": true,
+    "replace_after_policy_failure": false
+  },
+  "runtime_packages": {
+    "mani_skill": "3.0.0b22",
+    "sapien": "3.0.3",
+    "mplib": "0.2.1",
+    "numpy": "1.26.4",
+    "torch": "2.14.0",
+    "gymnasium": "0.29.1",
+    "h5py": "3.16.0"
+  },
+  "planner": {
+    "module": "planners.season_dish_planner",
+    "waypoint_noise_m": 0.005,
+    "noise_seed_offset": 200003,
+    "noise_scope": "approach_lift_dock_hover_prehover_corrected_hover_pour",
+    "noise_distribution": "independent_uniform_world_axes",
+    "contact_grasp_noise": false,
+    "cue_gaze": "station_midpoint_independent_of_answer"
+  }
+}

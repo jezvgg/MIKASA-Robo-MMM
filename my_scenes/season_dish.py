@@ -65,8 +65,9 @@ from utils.robocasa_utils import (
 #: It names the chore, never the answer: which condiment the dish needs is shown by
 #: the recipe marker during the cue and is the memory content. No numerals.
 INSTRUCTIONS = (
-    "Season the dish with the condiment the recipe card showed, then hold it "
-    "tipped over the bowl.",
+    "Season the dish using the condiment marked by the yellow cue. Remember it "
+    "after the cue disappears. Tip and hold it over the bowl, leaving the other "
+    "condiment untouched.",
 )
 
 # Where the cue marker goes while it must not be seen. The constant, and the
@@ -409,16 +410,9 @@ class SeasonDishTask(BaseEnv):
 
     @property
     def _default_sensor_configs(self):
-        # Read during _reconfigure, after _load_scene but before any
-        # _initialize_episode — so it may use geometry cached in _load_scene, and
-        # must not use anything drawn per episode.
-        target = self._focus_point() + np.array([0, 0, 0.05])
-        pose = sapien_utils.look_at(
-            eye=self._view_point(1.6, 1.1) if self.cfg.randomize_placements
-            else self._view_point(0.9, 0.55),
-            target=target,
-        )
-        return [CameraConfig("base_camera", pose, 128, 128, np.pi / 2, 0.01, 100)]
+        # VLA observes only the three unchanged cameras mounted on DSFetch.
+        # Human-render cameras below remain available for diagnosis.
+        return []
 
     @property
     def _default_human_render_camera_configs(self):
@@ -722,24 +716,13 @@ class SeasonDishTask(BaseEnv):
         )
 
     def _fix_ds_fetch_collision_bits(self):
-        """Restore the wheel/base collision exemption the scene builder skips.
-
-        scene_builder.py:490 guards it with `robot_uids == "fetch"`, so a Fetch
-        subclass with a different uid silently keeps colliding with the kitchen
-        floor and walls. Fetch._after_init already sets bits 30 and 31
-        (fetch.py:352-359); what is lost is the builder's own 25-29.
-        """
-        if self.robot_uids == "fetch" or self.agent is None:
+        """Apply RoboCasa's wheel/base exclusions, preserving arm/finger contact."""
+        if self.robot_uids != "ds_fetch" or self.agent is None:
             return
-        for link in self.agent.robot.links:
-            for body in link._bodies:
-                for shape in body.get_collision_shapes():
-                    groups = shape.get_collision_groups()
-                    for bit in range(25, 30):
-                        groups[2] |= 1 << bit
-                    shape.set_collision_groups(groups)
-
-    # ------------------------------------------------------------- initialize --
+        for link in (self.agent.l_wheel_link, self.agent.r_wheel_link):
+            for bit in range(25, 31):
+                link.set_collision_group_bit(group=2, bit_idx=bit, bit=1)
+        self.agent.base_link.set_collision_group_bit(group=2, bit_idx=31, bit=1)
 
     def _after_reconfigure(self, options: dict):
         # Task buffers are allocated here, once, at full num_envs width. Allocating
@@ -1251,6 +1234,8 @@ class SeasonDishTask(BaseEnv):
         state["pour_last_eval_step"] = self._pour_last_eval_step.clone()
         state["distractor_home"] = self._distractor_home.clone()
         state["marker_home"] = self._marker_home.clone()
+        state["bowl_settled"] = self._bowl_settled.clone()
+        state["placement_fell_back"] = self._placement_fell_back.clone()
         return state
 
     def set_state_dict(self, state: dict, env_idx: torch.Tensor = None):
@@ -1273,6 +1258,8 @@ class SeasonDishTask(BaseEnv):
             "pour_last_eval_step": "_pour_last_eval_step",
             "distractor_home": "_distractor_home",
             "marker_home": "_marker_home",
+            "bowl_settled": "_bowl_settled",
+            "placement_fell_back": "_placement_fell_back",
         }
         for key, attr in restore.items():
             if key in state:
