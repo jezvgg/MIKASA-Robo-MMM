@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Streaming ManiSkill HDF5 -> LeRobot v3.0 converter.
 
-Same output layout as mani_skill.trajectory.convert_to_lerobot, but episodes
-are processed one at a time (constant RAM): each episode's RGB frames are
-encoded to video immediately and only per-episode dataframes plus running
-statistics are kept, so 1000-episode merges cannot OOM.
+Same output layout as mani_skill.trajectory.convert_to_lerobot. RGB is encoded
+per episode; dataframes are retained until chunked Parquet output. Exact action
+and state quantiles are computed from Parquet afterward, using O(frames * dims)
+float32 memory.
 
 Usage:
     uv run python -m utils.convert_to_lerobot_stream --traj-path M.h5 \
@@ -121,6 +121,50 @@ def vec_stats(moms, dim):
     }
 
 
+def vector_quantiles(
+    data_dir: Path, feature_dims: dict[str, int], total_frames: int
+) -> dict[str, dict[str, list[float]]]:
+    """Compute exact per-dimension LeRobot quantiles from written Parquet chunks."""
+    # ponytail: exact quantiles use ~4 * frames * vector_dims bytes; use disk-backed
+    # selection if future datasets outgrow RAM.
+    values = {
+        key: np.empty((total_frames, dim), dtype=np.float32)
+        for key, dim in feature_dims.items()
+    }
+    offset = 0
+    for path in sorted(data_dir.rglob("*.parquet")):
+        table = pq.read_table(path, columns=list(feature_dims))
+        count = table.num_rows
+        for key, dim in feature_dims.items():
+            column = table[key].combine_chunks()
+            if column.null_count:
+                raise ValueError(f"null values in {key} at {path}")
+            values[key][offset : offset + count] = column.values.to_numpy(
+                zero_copy_only=False
+            ).reshape(count, dim)
+        offset += count
+
+    if offset != total_frames:
+        raise ValueError(f"expected {total_frames} frames in {data_dir}, found {offset}")
+
+    result = {}
+    for key, matrix in values.items():
+        result[key] = {
+            name: [
+                float(np.quantile(matrix[:, i], q, method="linear"))
+                for i in range(matrix.shape[1])
+            ]
+            for q, name in (
+                (0.01, "q01"),
+                (0.10, "q10"),
+                (0.50, "q50"),
+                (0.90, "q90"),
+                (0.99, "q99"),
+            )
+        }
+    return result
+
+
 def main(args: Args):
     input_path = Path(args.traj_path)
     if not input_path.exists():
@@ -205,8 +249,10 @@ def main(args: Args):
 
     # process the first episode, then the rest
     handle(first_ep)
+    del first_ep
     for ep_data, _cams, _sd in it:
         handle(ep_data)
+        del ep_data
         if (ep_idx + 1) % 50 == 0:
             logger.info(f"episodes processed: {ep_idx + 1}/{n_probe}")
 
@@ -230,6 +276,7 @@ def main(args: Args):
         pq.write_table(
             pa.Table.from_pandas(combined, schema=pa.schema(fields)),
             base_path / "data" / f"chunk-{chunk_idx:03d}" / "file-000.parquet")
+    del dfs, combined
 
     ep_rows = []
     for i, st in enumerate(episode_states):
@@ -264,6 +311,7 @@ def main(args: Args):
 
     pd.DataFrame({"task_index": [0]}, index=[args.task_name]).to_parquet(
         base_path / "meta" / "tasks.parquet", index=True)
+    del episode_states, ep_rows
 
     features = {
         "action": {"dtype": "float32", "shape": [action_dim],
@@ -305,8 +353,14 @@ def main(args: Args):
     (base_path / "meta" / "info.json").write_text(json.dumps(info, indent=2))
 
     stats = {"action": vec_stats(a_mom, action_dim)}
+    quantile_dims = {"action": action_dim}
     if state_dim:
         stats["observation.state"] = vec_stats(s_mom, state_dim)
+        quantile_dims["observation.state"] = state_dim
+    for key, quantiles in vector_quantiles(
+        base_path / "data", quantile_dims, total_frames
+    ).items():
+        stats[key].update(quantiles)
     for cam, chs in cam_mom.items():
         stats[f"observation.images.{cam}"] = {
             "mean": [[ch.summary()["mean"]] for ch in chs],
