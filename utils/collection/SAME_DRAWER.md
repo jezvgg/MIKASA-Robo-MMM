@@ -29,6 +29,21 @@ root pose: `qpos[:3]` alone is not the world base pose when this root varies.
 Training receives only `qpos[3:]` (12D). `qpos[:3]` is stored separately as the 3D
 debug global state. Action channels 8 and 9 carry the head targets unchanged.
 
+The oracle grasps the centre of the handle for both drawer strokes. The free
+approach to the initially open drawer keeps that drawer in the collision model;
+only the deliberate contact stroke permits touching it. Closing moves the base
+at 6 cm/s and stops when the measured drawer position reaches the existing closed
+tolerance. It releases to a nominal 64 mm finger aperture, then clears the handle
+by 6 cm along the measured finger direction before backing away. The short exit
+uses base translation and the torso lift with arm/yaw held; at the lift limit it
+tries the same straight exit with the arm. A refused exit or an early reopening
+fails the attempt. Physical collisions remain enabled throughout.
+
+The apple is pinched 22 mm below its mesh top and lifted along a straight Cartesian
+path at half the normal path speed. This gives the pads purchase below the crown;
+a shallow contact alone can report a grasp that slips as soon as the apple lifts.
+All these changes use existing motion-planning and velocity-control primitives.
+
 Small positional waypoint noise is sampled independently from a separate seed,
 using uniform +/-5 mm on enabled world axes, before collision-checked planning.
 Contact handle positions and the apple grasp remain exact. If the ordinary
@@ -90,45 +105,75 @@ python -m utils.collection.qualify_head --profile same_drawer --output /path/to/
 python -m utils.collection.audit check --root /path/to/train --output /path/to/h5-audit.json
 ```
 
-Measured on kitchen 0, CPU physics, DSFetch from master `4c5c8b3`, simulation
-source SHA256 `eeabb7707cca5d51027984badf8f32747c73feea99ca939f15d9826d1ca97f6c`:
+Measured on kitchen 0, CPU physics, DSFetch from master `4c5c8b3`. The revised
+planner has runtime SHA256
+`cfee6b3ddb898ad5fdd9cf2c8844d8174cf70034aea429a1f26c30ad5aa4ec10`.
+The baseline is commit `8024c0e`, runtime
+`eeabb7707cca5d51027984badf8f32747c73feea99ca939f15d9826d1ca97f6c`.
+Only `planners/same_drawer_planner.py` differs in the runtime signature; the robot,
+engine, task configuration, success rules and 1600-step horizon are identical.
 
-| Fixed pool | Source planner | Native 20 Hz replay | Paired-action 10 Hz replay | RGB |
+| Fixed pool, all attempts | Baseline source success | Revised source success |
+|---|---|---|
+| Development, seeds 2400–2499 | 54/100 | **73/100** |
+| Fresh comparison, seeds 40000–40099 | 61/100 | **72/100** |
+
+Development seeds were used during implementation. The final planner was frozen
+before evaluating the fresh comparison pool; that pool is separate from the fixed
+validation list. All candidates, including failures, contribute to these rates.
+The revised rates exceed the desired >60% collection target on these two pools;
+95% Wilson intervals are 63.6–80.7% and 62.5–79.9%. The fresh paired comparison has
+26 gains and 15 losses (two-sided exact McNemar p=0.117): the observed increase
+still has substantial sampling uncertainty, and is not a guarantee for other pools.
+
+Premature reopening during withdrawal fell from 12 to 0 development cases and
+from 7 to 0 fresh cases. Apple losses during lifting fell from 14 to 0 and from
+14 to 2. The remaining development failures were 15 drawer-approach refusals,
+4 plate-step refusals, 4 horizon expirations, 2 travel refusals, 1 straight-contact
+refusal and 1 missed handle grasp. The fresh pool had 10 drawer-approach refusals,
+8 plate-step refusals, 5 horizon expirations, 2 lift losses, 1 transfer loss,
+1 travel refusal and 1 apple-withdrawal refusal. These are planner limitations;
+they do not establish that a failed scene seed is physically unsolvable.
+
+Motion is not uniformly shorter. On the 46 fresh seeds successful in both
+versions, median cumulative wrist rotation decreased from 538 to 416 degrees;
+median base rotation decreased from 337 to 332 degrees. Median base travel grew
+from 5.12 to 5.46 m, and duration from 71.65 to 74.95 s. Travel and stow motions
+remain opportunities for improvement. These measurements concern the shared
+successful subset, not all assigned seeds.
+
+The full collection check used training seeds 10000–10007:
+
+| Source | Native 20 Hz replay | Paired-action 10 Hz replay | RGB | LeRobot v3 |
 |---|---|---|---|---|
-| Development pilot, seeds 2400–2499 | 54/100 | Not run | Not run | Not run |
-| Training, seeds 10000–10015 | 14/16 | 14/14 | 10/14 | 10 episodes |
-| Control, seeds 1000–1005 | 5/6 | 5/5 | 3/5 | Seed 1001 at both rates |
+| 6/8 | 6/6 | 6/6 | 6 episodes | **6 episodes / 4,488 frames at 10 Hz** |
 
-The pilot's expert SR is **54%**, below the desired >60% collection target
-(95% Wilson interval 44.3–63.4%). The target is aspirational; no success threshold
-or physical rule was relaxed to improve the reported rate. Of 46 failures,
-14 lost the apple during lifting, 12 reopened the drawer during withdrawal,
-and 10 failed to plan a drawer approach; the remaining cases involved other
-path/contact or placement failures. Improving the apple grip and disengaging the
-hand after closing are known planner limitations.
+Both unsuccessful source attempts remain in metadata. Native replay matched all
+38 saved datasets exactly in every successful episode. Export readback checked
+all numerical samples and 90 decoded RGB samples (MAE 1.414–3.864 on the 0–255
+scale). All 226 new H5 recordings and the 100 fresh baseline recordings passed
+format, provenance, episode-summary and waypoint-noise audits. Six accepted
+training episodes are a collection qualification sample, not a production dataset
+or an estimate that resampling always preserves success.
 
-Twenty-three regression tests passed, including attempts to preplace the apple
-or reopen the cue drawer before the interlude. 32 reset cases produced distinct
-robot/object starts; all 96 counterfactual cue comparisons passed visibility and
-hidden-answer input checks. The full instruction takes 40 PaliGemma tokens.
-All 40 robot files equal the master reference. A recorded-action policy exercised
-the actual 12D/RGB client successfully for 754 requests / 1508 control steps.
-This checks the interface; it is not a learned-policy result.
+Twenty-three regression tests passed on the revised code. All 40 robot files
+match the master reference. A recorded-action policy successfully exercised the
+actual 12D/RGB client for 735 requests / 1470 control steps, with no clipped
+actions. This checks the interface; it is not a learned-policy result.
 
-The 10 accepted episodes export to genuine LeRobot v3: **7,356 frames at 10 Hz**.
-Every numeric sample and episode summary was compared with H5; 150 decoded RGB
-samples passed (MAE 1.393–4.051 on the 0–255 scale). Native replay matched every
-saved array exactly in all 14 successful training episodes. All 372 recordings
-from the control, pilot, training and qualification pools passed H5 audits,
-including unsuccessful attempts and replays.
+The unchanged scene's initial qualification included 32 reset cases and 96
+counterfactual cue/hidden-answer input comparisons. The full instruction takes
+40 PaliGemma tokens. The completed original validation pools (20000–20199)
+produced 109 source-planner successes under `8024c0e`. The immutable
+[100-seed list](validation_seeds/same_drawer_v1.json) still selects the first 100
+successful scene seeds in ascending order, excluding all 360 originally assigned
+training, development and diagnostic seeds. The new comparison pools are also
+disjoint from that list. Its membership and original provenance are unchanged;
+it was not reselected against the revised planner. Original validation
+qualification is source-only: native and 10 Hz replays were not conditions for
+selecting or replacing seeds. The original manifest pins the implementation,
+robot, assets and planner/noise settings and records candidate outcomes.
 
-The completed validation pools (20000–20199) produced 109 source-planner successes.
-The immutable [100-seed list](validation_seeds/same_drawer_v1.json) selects the
-first 100 successful scene seeds in ascending order, excluding all 360 assigned
-training, development and diagnostic seeds. Validation qualification is source-only:
-native and 10 Hz replays were not run and are not conditions for selecting or
-replacing these seeds. The manifest pins the implementation, robot, assets and
-planner/noise settings and records candidate outcomes.
 The qualification scope is kitchen 0 with CPU physics; it does not establish
 other-kitchen or GPU-batching performance. The cue check compares answer variants
 at the same physical state. It does not rule out a policy using its own joint

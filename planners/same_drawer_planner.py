@@ -10,6 +10,7 @@ import argparse
 import math
 
 import gymnasium as gym
+import mplib
 import numpy as np
 import sapien
 
@@ -22,23 +23,27 @@ from utils.mikasa.waypoint_noise import WaypointNoise
 WHO = "same_drawer_planner"
 BAR_STANDOFF = 0.22
 REACH_N_INIT = 40
+# Native DSFetch qpos: base x/y/yaw, torso, head pair, arm seven, fingers pair.
+# Back away along the fingers using only base translation and the lift.
+HANDLE_CLEARANCE_MASK = [True, True, False, True] + [False] * 11
 
 
 def array(value):
     return value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
 
 
-def bar_poses(task, drawer, amount, *, opening=False):
+def bar_poses(task, drawer, amount, *, opening=True):
     home = array(task.handle_home)[0, drawer].astype(float)
     centre = home + [0, -float(amount), 0]
     angle = math.radians(20 if drawer == 3 else 40)
     approaching = np.array([0., math.cos(angle), -math.sin(angle)])
     closing = np.array([0., math.sin(angle), math.cos(angle)])
-    if opening:
-        # Leave room behind the finger pads for the drawer front, then enter
-        # along the fingers' approach axis instead of sweeping across the bar.
-        centre -= 0.01 * approaching
+    # The same centred handle grasp is used in both directions. Leave space
+    # for the drawer front behind the pads, and enter along the finger axis.
+    centre -= 0.01 * approaching
     grasp = task.agent.build_grasp_pose(approaching, closing, centre)
+    # An already open upper drawer brings a long axial standoff too close
+    # to the robot. Reach from above its closed front before the closing grasp.
     reach = centre - 0.14 * approaching if opening else home + [0, -BAR_STANDOFF, 0.08]
     return grasp, sapien.Pose(reach, grasp.q)
 
@@ -130,48 +135,54 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory):
     def drawer_stroke(drawer, opening):
         amount = float(array(task.drawer_open_amounts())[0, drawer])
         grasp, reach = bar_poses(task, drawer, amount, opening=opening)
-        result = planner.change_gripper_state(gripper_state=0.4, t=10) if opening else planner.close_gripper()
+        result = planner.change_gripper_state(gripper_state=0.4, t=10)
         if stopped(result):
             return result, False
         planner.planner.update_from_simulation()
-        # Deliberate contact is allowed only with the selected drawer in the
-        # planning model. All physical contacts remain enabled in the simulator.
-        with common.contact_stroke(planner, [DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX]):
+        # Keep the open drawer as a planning obstacle during the free approach;
+        # otherwise a feasible arm path can sweep the bar before the grasp.
+        if not opening:
             result = move("approach drawer", reach, sync=False)
             if stopped(result):
                 return result, False
+        # Deliberate contact is allowed only with the selected drawer in the
+        # planning model. All physical contacts remain enabled in the simulator.
+        with common.contact_stroke(planner, [DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX]):
             if opening:
-                result = move("grasp drawer handle", grasp, noisy=False, sync=False, contact=True)
+                result = move("approach drawer", reach, sync=False)
                 if stopped(result):
                     return result, False
-                result = planner.close_gripper(t=12)
-                if stopped(result):
-                    return result, False
-                aperture = float(array(task.agent.robot.get_qpos())[0, -2:].sum())
-                log("handle grip", aperture_m=aperture)
-                if aperture <= common.FINGER_EMPTY_M:
-                    return result, False
-                end = grasp.p + [0., -(cfg.open_success + 0.08 - amount), 0.]
-            else:
-                # Descend just in front of the handle, then push along the slide.
-                result = move("lower fist in front of handle",
-                              sapien.Pose(grasp.p + [0, -0.035, 0], grasp.q),
-                              noisy=False, sync=False)
-                if stopped(result):
-                    return result, False
-                end = grasp.p + [0., amount + 0.01, 0.]
+            grasp, _ = bar_poses(task, drawer, float(array(task.drawer_open_amounts())[0, drawer]))
+            result = move("grasp drawer handle", grasp, noisy=False, sync=False, contact=True)
+            if stopped(result):
+                return result, False
+            result = planner.close_gripper(t=12)
+            if stopped(result):
+                return result, False
+            aperture = float(array(task.agent.robot.get_qpos())[0, -2:].sum())
+            log("handle grip", aperture_m=aperture)
+            if aperture <= common.FINGER_EMPTY_M:
+                return result, False
+            # Holding the bar centres the contact. Translate along its slider
+            # while the arm stays still, instead of driving a fist through it.
+            base = task.agent.base_link.pose[0].sp
+            forward = base.to_transformation_matrix()[:3, 0]
+            # Contact can move the drawer. Use its remaining travel now, and
+            # stop at closed rather than loading the grasp past the hard stop.
+            amount = float(array(task.drawer_open_amounts())[0, drawer])
+            travel = -(cfg.open_success + 0.08 - amount) if opening else amount
+            point = base.p + travel * forward
             if opening:
-                # Roll straight back while keeping the grasp. This avoids an arm
-                # joint limit turning a drawer pull into a curved hand trajectory.
-                base = task.agent.base_link.pose[0].sp
-                forward = base.to_transformation_matrix()[:3, 0]
-                point = base.p - (cfg.open_success + 0.08 - amount) * forward
                 log("pull drawer with base", position=point.tolist())
                 result = planner.move_base_forward(point, freeze_arm=True)
-                end = task.agent.tcp.pose[0].sp.p.copy()
             else:
-                result = move("push drawer", sapien.Pose(end, grasp.q),
-                              noisy=False, sync=False)
+                # Contact compliance makes base displacement differ from slider
+                # travel. Stop on the drawer position at a gentle approach speed;
+                # the extra 3 cm only bounds a refused/incomplete closing stroke.
+                log("close drawer with base", max_travel_m=amount + 0.03, speed_m_s=0.06)
+                result = planner.idle_steps(t=1) if amount <= cfg.closed_tol else planner.drive_straight(
+                    amount + 0.03, v=0.06,
+                    stop_when=lambda: float(array(task.drawer_open_amounts())[0, drawer]) <= cfg.closed_tol)
             if stopped(result):
                 return result, False
             result = planner.idle_steps(t=10)
@@ -182,12 +193,39 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory):
             if not ok or stopped(result):
                 return result, False
             if opening:
-                # The requested motion is complete. Release and let the drawer
-                # settle; an unnecessary arm detour can hook the bar again.
                 result = planner.open_gripper(t=12, ramp=8)
             else:
-                back = end + [0., -BAR_STANDOFF, 0.]
-                result = move("withdraw from drawer", sapien.Pose(back, grasp.q), sync=False)
+                # A 64 mm aperture clears the 26 mm bar. The fingers are
+                # inclined: a horizontal retreat alone drags the bar across a
+                # pad. Clear it along the finger axis before the longer retreat.
+                result = planner.change_gripper_state(gripper_state=0.4, t=12, ramp=8)
+                if stopped(result):
+                    return result, False
+                base = task.agent.base_link.pose[0].sp
+                point = base.p - BAR_STANDOFF * base.to_transformation_matrix()[:3, 0]
+                point = noise.point("withdraw from drawer", point, (True, True, False))
+                tcp = task.agent.tcp.pose[0].sp
+                clearance = sapien.Pose(tcp.p - 0.06 * tcp.to_transformation_matrix()[:3, 2], tcp.q)
+                plan = planner.planner.plan_screw(
+                    mplib.Pose(clearance.p, clearance.q), array(task.agent.robot.get_qpos())[0],
+                    time_step=task.control_timestep, masked_joints=HANDLE_CLEARANCE_MASK,
+                    goal_tolerance=planner.ARM_SCREW_GOAL_TOLERANCE)
+                log("clear drawer handle", goal=clearance.p.tolist(), plan=plan["status"])
+                if plan["status"] == "Success":
+                    result = planner.follow_path(plan)
+                else:
+                    # Near the lift's upper limit, try the same Cartesian exit
+                    # with the arm. Refuse if neither straight path is feasible.
+                    result = move("clear handle with arm", clearance,
+                                  noisy=False, sync=False, contact=True)
+                if stopped(result):
+                    return result, False
+                log("withdraw from drawer", position=point.tolist())
+                result = planner.move_base_forward(point, freeze_arm=True)
+                amount = float(array(task.drawer_open_amounts())[0, drawer])
+                if amount > cfg.closed_tol or bool(array(task.sequence_violated).item()):
+                    log("drawer reopened during withdrawal", open_amount=amount)
+                    return result, False
         planner.planner.update_from_simulation()
         return result, not stopped(result)
 
@@ -227,7 +265,9 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory):
     centre = np.asarray(mesh.bounding_box_oriented.center_mass)
     # A nearly spherical apple has an unstable OBB axis. Use the counter-facing
     # approach and pinch across it, keeping the wrist above the countertop.
-    centre[2] = float(mesh.bounds[1, 2]) - 0.012
+    # Pinch below the crown: a shallow grasp can report opposing contacts
+    # while the fingertips still slide off the apple as soon as it is lifted.
+    centre[2] = float(mesh.bounds[1, 2]) - 0.022
     grasp = task.agent.build_grasp_pose(np.array([0., 2**-.5, -2**-.5]),
                                        np.array([1., 0., 0.]), centre)
     reach = sapien.Pose(grasp.p + [0, -0.06, 0.06], grasp.q)
@@ -239,7 +279,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory):
         return result
     common.hold_object_in_planner(env, planner, task, task.apple, True, who=WHO)
     tcp = task.agent.tcp.pose[0].sp
-    result = move("lift apple", sapien.Pose(tcp.p + [0, 0, 0.07], tcp.q), axes=(False, False, True))
+    result = move("lift apple", sapien.Pose(tcp.p + [0, 0, 0.07], tcp.q),
+                  axes=(False, False, True), contact=True)
     if stopped(result):
         return result
     if not bool(array(task.agent.is_grasping(task.apple)).item()):
