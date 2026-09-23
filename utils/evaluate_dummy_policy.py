@@ -12,9 +12,15 @@ import gymnasium as gym
 import mani_skill  # noqa: F401
 import my_scenes  # noqa: F401
 import numpy as np
+from mani_skill.agents.registration import register_agent
 
+from robots.fetch import DSFetch
 from utils.dummy_policy import DummyPolicy
 
+
+# This project defines ds_fetch with a 2D forward/yaw base command. Some
+# ManiSkill installs register a different 3D-base ds_fetch first.
+register_agent(override=True)(DSFetch)
 
 ENV_ID = "MyRoboCasa_TakeItBackTray-v1"
 
@@ -45,7 +51,12 @@ def evaluate(
             render_backend="cpu",
         )
         try:
-            policy = DummyPolicy(action_dim=env.action_space.shape[-1])
+            policy = DummyPolicy()
+            if policy.action.shape != env.action_space.shape:
+                raise ValueError(
+                    f"policy action {policy.action.shape} does not match "
+                    f"environment action space {env.action_space.shape}"
+                )
             obs, _ = env.reset(seed=seed)
             policy.reset()
             success = False
