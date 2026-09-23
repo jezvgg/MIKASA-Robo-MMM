@@ -23,7 +23,7 @@ from utils.mikasa.waypoint_noise import WaypointNoise
 WHO = "same_drawer_planner"
 BAR_STANDOFF = 0.22
 REACH_N_INIT = 40
-# Native DSFetch qpos: base x/y/yaw, torso, head pair, arm seven, fingers pair.
+# Native DSFetch qpos indices 0:4 are base x/y/yaw and torso.
 # Back away along the fingers using only base translation and the lift.
 HANDLE_CLEARANCE_MASK = [True, True, False, True] + [False] * 11
 
@@ -32,19 +32,21 @@ def array(value):
     return value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
 
 
-def bar_poses(task, drawer, amount, *, opening=True):
+def bar_poses(task, drawer, amount, *, flip=False):
     home = array(task.handle_home)[0, drawer].astype(float)
     centre = home + [0, -float(amount), 0]
     angle = math.radians(20 if drawer == 3 else 40)
     approaching = np.array([0., math.cos(angle), -math.sin(angle)])
     closing = np.array([0., math.sin(angle), math.cos(angle)])
+    if flip:
+        closing = -closing
     # The same centred handle grasp is used in both directions. Leave space
     # for the drawer front behind the pads, and enter along the finger axis.
     centre -= 0.01 * approaching
     grasp = task.agent.build_grasp_pose(approaching, closing, centre)
-    # An already open upper drawer brings a long axial standoff too close
-    # to the robot. Reach from above its closed front before the closing grasp.
-    reach = centre - 0.14 * approaching if opening else home + [0, -BAR_STANDOFF, 0.08]
+    # Enter and leave along the same finger axis. The closing dock is farther
+    # back by the drawer extension, so an open drawer does not crowd the arm.
+    reach = centre - 0.14 * approaching
     return grasp, sapien.Pose(reach, grasp.q)
 
 
@@ -134,7 +136,11 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory):
 
     def drawer_stroke(drawer, opening):
         amount = float(array(task.drawer_open_amounts())[0, drawer])
-        grasp, reach = bar_poses(task, drawer, amount, opening=opening)
+        # The two jaw assignments grasp the same bar. This palm orientation
+        # lets the arm descend from its raised rest pose without rolling over
+        # the wrist, and keeps the same approach for closing and opening.
+        flip = True
+        grasp, reach = bar_poses(task, drawer, amount, flip=flip)
         result = planner.change_gripper_state(gripper_state=0.4, t=10)
         if stopped(result):
             return result, False
@@ -152,7 +158,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory):
                 result = move("approach drawer", reach, sync=False)
                 if stopped(result):
                     return result, False
-            grasp, _ = bar_poses(task, drawer, float(array(task.drawer_open_amounts())[0, drawer]))
+            grasp, _ = bar_poses(task, drawer, float(array(task.drawer_open_amounts())[0, drawer]), flip=flip)
             result = move("grasp drawer handle", grasp, noisy=False, sync=False, contact=True)
             if stopped(result):
                 return result, False
@@ -234,7 +240,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory):
     if stopped(result):
         return result
     home = task._robot_start_np[0]
-    result = drive("approach column dock", [home[0], home[1] - 0.10])
+    extension = float(array(task.drawer_open_amounts())[0, target])
+    result = drive("approach column dock", [home[0], home[1] - 0.10 - extension])
     if stopped(result):
         return result
     result, closed = drawer_stroke(target, False)

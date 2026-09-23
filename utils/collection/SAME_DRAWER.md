@@ -29,6 +29,12 @@ root pose: `qpos[:3]` alone is not the world base pose when this root varies.
 Training receives only `qpos[3:]` (12D). `qpos[:3]` is stored separately as the 3D
 debug global state. Action channels 8 and 9 carry the head targets unchanged.
 
+The initial dock is farther from the cabinet by the open drawer's measured
+extension. Both strokes approach along the finger axis, from 14 cm away. The
+symmetric jaw assignment is reversed so the raised hand can descend without the
+large wrist turnover seen with the former above-front approach. Closing and opening
+use the same grasp orientation; the robot model and joint limits are unchanged.
+
 The oracle grasps the centre of the handle for both drawer strokes. The free
 approach to the initially open drawer keeps that drawer in the collision model;
 only the deliberate contact stroke permits touching it. Closing moves the base
@@ -61,6 +67,35 @@ by reading it back. Every attempt, including failure, remains in metadata.
 This task branch is based on `feat/season-dish-collection` (`50b9ed02`) because
 its shared collection infrastructure has not yet merged into master. Review the
 SameDrawer changes relative to that branch, then rebase after the shared work lands.
+
+## Approach smoothness check (2026-09-23)
+
+Runtime `f5d4d14734476fac5dec7c937122d5b6210911b7581abc12749ea61dcdeac91e`;
+comparison baseline `016e254`. Only the task planner changes in the runtime
+fingerprint. The task, 1600-step horizon, shared motion solver and DSFetch remain
+unchanged. Seed 40044 is the second episode of the reviewed robot-camera montage.
+Its first approach's cumulative wrist-flex motion falls from 227.03 to 82.26 degrees;
+the sum over seven arm joints falls from 697.18 to 451.60 degrees. Both full episodes
+succeed, in 76.8 and 69.85 seconds respectively. Closing and final opening were
+inspected in saved-state renders; the other two drawer heights were inspected too.
+
+On the same complete development pool 40000–40099, source success is **75/100**
+(previously 72/100): 22 gains and 19 losses. This is a regression comparison,
+including the development example, not a new untouched evaluation set. All three
+drawer heights exceed 60% in this pool. Median first-approach wrist-flex travel
+falls from 160.4 to 81.8 degrees; cases exceeding 180 degrees fall from 37 to 14.
+Large motions still occur on other starts, and this does not claim every path is
+shorter. Final-opening motion on the 62 comparable approaches is similar in median.
+
+Training qualification, seeds 11000–11007: **6/8 source**, 6/6 native 20 Hz replay,
+6/6 held-action 10 Hz replay and RGB, **6 LeRobot v3 episodes / 4,528 frames**.
+All 38 native state datasets match their source exactly in each accepted episode.
+Readback checks every numerical sample and 90 decoded RGB samples; both failed
+source attempts remain in metadata. The actual 12D/RGB policy interface completes
+seed 11000 (750 requests, 1500 control steps, no clipped targets), using recorded
+actions rather than a learned policy. Twenty-three regression tests and 126 H5
+audits pass. The original validation100 list remains unchanged and retains its
+original qualification provenance; none of the new seeds overlaps it.
 
 ## Commands
 
@@ -105,8 +140,8 @@ python -m utils.collection.qualify_head --profile same_drawer --output /path/to/
 python -m utils.collection.audit check --root /path/to/train --output /path/to/h5-audit.json
 ```
 
-Measured on kitchen 0, CPU physics, DSFetch from master `4c5c8b3`. The revised
-planner has runtime SHA256
+The following results describe the previous `016e254` qualification on kitchen 0,
+CPU physics, DSFetch from master `4c5c8b3`. That planner has runtime SHA256
 `cfee6b3ddb898ad5fdd9cf2c8844d8174cf70034aea429a1f26c30ad5aa4ec10`.
 The baseline is commit `8024c0e`, runtime
 `eeabb7707cca5d51027984badf8f32747c73feea99ca939f15d9826d1ca97f6c`.
