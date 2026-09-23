@@ -129,6 +129,8 @@ runs/traces/takeitback_tray/seed_3/
 камеры на head 256×256) и записывает для каждой episode-camera `chunk_index`,
 `file_index`, `from_timestamp`, `to_timestamp`. Seed, duration, success и reward
 сохраняются в `meta/source_rlds_metadata.json` и episode metadata parquet.
+`observation.state` — `qpos[3:]` (12D); `global_state` — первые 3 координаты
+базы, отдельно для отладки и не как policy observation.
 
 ## Перезапись траекторий с RGB
 

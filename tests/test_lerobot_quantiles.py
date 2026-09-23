@@ -55,6 +55,20 @@ def test_iter_episodes_uses_numeric_trajectory_order(tmp_path):
     assert episodes == [2, 10]
 
 
+def test_iter_episodes_splits_flat_ds_fetch_state(tmp_path):
+    source = tmp_path / "trajectory.h5"
+    flat_state = np.arange(2 * 30, dtype=np.float32).reshape(2, 30)
+    with h5py.File(source, "w") as file:
+        episode = file.create_group("traj_0")
+        episode.create_dataset("actions", data=np.zeros((2, 13), dtype=np.float32))
+        episode.create_dataset("obs", data=flat_state)
+
+    episode, _, state_dim = next(iter_episodes(source))
+    assert state_dim == 12
+    np.testing.assert_array_equal(episode["global_state"], flat_state[:, :3])
+    np.testing.assert_array_equal(episode["robot_state"], flat_state[:, 3:15])
+
+
 def test_converter_preserves_camera_sizes_and_writes_video_ranges(
     tmp_path, monkeypatch
 ):
@@ -149,13 +163,30 @@ def test_converter_preserves_camera_sizes_and_writes_video_ranges(
     assert episode["reward_mean"] == [2.0]
     assert episode["terminated"] == [True]
     assert episode["truncated"] == [False]
-    for key, values in (("action", actions), ("observation.state", states)):
+    data = pq.read_table(output / "data" / "chunk-000" / "file-000.parquet").to_pydict()
+    assert data["observation.state"] == states[:, 3:].tolist()
+    assert data["global_state"] == states[:, :3].tolist()
+    for key, values in (
+        ("action", actions),
+        ("observation.state", states[:, 3:]),
+        ("global_state", states[:, :3]),
+    ):
         expected = np.quantile(
             values, (0.01, 0.10, 0.50, 0.90, 0.99), axis=0, method="linear"
         )
         for i, name in enumerate(("q01", "q10", "q50", "q90", "q99")):
             np.testing.assert_allclose(stats[key][name], expected[i])
             np.testing.assert_allclose(episode[f"stats/{key}/{name}"][0], expected[i])
+    assert stats["action"]["count"] == [3]
+    assert stats["observation.state"]["count"] == [3]
+    assert stats["global_state"]["count"] == [3]
+    assert episode["stats/observation.state/count"] == [[3]]
+    assert episode["stats/global_state/count"] == [[3]]
+    assert info["features"]["observation.state"]["shape"] == [12]
+    assert info["features"]["global_state"]["shape"] == [3]
+    assert info["features"]["global_state"]["names"] == [
+        "x_base", "y_base", "psi_base"
+    ]
 
     source_rlds = json.loads(
         (output / "meta" / "source_rlds_metadata.json").read_text()

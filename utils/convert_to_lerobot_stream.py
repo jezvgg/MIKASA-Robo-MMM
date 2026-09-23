@@ -37,6 +37,9 @@ QUANTILES = (
     (0.90, "q90"),
     (0.99, "q99"),
 )
+GLOBAL_STATE_DIM = 3
+PROPRIO_STATE_DIM = 12
+DSFETCH_QPOS_DIM = GLOBAL_STATE_DIM + PROPRIO_STATE_DIM
 
 
 @dataclass
@@ -64,11 +67,21 @@ def iter_episodes(h5_file: Path):
         state_dim = None
         flat_state = False
         if "obs/agent" in first and "qpos" in first["obs/agent"]:
-            state_dim = first["obs/agent"]["qpos"].shape[1]
+            raw_state_dim = first["obs/agent"]["qpos"].shape[1]
         elif "obs" in first and isinstance(first["obs"], h5py.Dataset):
-            # obs_mode="state" is stored as one flattened (T+1, D) dataset.
-            state_dim = first["obs"].shape[1]
+            # State-only recording stores qpos + qvel in one flattened array.
+            raw_state_dim = first["obs"].shape[1]
             flat_state = True
+        else:
+            raw_state_dim = None
+        if raw_state_dim is not None:
+            expected_dim = DSFETCH_QPOS_DIM * (2 if flat_state else 1)
+            if raw_state_dim != expected_dim:
+                raise ValueError(
+                    f"expected DSFetch qpos{'+qvel' if flat_state else ''} width "
+                    f"{expected_dim}, got {raw_state_dim}"
+                )
+            state_dim = PROPRIO_STATE_DIM
         for key in keys:
             traj = f[key]
             ep = {"actions": traj["actions"][:]}
@@ -76,9 +89,22 @@ def iter_episodes(h5_file: Path):
                 ep[f"rgb_{cam}"] = traj[f"obs/sensor_data/{cam}/rgb"][: len(ep["actions"])]
             if state_dim:
                 if flat_state:
-                    ep["robot_state"] = traj["obs"][: len(ep["actions"])]
+                    raw_state = traj["obs"][: len(ep["actions"])]
+                    if raw_state.shape[1] != 2 * DSFETCH_QPOS_DIM:
+                        raise ValueError(
+                            f"expected flat DSFetch qpos+qvel width "
+                            f"{2 * DSFETCH_QPOS_DIM}, got {raw_state.shape[1]} in {key}"
+                        )
+                    raw_state = raw_state[:, :DSFETCH_QPOS_DIM]
                 else:
-                    ep["robot_state"] = traj["obs/agent/qpos"][: len(ep["actions"])]
+                    raw_state = traj["obs/agent/qpos"][: len(ep["actions"])]
+                if raw_state.shape[1] != DSFETCH_QPOS_DIM:
+                    raise ValueError(
+                        f"expected DSFetch qpos width {DSFETCH_QPOS_DIM}, "
+                        f"got {raw_state.shape[1]} in {key}"
+                    )
+                ep["global_state"] = raw_state[:, :GLOBAL_STATE_DIM]
+                ep["robot_state"] = raw_state[:, GLOBAL_STATE_DIM:]
             for name in ("rewards", "success", "terminated", "truncated"):
                 if name in traj:
                     ep[name] = traj[name][:]
@@ -128,7 +154,7 @@ def vec_stats(moms, dim):
         "std": [moms[i].summary()["std"] for i in range(dim)],
         "max": [moms[i].summary()["max"] for i in range(dim)],
         "min": [moms[i].summary()["min"] for i in range(dim)],
-        "count": [moms[0].summary()["n"] // dim],
+        "count": [moms[0].summary()["n"]],
     }
 
 
@@ -246,6 +272,7 @@ def main(args: Args):
 
     a_mom = [Moments() for _ in range(action_dim)]
     s_mom = [Moments() for _ in range(state_dim)] if state_dim else []
+    g_mom = [Moments() for _ in range(GLOBAL_STATE_DIM)] if state_dim else []
     cam_mom = {cam: [Moments() for _ in range(3)] for cam in rgb_cameras}
     ts_mom, fi_mom, ei_mom, ix_mom, ti_mom = Moments(), Moments(), Moments(), Moments(), Moments()
 
@@ -264,6 +291,8 @@ def main(args: Args):
             ep_data, ep_idx, state_dim is not None, args.fps,
             task_index=0, task_name=args.task_name,
         )
+        if "global_state" in ep_data:
+            df["global_state"] = [row.tolist() for row in ep_data["global_state"]]
         length = len(df)
         df["index"] = range(global_index, global_index + length)
         global_index += length
@@ -290,10 +319,14 @@ def main(args: Args):
         for i in range(action_dim):
             a_mom[i].add(actions[:, i])
         state = None
+        global_state = None
         if state_dim and "robot_state" in ep_data:
             state = ep_data["robot_state"].astype(np.float64)
+            global_state = ep_data["global_state"].astype(np.float64)
             for i in range(state_dim):
                 s_mom[i].add(state[:, i])
+            for i in range(GLOBAL_STATE_DIM):
+                g_mom[i].add(global_state[:, i])
         ts_mom.add(df["timestamp"].values)
         fi_mom.add(df["frame_index"].values)
         ei_mom.add(df["episode_index"].values)
@@ -310,6 +343,12 @@ def main(args: Args):
                        "mean": state.mean(0).tolist(), "std": state.std(0).tolist(),
                        **quantile_stats(state), "count": [length]}
                       if state is not None else None),
+            "global_state": ({"min": global_state.min(0).tolist(),
+                              "max": global_state.max(0).tolist(),
+                              "mean": global_state.mean(0).tolist(),
+                              "std": global_state.std(0).tolist(),
+                              **quantile_stats(global_state), "count": [length]}
+                             if global_state is not None else None),
         })
 
         rewards = np.asarray(ep_data.get("rewards", []), dtype=np.float64).reshape(-1)
@@ -388,7 +427,7 @@ def main(args: Args):
         for col in combined.columns:
             if col == "task":
                 fields.append(pa.field("task", pa.string()))
-            elif col in ("action", "observation.state"):
+            elif col in ("action", "observation.state", "global_state"):
                 fields.append(pa.field(col, pa.list_(pa.float32())))
             elif col == "timestamp":
                 fields.append(pa.field(col, pa.float32()))
@@ -440,6 +479,16 @@ def main(args: Args):
             })
             for _, name in QUANTILES:
                 em[f"stats/observation.state/{name}"] = st["state"][name]
+        if st["global_state"]:
+            em.update({
+                "stats/global_state/min": st["global_state"]["min"],
+                "stats/global_state/max": st["global_state"]["max"],
+                "stats/global_state/mean": st["global_state"]["mean"],
+                "stats/global_state/std": st["global_state"]["std"],
+                "stats/global_state/count": st["global_state"]["count"],
+            })
+            for _, name in QUANTILES:
+                em[f"stats/global_state/{name}"] = st["global_state"][name]
         for cam in rgb_cameras:
             p = f"videos/observation.images.{cam}"
             em[f"{p}/chunk_index"] = chunk_idx
@@ -492,7 +541,12 @@ def main(args: Args):
     if state_dim:
         features["observation.state"] = {
             "dtype": "float32", "shape": [state_dim],
-            "names": [f"joint_{i}" for i in range(state_dim)], "fps": float(args.fps)}
+            "names": [f"proprio_{i}" for i in range(state_dim)],
+            "fps": float(args.fps)}
+        features["global_state"] = {
+            "dtype": "float32", "shape": [GLOBAL_STATE_DIM],
+            "names": ["x_base", "y_base", "psi_base"],
+            "fps": float(args.fps)}
     for cam in rgb_cameras:
         image_width, image_height = camera_sizes[cam]
         features[f"observation.images.{cam}"] = {
@@ -523,7 +577,9 @@ def main(args: Args):
     quantile_dims = {"action": action_dim}
     if state_dim:
         stats["observation.state"] = vec_stats(s_mom, state_dim)
+        stats["global_state"] = vec_stats(g_mom, GLOBAL_STATE_DIM)
         quantile_dims["observation.state"] = state_dim
+        quantile_dims["global_state"] = GLOBAL_STATE_DIM
     for key, quantiles in vector_quantiles(
         base_path / "data", quantile_dims, total_frames
     ).items():
