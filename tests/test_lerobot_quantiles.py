@@ -53,9 +53,15 @@ def test_converter_writes_vector_quantiles(tmp_path):
 
     assert main(Args(str(source), str(output), task_name="test", robot_type="ds_fetch")) == 0
     stats = json.loads((output / "meta" / "stats.json").read_text())
+    episode = pq.read_table(
+        output / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    ).to_pydict()
     for key, values in (("action", actions), ("observation.state", states)):
         expected = np.quantile(
             values, (0.01, 0.10, 0.50, 0.90, 0.99), axis=0, method="linear"
         )
         for i, name in enumerate(("q01", "q10", "q50", "q90", "q99")):
             np.testing.assert_allclose(stats[key][name], expected[i])
+            np.testing.assert_allclose(
+                episode[f"stats/{key}/{name}"][0], expected[i]
+            )

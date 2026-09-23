@@ -31,6 +31,13 @@ from mani_skill.trajectory.convert_to_lerobot import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+QUANTILES = (
+    (0.01, "q01"),
+    (0.10, "q10"),
+    (0.50, "q50"),
+    (0.90, "q90"),
+    (0.99, "q99"),
+)
 
 
 @dataclass
@@ -121,6 +128,13 @@ def vec_stats(moms, dim):
     }
 
 
+def quantile_stats(values: np.ndarray) -> dict[str, list[float]]:
+    quantiles = np.quantile(
+        values, [q for q, _ in QUANTILES], axis=0, method="linear"
+    )
+    return {name: quantiles[i].tolist() for i, (_, name) in enumerate(QUANTILES)}
+
+
 def vector_quantiles(
     data_dir: Path, feature_dims: dict[str, int], total_frames: int
 ) -> dict[str, dict[str, list[float]]]:
@@ -154,13 +168,7 @@ def vector_quantiles(
                 float(np.quantile(matrix[:, i], q, method="linear"))
                 for i in range(matrix.shape[1])
             ]
-            for q, name in (
-                (0.01, "q01"),
-                (0.10, "q10"),
-                (0.50, "q50"),
-                (0.90, "q90"),
-                (0.99, "q99"),
-            )
+            for q, name in QUANTILES
         }
     return result
 
@@ -231,10 +239,11 @@ def main(args: Args):
         episode_states.append({
             "actions": {"min": actions.min(0).tolist(), "max": actions.max(0).tolist(),
                         "mean": actions.mean(0).tolist(), "std": actions.std(0).tolist(),
-                        "count": [length]},
+                        **quantile_stats(actions), "count": [length]},
             "state": ({"min": state.min(0).tolist(), "max": state.max(0).tolist(),
                        "mean": state.mean(0).tolist(), "std": state.std(0).tolist(),
-                       "count": [length]} if state is not None else None),
+                       **quantile_stats(state), "count": [length]}
+                      if state is not None else None),
         })
 
     # pre-create directories for the full episode count
@@ -293,6 +302,8 @@ def main(args: Args):
             "stats/action/std": st["actions"]["std"],
             "stats/action/count": st["actions"]["count"],
         }
+        for _, name in QUANTILES:
+            em[f"stats/action/{name}"] = st["actions"][name]
         if st["state"]:
             em.update({
                 "stats/observation.state/min": st["state"]["min"],
@@ -301,6 +312,8 @@ def main(args: Args):
                 "stats/observation.state/std": st["state"]["std"],
                 "stats/observation.state/count": st["state"]["count"],
             })
+            for _, name in QUANTILES:
+                em[f"stats/observation.state/{name}"] = st["state"][name]
         for cam in rgb_cameras:
             p = f"videos/observation.images.{cam}"
             em[f"{p}/chunk_index"] = chunk_idx
