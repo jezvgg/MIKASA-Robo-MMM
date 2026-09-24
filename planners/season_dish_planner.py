@@ -900,6 +900,14 @@ def approach_aligned_grasp_info(obb, ee_direction, target_closing) -> dict:
     return dict(approaching=approaching, closing=closing, center=center, extents=extents)
 
 
+
+def cue_head_target(task):
+    """View the whole station from the distant start, independent of the answer."""
+    mid = (_np(task.shaker.pose.p)[0] + _np(task.condiment_bottle.pose.p)[0]) / 2
+    local = (task.agent.base_link.pose[0].sp.inv() * sapien.Pose(mid)).p
+    return float(np.clip(np.arctan2(local[1], local[0]), -0.6, 0.6)), 0.20
+
+
 def wait_cue(env, planner, info):
     return common.wait_cue(env, planner, info, who=WHO)
 
@@ -1328,10 +1336,8 @@ def _solve(
     # -- STAGE 0: sit through the cue -------------------------------------------
     # Look at the station midpoint, independent of which condiment the cue names.
     # Thus head proprioception does not encode the answer after the cue disappears.
-    mid = (_np(task.shaker.pose.p)[0] + _np(task.condiment_bottle.pose.p)[0]) / 2
-    local = (task.agent.base_link.pose[0].sp.inv() * sapien.Pose(mid)).p
-    pan = float(np.clip(np.arctan2(local[1], local[0]), -0.6, 0.6))
-    gaze = planner.hold_head(pan=pan, tilt=0.45, t=12, ramp=10)
+    pan, tilt = cue_head_target(task)
+    gaze = planner.hold_head(pan=pan, tilt=tilt, t=12, ramp=10)
     if gaze == -1:
         return fail(env, "look at the cue station")
     info = wait_cue(env, planner, gaze[-1])
@@ -1343,13 +1349,22 @@ def _solve(
     target = task.shaker if target_is_shaker else task.condiment_bottle
     say(env, "target chosen", target_is_shaker=target_is_shaker, blind=bool(blind))
 
-    # The base used to slide along the counter here, to stand in front of the target's
-    # own station (K55). Removed on 2026-08-24 after a 75-seed-per-arm A/B at matched
-    # load: **60/75 with it, 59/75 without** — the stage buys nothing, and it is the
-    # first thing anyone watching a recording sees the robot do. It earned its keep only
-    # while the left condiment sat seven centimetres from the sink; `station_along`
-    # moved the station clear of the sink and the reach stopped needing help.
-    # `dock_for_target` stays in `oracle_common` — the burner oracle uses it.
+    # Travel only after the cue disappears. Both answers use the same dock,
+    # so this approach cannot leave an answer-dependent head or base cue.
+    dock = _np(task._station_dock_np)[0].astype(np.float64)
+    dock_xyz = noise.point("station_dock", [dock[0], dock[1], 0.0], axes=(True, True, False))
+    face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.0])
+    say(env, "travel after cue", goal=dock_xyz.tolist(),
+        distance_m=float(np.linalg.norm(dock_xyz[:2] - _np(task.agent.base_link.pose.p)[0, :2])))
+    res = planner.drive_base(target_pos=dock_xyz, target_view_vec=face, freeze_arm=True)
+    if res == -1:
+        return fail(env, "approach condiment station")
+    if common.stopped_by_horizon(planner):
+        return res
+    pan, _ = cue_head_target(task)
+    res = planner.hold_head(pan=pan, tilt=0.45, t=12, ramp=10)
+    if res == -1 or common.stopped_by_horizon(planner):
+        return res
 
     # -- STAGE 2: grasp the target ---------------------------------------------------
     say(env, "grasp the target")

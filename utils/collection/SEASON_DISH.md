@@ -20,8 +20,12 @@ control steps. Success is allowed after the 40-step cue and 40-step delay.
 The other condiment must not be grasped or displaced more than 0.10 m from
 its initial position. These are the existing task predicates; seasoning is
 a pose proxy, without substance/fluid simulation. The horizon is 1100 steps
-(55 s). The object placements also determine the robot's initial station dock;
-start poses vary across seeds but are not statistically independent of the station.
+(55 s). The manipulation docks are derived from the object placements. The robot starts
+0.75 ± 0.05 m behind the station dock, facing the condiments. After the cue disappears
+it drives to that dock, then begins grasping. Distance jitter uses the seeded
+placement RNG after the object draw. Initial poses vary across seeds; they are
+not statistically independent of the station. The cue marker radius is 4.5 cm so
+it remains visible from the distant start; the robot cameras are unchanged.
 
 ## Motion and noise
 
@@ -35,6 +39,7 @@ to 5 mm per enabled world axis to these goals:
 
 | Goal | Perturbed coordinates |
 |---|---|
+| Initial station dock after the cue | x, y |
 | Free approach before grasp | x, y, z |
 | Lift above the neighbouring object | z |
 | Base stop at the bowl dock | x, y |
@@ -134,7 +139,47 @@ removing it. This is a finite check of the available observations, not evidence
 that a learned policy uses memory. The H5 check covers every completed recording,
 including physical failures, and reproduces logged noise draws from their seed.
 
-## Verification status
+## Distant-start qualification (profile v2)
+
+Measured on kitchen 0, CPU physics, source SHA256
+`d40c57a61ff5eb90f7f0231079037bb6c0a892596db1f8917de8fe8f0ac63a02`:
+
+| Fixed pool | Source planner | Native 20 Hz | Paired 10 Hz | RGB |
+|---|---|---|---|---|
+| Development, 60000–60099 | 98/100 | Not run | Not run | Separate video |
+| Training, 11000–11007 | 8/8 | 8/8 | 8/8 | 8 native + 8 paired |
+| Validation candidates, 20000–20127 | 127/128 | Not run | Not run | Not required for selection |
+
+The two pilot failures are a pour miss (60004) and horizon exhaustion (60064).
+Every pilot attempt physically travelled 0.693–0.799 m after cue step 40;
+grasping started at steps 98–104, a 2.9–3.2 s interval after the cue vanished.
+This is measured base motion in H5, not just the requested dock distance.
+
+All 64 answer counterfactuals over 32 starts passed: each head camera showed
+31–41 changed yellow pixels during the cue; RGB/proprio/text were identical after
+hiding it. The check now requires at least 20 changed yellow pixels in *each*
+head camera. All eight accepted training RGB episodes also passed that visibility
+criterion and kept the marker hidden after step 40. The wrist is not required to
+see the initial cue. Head tilt changes from 0.20 at the distant start to 0.45 at
+the manipulation dock; both gazes target the station midpoint, not the answer.
+
+LeRobot v3 contains 8 episodes / 2,183 frames at 10 Hz. Readback checked every
+numeric sample and 120 decoded RGB samples. All 39 native H5 arrays matched
+exactly in all eight episodes. All 268 H5 recordings (100 pilot, 128 validation,
+40 training phases), including failures, passed the action/state/metadata/noise
+audit. Seventeen contract tests passed. A recorded-action policy exercised the
+actual RGB/12D interface successfully for 235 requests / 470 control steps with
+no clipped channels; this is not a learned-policy result. The 40 DSFetch model
+files remain byte-identical to the pinned master reference.
+
+The new [100-seed v2 validation list](validation_seeds/season_dish_v2.json) is
+selected by source-planner success, excludes 270 assigned training/development/
+diagnostic seeds, and records the candidate outcomes and provenance hashes.
+Only candidate 20026 failed; the last selected seed is 20100. Validation native
+and 10 Hz replays were not run, and are not selection conditions. The v1 list
+below is retained as a historical qualification of the earlier start geometry.
+
+## Historical near-station qualification (profile v1)
 
 Measured on kitchen 0 with CPU physics, DSFetch from master `4c5c8b3`, and
 simulation source SHA256

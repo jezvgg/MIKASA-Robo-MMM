@@ -57,15 +57,13 @@ def qualify(run_path, output, start_seed=300, count=32):
             if base.pour_hold.item() != 0:
                 raise AssertionError("Reset retained a previous pour hold")
             # Same answer-independent station gaze used by the demonstrator.
-            mid = (as_numpy(base.shaker.pose.p)[0] + as_numpy(base.condiment_bottle.pose.p)[0]) / 2
-            import sapien
-            local = (base.agent.base_link.pose[0].sp.inv() * sapien.Pose(mid)).p
-            pan = float(np.clip(np.arctan2(local[1], local[0]), -.6, .6))
+            from planners.season_dish_planner import cue_head_target
+            pan, tilt = cue_head_target(base)
             arm = as_numpy(base.agent.controller.controllers["arm"].qpos)[0].copy()
             body = as_numpy(base.agent.controller.controllers["body"].qpos)[0].copy()
             initial_head = body[:2].copy()
             for step in range(12):
-                body[:2] = initial_head + min(1., (step+1)/10) * (np.array([pan, .45])-initial_head)
+                body[:2] = initial_head + min(1., (step+1)/10) * (np.array([pan, tilt])-initial_head)
                 env.step(np.r_[arm, 1., body, 0., 0.])
             # idle_steps holds measured head/body targets after the gaze ramp.
             body = as_numpy(base.agent.controller.controllers["body"].qpos)[0].copy()
@@ -100,7 +98,7 @@ def qualify(run_path, output, start_seed=300, count=32):
                         Image.fromarray(absent[key]).save(output / f"seed{seed}_answer{int(answer)}_hidden_{name}.png")
                 per_answer.append(dict(target_is_shaker=answer, changed_pixels=changes,
                     changed_yellow_pixels=yellow,
-                    visible=max(yellow[c] for c in CAMERAS if c != "fetch_hand") >= 8))
+                    visible=min(yellow[c] for c in CAMERAS if c != "fetch_hand") >= 20))
             equal = all(np.array_equal(hidden[0][k], hidden[1][k]) for k in hidden[0])
             cases.append(dict(seed=seed, cue_cases=per_answer,
                 hidden_answer_inputs_identical=equal,
@@ -123,6 +121,7 @@ def qualify(run_path, output, start_seed=300, count=32):
             target_counts={str(b):sum(s["target_is_shaker"] == b for s in snapshots) for b in (False,True)},
             visibility_passed=all(c["visible"] for case in cases for c in case["cue_cases"]),
             hidden_passed=all(c["hidden_answer_inputs_identical"] for c in cases),
+            visibility_criterion="At least 20 changed yellow pixels in each native head camera",
             note="CPU physics, scene 0; finite reset/counterfactual check, not a statistical-independence claim.")
         passed = (repeat_equal and report["visibility_passed"] and report["hidden_passed"]
                   and report["unique_robot_starts"] == count

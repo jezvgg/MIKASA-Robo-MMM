@@ -1,7 +1,7 @@
 {
-  "profile_version": 1,
+  "profile_version": 2,
   "env_id": "MikasaSeasonDish-v0",
-  "task_variant": "two_condiments_tilt_155",
+  "task_variant": "two_condiments_distant_cue_tilt_155",
   "robot_reference": {
     "repository": "https://github.com/jezvgg/MIKASA-Robo-MMM",
     "commit": "4c5c8b3de941565ee2d57b153a10254fe64c2849",
@@ -56,8 +56,10 @@
     "grasp_min_force": 0.5,
     "distractor_move_tol": 0.1,
     "marker_height": 0.14,
-    "marker_radius": 0.025,
-    "require_return": false
+    "marker_radius": 0.045,
+    "require_return": false,
+    "start_backoff_m": 0.75,
+    "start_backoff_jitter_m": 0.05
   },
   "data": {
     "control_hz": 20,
@@ -106,7 +108,7 @@
     "module": "planners.season_dish_planner",
     "waypoint_noise_m": 0.005,
     "noise_seed_offset": 200003,
-    "noise_scope": "approach_lift_dock_hover_prehover_corrected_hover_pour",
+    "noise_scope": "station_dock_approach_lift_dock_hover_prehover_corrected_hover_pour",
     "noise_distribution": "independent_uniform_world_axes",
     "contact_grasp_noise": false,
     "cue_gaze": "station_midpoint_independent_of_answer"

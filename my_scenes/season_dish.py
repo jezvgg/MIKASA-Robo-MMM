@@ -83,6 +83,14 @@ FK reconstructions of colliding configurations agreed on (0.02-0.10, taken
 conservatively). Only used to keep a drawn dock out of the corner."""
 
 
+def station_start_pose(dock, backoff_m):
+    """Floor pose behind a manipulation dock; facing the same station."""
+    x, y, yaw = map(float, dock)
+    return np.array([x - backoff_m * math.cos(yaw),
+                     y - backoff_m * math.sin(yaw), 0.0,
+                     math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)], dtype=np.float32)
+
+
 @dataclass
 class SeasonDishConfig:
     """Every threshold the task uses, named once.
@@ -253,6 +261,11 @@ class SeasonDishConfig:
     and the bowl over what is left. Which uniformity the task wants is the owner's call;
     `joint` stays the default until it is made."""
 
+    # The cue is observed from the floor, outside manipulation reach. The
+    # station dock remains the same grasping location after the approach.
+    start_backoff_m: float = 0.75
+    start_backoff_jitter_m: float = 0.05
+
     # --- the robot's docks -----------------------------------------------------
     dock_toward: float = float(os.environ.get("MIKASA_DOCK_TOWARD", "0.15"))
     bowl_dock_toward: float | None = (
@@ -291,7 +304,7 @@ class SeasonDishConfig:
     "How far the wrong condiment may drift before the episode is void."
 
     marker_height: float = 0.14
-    marker_radius: float = 0.025
+    marker_radius: float = 0.045
 
     require_return: bool = False
     "v2 switch: also require the condiment to be put back. Not implemented in v1."
@@ -320,6 +333,7 @@ class SeasonDishConfig:
             f"delay ({self.delay_steps}) in a {self.horizon}-step episode"
         )
         assert self.station_spacing > 0 and self.spawn_jitter_xy >= 0
+        assert 0.0 <= self.start_backoff_jitter_m < self.start_backoff_m
         assert 0.0 < self.reach_band[0] < self.reach_band[1], self.reach_band
         assert self.min_object_gap >= 0.0 and self.contact_band >= 0.0
         assert self.placement_draw_tries > 0
@@ -533,9 +547,8 @@ class SeasonDishTask(BaseEnv):
             acrosses.append(across)
             # The robot's two docks (T5): the counter's front-facing standoff pose,
             # `dock_toward` closer, slid along the counter to the station (where it
-            # starts and grasps) and to the bowl (where it pours) — as burner.py does
-            # for its cup and stove docks. Each is (x, y, yaw); the start pose is the
-            # station dock as a 7-vector for `_restore_robot`.
+            # grasps) and to the bowl (where it pours). Each is (x, y, yaw).
+            # The initial floor pose is farther back, before the cue-to-station trip.
             dock_p, dock_yaw = dock_pose_for(
                 self.scene_builder, fixtures, "counter_main_main_group",
                 offset=(0.0, self.cfg.dock_toward),
@@ -555,10 +568,8 @@ class SeasonDishTask(BaseEnv):
             dock_yaws.append(float(dock_yaw))
             station_docks.append(np.array([sta[0], sta[1], dock_yaw], dtype=np.float32))
             bowl_docks.append(np.array([bwl[0], bwl[1], dock_yaw], dtype=np.float32))
-            robot_starts.append(np.array(
-                [sta[0], sta[1], 0.0, math.cos(dock_yaw / 2), 0.0, 0.0, math.sin(dock_yaw / 2)],
-                dtype=np.float32,
-            ))
+            robot_starts.append(station_start_pose(
+                station_docks[-1], self.cfg.start_backoff_m))
 
         # Per-env inputs for the placement draw (K74). Per env, not `scene_data[0]`
         # for all of them: review §5 is exactly this bug, and jezv's own version reads
@@ -800,9 +811,9 @@ class SeasonDishTask(BaseEnv):
                     bwl = dpb + av * float(np.dot(bowl_j[:2] - dpb, av))
                     self._station_dock_np[e] = np.array([sta[0], sta[1], yaw], dtype=np.float32)
                     self._bowl_dock_np[e] = np.array([bwl[0], bwl[1], yaw], dtype=np.float32)
-                    start = np.array(
-                        [sta[0], sta[1], 0.0, math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)],
-                        dtype=np.float32)
+                    backoff = self.cfg.start_backoff_m + sub.uniform(
+                        -self.cfg.start_backoff_jitter_m, self.cfg.start_backoff_jitter_m)
+                    start = station_start_pose(self._station_dock_np[e], backoff)
                     self._robot_start_np[e] = start
                     # `_restore_robot` reads the **tensor**, which `_load_scene` built
                     # once. Updating only the numpy copy leaves the robot spawning at the
@@ -816,8 +827,7 @@ class SeasonDishTask(BaseEnv):
                 self._placement_fell_back[env_idx] = False
 
             # After the draw, never before: `_restore_robot` puts the base at
-            # `_robot_start`, and the station dock the draw just computed is where that
-            # has to be. Restoring first placed the robot at the previous episode's dock
+            # `_robot_start`, behind the station dock the draw just computed. Restoring first placed the robot at the previous episode's dock
             # and then moved the objects away from it — every one of the first 30
             # randomized episodes failed, 14 of them at the grasp, on exactly that.
             self._restore_robot(env_idx)
