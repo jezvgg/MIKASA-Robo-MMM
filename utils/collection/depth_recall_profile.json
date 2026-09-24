@@ -1,0 +1,117 @@
+{
+  "profile_version": 1,
+  "env_id": "MikasaDepthRecall-v1",
+  "task_variant": "four_props_counter_staging_restore_three",
+  "robot_reference": {
+    "repository": "https://github.com/jezvgg/MIKASA-Robo-MMM",
+    "commit": "4c5c8b3de941565ee2d57b153a10254fe64c2849",
+    "class": "DSFetch",
+    "uid": "ds_fetch"
+  },
+  "env_kwargs": {
+    "robot_uids": "ds_fetch",
+    "control_mode": "pd_joint_pos",
+    "num_envs": 1,
+    "scene_idx": 0,
+    "sim_backend": "cpu",
+    "render_backend": "sapien_cuda",
+    "sim_config": {
+      "control_freq": 20,
+      "sim_freq": 100
+    }
+  },
+  "task": {
+    "horizon": 5700,
+    "cabinet_name": "cab_main_main_group",
+    "counter_name": "counter_main_main_group",
+    "door_hinge": "rightdoorhinge",
+    "door_open_rad": 1.75,
+    "n_props": 4,
+    "prop_half_xy": 0.0225,
+    "prop_half_h": 0.06,
+    "shelf_top_z": 1.42,
+    "spawn_clearance": 0.004,
+    "finger_reach": 0.03,
+    "row_slots_y": [
+      -0.3,
+      -0.23,
+      -0.16,
+      -0.09
+    ],
+    "row_margin_x": 0.13,
+    "row_jitter_x": 0.04,
+    "slot_x_offsets": [
+      -0.36,
+      -0.24,
+      -0.12,
+      0.0
+    ],
+    "place_across": -0.525,
+    "slot_radius": 0.08,
+    "slot_xy_tol": 0.035,
+    "upright_tilt_deg": 15.0,
+    "upright_tol": 0.015,
+    "hold_steps": 15,
+    "settle_lin_speed": 0.05,
+    "settle_ang_speed": 0.2,
+    "leave_tol": 0.06,
+    "start_y": -1.9,
+    "start_yaw_deg": 90.0,
+    "start_jitter_x": 0.02,
+    "start_jitter_y": 0.08,
+    "start_jitter_yaw": 0.1
+  },
+  "data": {
+    "control_hz": 20,
+    "policy_hz": 10,
+    "action_repeat": 2,
+    "action_dim": 13,
+    "proprio_dim": 12,
+    "debug_global_state_dim": 3,
+    "lerobot_format": "v3.0",
+    "rgb_only": true,
+    "max_instruction_tokens": 100
+  },
+  "cameras": {
+    "left_base_camera_link": {
+      "width": 256,
+      "height": 256,
+      "fov": 1.5
+    },
+    "fetch_hand": {
+      "width": 128,
+      "height": 128,
+      "fov": 2.0
+    },
+    "right_base_camera_link": {
+      "width": 256,
+      "height": 256,
+      "fov": 1.5
+    }
+  },
+  "validation": {
+    "successful_unique_seeds": 100,
+    "exclude_all_training_attempts": true,
+    "exclude_development_seeds": true,
+    "replace_after_policy_failure": false
+  },
+  "runtime_packages": {
+    "mani_skill": "3.0.0b22",
+    "sapien": "3.0.3",
+    "mplib": "0.2.1",
+    "numpy": "1.26.4",
+    "torch": "2.14.0",
+    "gymnasium": "0.29.1",
+    "h5py": "3.16.0"
+  },
+  "planner": {
+    "module": "planners.depth_recall_v1_planner",
+    "waypoint_noise_m": 0.005,
+    "noise_seed_offset": 200003,
+    "noise_scope": "initial_dock_shelf_approach_high_counter_cross_counter_approach_shelf_entry",
+    "noise_distribution": "independent_uniform_world_axes",
+    "contact_grasp_noise": false,
+    "gaze": "row_then_counter_midpoint_independent_of_original_assignment",
+    "staging_seed_offset": 10007
+  }
+}

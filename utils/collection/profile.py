@@ -18,6 +18,7 @@ PROFILE = Path(__file__).with_name("cabinet_search_profile.json")
 TASKS = {
     "cabinet_search": ("MikasaCabinetSearch-v0", "my_scenes.cabinet_search", "CabinetSearchTask"),
     "season_dish": ("MikasaSeasonDish-v0", "my_scenes.season_dish", "SeasonDishTask"),
+    "depth_recall": ("MikasaDepthRecall-v1", "my_scenes.depth_recall_v1", "DepthRecallV1Task"),
 }
 
 
@@ -90,7 +91,7 @@ def runtime_signature(profile=None):
                 continue
             if "collection" in path.parts and path.name not in {
                 "__init__.py", "pipeline.py", "contract.py", "client.py", "profile.py",
-                "cabinet_search_profile.json", "season_dish_profile.json",
+                "cabinet_search_profile.json", "season_dish_profile.json", "depth_recall_profile.json",
             }:
                 continue
             files[str(path.relative_to(REPO))] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -147,8 +148,8 @@ def verify_env(env, profile):
 def validate_instructions(profile, tokenizer):
     """Check full language strings with the supplied PaliGemma tokenizer."""
     if tokenizer is None:
-        if profile["env_id"] == "MikasaSeasonDish-v0":
-            raise ValueError("SeasonDish collection requires --tokenizer (PaliGemma SentencePiece)")
+        if profile["env_id"] in {"MikasaSeasonDish-v0", "MikasaDepthRecall-v1"}:
+            raise ValueError("This task requires --tokenizer (PaliGemma SentencePiece)")
         return None  # Existing CabinetSearch runs remain resumable.
     import sentencepiece as spm
     _, module, _ = TASKS[profile_name(profile["env_id"])]

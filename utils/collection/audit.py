@@ -100,7 +100,7 @@ def collection(root, output):
 
 
 def check(root, output):
-    """Check every completed H5, phase lineage and SeasonDish noise sample."""
+    """Check every completed H5, phase lineage and task waypoint noise sample."""
     from .contract import (CAMERAS, check_actions, episode_summary, held_actions,
                            recording_info)
 
@@ -175,7 +175,7 @@ def check(root, output):
                 records.append(dict(seed=seed, phase=phase, status=result["status"], **summary,
                     head_target_span=np.ptp(actions[:,8:10],axis=0).tolist(),
                     post_cue_head_tilt_min=float(min(after_cue)) if len(after_cue) else None))
-            if phase == "oracle" and signature["profile"]["env_id"] == "MikasaSeasonDish-v0":
+            if phase == "oracle" and signature["profile"]["env_id"] in {"MikasaSeasonDish-v0", "MikasaDepthRecall-v1"}:
                 events_path = directory / "events.jsonl"
                 events = [json.loads(line) for line in events_path.read_text().splitlines()]
                 samples = [event for event in events if event["message"] == "waypoint noise"]
@@ -189,7 +189,7 @@ def check(root, output):
                     np.testing.assert_array_equal(event["goal_m"], np.asarray(event["original_m"])+expected)
                     noise_counts[event["waypoint"]] += 1
                 if result["status"] == "success" and not samples:
-                    raise ValueError("Successful SeasonDish oracle did not sample waypoint noise")
+                    raise ValueError("Successful task oracle did not sample waypoint noise")
     report = dict(status="success", source_sha256=signature["code_sha256"],
         candidate_count=len(run["seeds"]), completed_source_attempts=source_results,
         source_pool_complete=source_results == len(run["seeds"]), checked_recordings=len(records),

@@ -1,36 +1,21 @@
-"""MikasaDepthRecall-v1: take the deepest prop out, stage the row on the COUNTER, put it back.
+"""MikasaDepthRecall-v1: retrieve the deepest prop and restore its three blockers.
 
-The owner's rewrite of `MikasaDepthRecall-v0`, 2026-09-09: build it on the retrieval
-straight flow, stage the removed props on FOUR counter slots instead of inside the
-cabinet, let the slot be drawn at RANDOM so the row cannot be restored by queue order,
-and return everything except the last prop taken out, which is the one the chore asked
-for. The design blank is `docs/task-designs/H-depthrecall-v1.md`.
+Four coloured props occupy a seeded front-to-back permutation on a cabinet shelf.
+The oracle clears them onto four independently shuffled counter slots, keeps the
+one from the deepest position, and returns the others to their original places.
+Every restored prop must previously have been carried to a counter slot. These
+staging checks were present in the private v1 implementation and are retained here.
 
-**What the rewrite is for.** v0 staged the removed props on a fixed line inside the
-cabinet and recorded the cost with open eyes: "the agent's own staging layout can
-encode the answer (a LIFO/queue convention solves the restore without internal
-memory)". That convention is learnable in the weights, so v0's blind floor was an
-oracle-relative control rather than a bound. Drawing the counter slot per episode makes
-the staged arrangement statistically independent of the row's order, and a fixed rule
-stops working: to put a prop back you have to remember where it came from.
+The answer is the association between prop identity and original depth. It is
+available while the shelf is being emptied and excluded from policy observations
+once the props are staged. An unrestricted policy can encode order in its chosen
+staging layout; random oracle staging does not prove reliance on internal memory.
+The 1/6 guessing reference is conditional on the three blockers and a uniformly
+shuffled restore assignment, not a universal memoryless-policy bound.
 
-**The chore.** By default four props stand one behind another on the shelf, front to deep. The
-front one hides the others, so the arrangement is not visible at t=0 and is learned by
-taking the row apart. Each prop that comes out is stood on one of four counter slots,
-drawn. The DEEPEST prop is the target: it stays on the counter. The other three go back
-into their OWN row slots — and physics settles the order, since nothing can be placed
-behind an occupied slot.
-
-**Reachability is why the slots sit WEST of the row** (measured 2026-09-10, and this is
-a task definition, not a tuning knob): with the base docked at the object's own x, the
-arm places into the SHELF up to 36 cm toward larger x (5/5) but is refused past 6 cm
-toward smaller x, because the closed left door walls off that side; on the COUNTER,
-placing up to 30 cm toward smaller x is 5/5. So an extraction docks at the row and
-reaches west onto the counter, a restore docks at the slot and reaches east into the
-row, and the base only ever moves with an EMPTY hand. No transit carries a prop.
-
-Conventions: `docs/writing-tasks.md`, AGENTS.md "Writing a memory task". Where this
-departs from `template_task.py` the comment says why.
+The four counter slots retain the original 12 cm pitch and 36 cm total span.
+Collection uses the unmodified master DSFetch; historical reachability results
+from a different robot are not qualification of this configuration.
 """
 
 from __future__ import annotations
@@ -55,7 +40,7 @@ from utils.robocasa_utils import parking_pose, require_get_fixture, restore_task
 #: Everything `get_state_dict` adds beyond sim state. All of it is task MEMORY or a
 #: latch; every entry is rank <= 2 (`flatten_state_dict` ends in `torch.hstack`).
 TASK_STATE_KEYS = (
-    "original_slots", "left_slot", "restored", "was_lifted",
+    "original_slots", "left_slot", "restored", "was_lifted", "staged",
     "wrong_assign", "target_returned", "two_in_slot", "succeeded",
     "arrangement_hold", "last_eval_step",
 )
@@ -168,6 +153,8 @@ class DepthRecallV1Config:
     # -- what counts as standing, and what voids the episode -------------------
     slot_xy_tol: float = 0.035
     "How far (xy) a prop may sit off a ROW slot and still count as in it."
+    upright_tilt_deg: float = 15.0
+    "Maximum lean from vertical for a standing prop, in degrees."
     upright_tol: float = 0.015
     """A standing prop's centre sits `prop_half_h` above its surface; a tipped 12 cm
     prop's centre drops ~3.5 cm, far outside this."""
@@ -188,7 +175,7 @@ class DepthRecallV1Config:
     settle_ang_speed: float = 0.2
     leave_tol: float = 0.06
     """A movable counts as having LEFT its row slot once its xy runs this far from the
-    slot point. Success requires BOTH movables to have left and come back, so
+    slot point. Success requires all three blockers to have left and come back, so
     "reach past the row without touching it" cannot be credited as a restore."""
 
     def validate(self) -> None:
@@ -240,6 +227,7 @@ class DepthRecallV1Config:
             "the hold must fit after the work with room to spare"
         )
         assert 0 < self.slot_xy_tol < 2 * self.prop_half_xy
+        assert 0 < self.upright_tilt_deg <= 45.0
         assert 0 < self.upright_tol < self.prop_half_h / 2
         assert self.slot_xy_tol < self.leave_tol <= 0.10
         assert self.slot_radius > 2 * self.prop_half_xy
@@ -379,16 +367,13 @@ class DepthRecallV1Task(BaseEnv):
                 float(pos[0] + size[0] / 2.0) - self.cfg.row_margin_x)
 
     def _fix_ds_fetch_collision_bits(self):
-        """Restore the wheel/base exemption `scene_builder.py:490` skips for our uid."""
-        if self.robot_uids == "fetch" or self.agent is None:
+        """RoboCasa wheel/base exclusions; preserve arm, head and finger contacts."""
+        if self.robot_uids != "ds_fetch" or self.agent is None:
             return
-        for link in self.agent.robot.links:
-            for body in link._bodies:
-                for shape in body.get_collision_shapes():
-                    groups = shape.get_collision_groups()
-                    for bit in range(25, 30):
-                        groups[2] |= 1 << bit
-                    shape.set_collision_groups(groups)
+        for link in (self.agent.l_wheel_link, self.agent.r_wheel_link):
+            for bit in range(25, 31):
+                link.set_collision_group_bit(group=2, bit_idx=bit, bit=1)
+        self.agent.base_link.set_collision_group_bit(group=2, bit_idx=31, bit=1)
 
     # ------------------------------------------------------------- initialize --
 
@@ -400,6 +385,7 @@ class DepthRecallV1Task(BaseEnv):
         self.left_slot = torch.zeros((n, k), dtype=torch.bool, device=dev)
         self.restored = torch.zeros((n, k), dtype=torch.bool, device=dev)
         self.was_lifted = torch.zeros((n, k), dtype=torch.bool, device=dev)
+        self.staged = torch.zeros((n, k), dtype=torch.bool, device=dev)
         self.wrong_assign = torch.zeros(n, dtype=torch.bool, device=dev)
         self.target_returned = torch.zeros(n, dtype=torch.bool, device=dev)
         self.two_in_slot = torch.zeros(n, dtype=torch.bool, device=dev)
@@ -464,12 +450,15 @@ class DepthRecallV1Task(BaseEnv):
                 p[:, :2] = own[:, :2]
                 p[:, 2] = self.cfg.shelf_top_z + self.cfg.spawn_clearance + self.cfg.prop_half_h
                 prop.set_pose(Pose.create_from_pq(p=p, q=self._yaw_quat(b)))
+                prop.set_linear_velocity(torch.zeros((b, 3), device=self.device))
+                prop.set_angular_velocity(torch.zeros((b, 3), device=self.device))
 
             self._restore_robot(env_idx, row_x, jx)
 
             self.left_slot[env_idx] = False
             self.restored[env_idx] = False
             self.was_lifted[env_idx] = False
+            self.staged[env_idx] = False
             self.wrong_assign[env_idx] = False
             self.target_returned[env_idx] = False
             self.two_in_slot[env_idx] = False
@@ -500,11 +489,12 @@ class DepthRecallV1Task(BaseEnv):
         q[env_idx, 1] = self.cfg.start_y + jx[:, 1] * self.cfg.start_jitter_y
         q[env_idx, 2] = math.radians(self.cfg.start_yaw_deg) + jx[:, 2] * self.cfg.start_jitter_yaw
         self.agent.robot.set_qpos(q[env_idx])
+        self.agent.robot.set_qvel(torch.zeros_like(q[env_idx]))
 
     # --------------------------------------------------------------- evaluate --
 
     def _prop_state(self):
-        """Positions, tilts, grasp flags and settle flags for the three props."""
+        """Positions, tilts, grasp flags and settle flags for the four props."""
         pos = torch.stack([p.pose.p for p in self.props], dim=1)                # (N, k, 3)
         rot = torch.stack([p.pose.to_transformation_matrix()[:, :3, :3]
                            for p in self.props], dim=1)                          # (N, k, 3, 3)
@@ -525,7 +515,7 @@ class DepthRecallV1Task(BaseEnv):
         cfg = self.cfg
         pos, tilt, grasped, settled = self._prop_state()
         n, k = self.num_envs, cfg.n_props
-        upright = tilt <= math.radians(15.0)
+        upright = tilt <= math.radians(cfg.upright_tilt_deg)
         free = settled & ~grasped
 
         # Each prop's OWN row slot point, gathered by the episode's permutation.
@@ -572,13 +562,17 @@ class DepthRecallV1Task(BaseEnv):
         # its own slot at t=0, and a flag that is true there says nothing. The verdict
         # already gates on `all_left`; folding it in here keeps the per-prop flag in the
         # trace honest too, which is what a failed run is read from.
-        restored = (in_row & own_hot).any(dim=-1) & ~is_target & self.left_slot
+        # Leaving a shelf slot alone also admits an in-cabinet sideways nudge.
+        # v1 requires every blocker to have stood, released, on the counter.
+        on_slot = on_counter & free & (d_slot <= cfg.slot_radius).any(dim=-1)
+        self.staged = self.staged | (on_slot & self.was_lifted)
+        restored = ((in_row & own_hot).any(dim=-1) & ~is_target
+                    & self.left_slot & self.staged)
         self.restored = restored
         movable = ~is_target
         all_restored = ((restored | ~movable).all(dim=1))
         all_left = ((self.left_slot | ~movable).all(dim=1))
-        target_ok = ((on_counter & free & self.was_lifted
-                      & (d_slot <= cfg.slot_radius).any(dim=-1)) | ~is_target).all(dim=1)
+        target_ok = ((on_slot & self.was_lifted) | ~is_target).all(dim=1)
 
         raw = (all_restored & all_left & target_ok
                & ~self.wrong_assign & ~self.target_returned & ~self.two_in_slot)
@@ -598,13 +592,16 @@ class DepthRecallV1Task(BaseEnv):
         self.succeeded = self.succeeded | (self.arrangement_hold >= cfg.hold_steps)
 
         return {
-            "success": self.succeeded,
+            # Keep historical completion separate from a valid final arrangement.
+            "success": raw & (self.arrangement_hold >= cfg.hold_steps),
+            "success_once": self.succeeded,
             "all_restored": all_restored,
             "all_left": all_left,
             "target_on_a_slot": target_ok,
             "restored": restored,
             "left_slot": self.left_slot,
             "was_lifted": self.was_lifted,
+            "staged": self.staged,
             "wrong_assign": self.wrong_assign,
             "target_returned": self.target_returned,
             "two_in_slot": self.two_in_slot,
@@ -635,7 +632,7 @@ class DepthRecallV1Task(BaseEnv):
            in slot order. Slot order would put the front-origin prop at a fixed slice
            index and hand a state policy the answer for free.
         3. The slot geometry is emitted because it is honest scenery: where the four
-           counter points and the three row points ARE says nothing about which prop
+           counter points and the four row points ARE says nothing about which prop
            belongs to which. What must be remembered is the association, and no key here
            carries it.
         """

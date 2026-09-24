@@ -31,7 +31,6 @@ plan) or the gym 5-tuple, per `template_planner.py`.
 from __future__ import annotations
 
 import contextlib
-import inspect
 import os
 
 import numpy as np
@@ -41,6 +40,7 @@ from planners import cabinet_retrieval_planner as retr
 from planners.oracle import cabinet_place as sp
 from planners.oracle import oracle_common as common
 from utils.mikasa.seeding import seed_everything
+from utils.mikasa.waypoint_noise import WaypointNoise
 
 WHO = "depth_recall_v1_planner"
 
@@ -215,20 +215,6 @@ def _straight(env, planner, pose, *, stage: str, tries: int = 1):
                            disable_lift_joint=True, max_knots=1, knot_refuse=True)
 
 
-def _drive_kw(planner) -> dict:
-    """`hold_pose=True` where the solver has it — a loaded drive must not sag.
-
-    Probed rather than assumed so the stub and older trees keep working; the measurement
-    behind it is in `drive_straight`'s own docstring (3.9 cm of creep carrying 243 g).
-
-    Example:
-        >>> planner.drive_straight(d, v=0.10, **_drive_kw(planner))   # doctest: +SKIP
-    """
-    if "hold_pose" in inspect.signature(planner.drive_straight).parameters:
-        return {"hold_pose": True}
-    return {}
-
-
 def row_neighbours(task, prop):
     """The other props standing in the cabinet row right now, nearest first.
 
@@ -262,34 +248,11 @@ def neighbours_touchable(planner, props):
 
 
 def fold_arm(env, planner, task):
-    """Un-wind the continuous joints, then fold to rest with the retrieval flow's fold.
-
-    Every transfer has to start from the same posture, and a release leaves the arm
-    EXTENDED over the counter. Ducking does not retract it — the duck moves the torso
-    and the wrist and nothing else — so the fourth dock of the first full run drove that
-    extended hand over a prop already staged on the counter and the torso descent was
-    refused with `gripper_link <-> prop_0`. Folding first is what makes a five-transfer
-    episode look like five copies of a one-transfer episode.
-
-    Both halves are imported rather than written here, and both for a measured reason:
-
-    - `normalize_continuous_arm_joints` first, because a roll joint sitting at
-      `rest ± 2pi` makes the fold's joint line a full visible revolution (K111 measured
-      exactly that, `arm_vs_rest 6.283` with the arm physically at rest). This oracle
-      folds five times an episode, so the winding is five times as visible.
-    - `retr.fold_arm_to_rest` for the fold, because it reads the joint names off the arm
-      controller instead of hardcoding them AND parks `wrist_flex_joint` at 1.7. The
-      rest keyframe leaves the wrist at 2.077 against a 2.16 stop, and a dock drive from
-      there was refused on `joint limit at index [11]` two steps in.
-
-    Example:
-        >>> fold_arm(env, planner, task)     # doctest: +SKIP
-    """
-    common.normalize_continuous_arm_joints(env, planner, task, who=WHO)
+    """Fold with recorded joint targets; never rewrite physical roll angles."""
     return retr.fold_arm_to_rest(env, planner, task)
 
 
-def dock_at(env, planner, task, x: float, *, stage: str):
+def dock_at(env, planner, task, x: float, *, stage: str, noise=None):
     """Put the base in front of `x`, empty-handed, facing the counter. -1 or the tuple.
 
     Example:
@@ -302,8 +265,10 @@ def dock_at(env, planner, task, x: float, *, stage: str):
     # "torso goes down and up again" a viewer sees at the top of the clip, and the fold
     # has nothing to fold.
     dock = np.array([float(x), retr.READY_DOCK_Y, 0.0])
+    if noise is not None:
+        dock = noise.point(stage, dock, axes=(True, True, False))
     say(env, stage, dock=[round(float(v), 3) for v in dock])
-    res = planner.drive_base(target_pos=dock, target_view_vec=np.array([0.0, 1.0, 0.0]))
+    res = planner.drive_base(target_pos=dock, target_view_vec=np.array([0.0, 1.0, 0.0]), freeze_arm=True)
     if res != -1:
         planner.planner.update_from_simulation()
         d_dock, dyaw = common.dock_error(task, (float(x), retr.READY_DOCK_Y, np.pi / 2))
@@ -466,7 +431,7 @@ def release_and_clear(env, planner, task, prop, place):
     return res
 
 
-def extract_one(env, planner, task, prop, slot_xyz):
+def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     """Shelf -> counter slot: the retrieval straight flow, aimed at a chosen slot.
 
     `(res, ok)`. `ok` False with -1 is a refusal; with a 5-tuple it is a miss.
@@ -488,6 +453,8 @@ def extract_one(env, planner, task, prop, slot_xyz):
         if grasp is None:
             return fail(env, f"{prop.name} has no collision mesh"), False
         ready = sapien.Pose(p=[pre.p[0], pre.p[1] - drive, pre.p[2]], q=pre.q)
+        if noise is not None:
+            ready = noise.pose(f"shelf approach {prop.name}", ready, (True, False, True))
         say(env, "ready posture", prop=prop.name, drive=round(drive, 3), lift=lift)
         res = retr.ready_by_line(env, planner, task, ready, drive=drive, grasp=grasp,
                                  label=f"ready posture ({prop.name}, lift {lift})",
@@ -542,7 +509,7 @@ def extract_one(env, planner, task, prop, slot_xyz):
     prop_y = float(_np(prop.pose.p).reshape(-1)[1])
     back = float(prop_y - float(np.asarray(slot_xyz).reshape(3)[1]))
     say(env, "carry out", distance=round(back, 3))
-    res = planner.drive_straight(-back, v=0.10, **_drive_kw(planner))
+    res = planner.drive_straight(-back, v=0.10, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
@@ -581,6 +548,8 @@ def extract_one(env, planner, task, prop, slot_xyz):
             planner.planner.update_from_simulation()
         tcp = task.agent.tcp.pose.sp
         across = sapien.Pose(p=[float(slot[0]), float(slot[1]), float(tcp.p[2])], q=tcp.q)
+        if noise is not None:
+            across = noise.pose(f"high counter cross {prop.name}", across)
         say(env, "across to the slot's column", prop=prop.name, torso=torso,
             dx=round(float(slot[0]) - float(tcp.p[0]), 3))
         # A joint LINE to the nearest IK branch, not a screw: this is the longest
@@ -635,7 +604,7 @@ def extract_one(env, planner, task, prop, slot_xyz):
     return res, not common.stopped_by_horizon(planner)
 
 
-def restore_one(env, planner, task, prop, row_xyz):
+def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     """Counter slot -> its row slot: the stow flow, aimed at a chosen row point."""
     # ACROSS FIRST, at the height the previous clearing left, and only then down. Going
     # straight to the pre-grasp posture sweeps the hand sideways across the counter AT
@@ -659,6 +628,8 @@ def restore_one(env, planner, task, prop, row_xyz):
             planner.planner.update_from_simulation()
         tcp0 = task.agent.tcp.pose.sp
         over = sapien.Pose(p=[float(p0[0]), float(tcp0.p[1]), float(tcp0.p[2])], q=tcp0.q)
+        if noise is not None:
+            over = noise.pose(f"counter approach {prop.name}", over, (True, False, True))
         say(env, "across to the prop's column", prop=prop.name, torso=torso,
             dx=round(float(p0[0]) - float(tcp0.p[0]), 3),
             tcp_z=round(float(tcp0.p[2]), 3))
@@ -775,6 +746,8 @@ def restore_one(env, planner, task, prop, row_xyz):
     base_p = _np(task.agent.base_link.pose.p).reshape(-1)
     drive = float(retr.WORK_DOCK_Y - base_p[1])
     ready = sapien.Pose(p=[entry.p[0], entry.p[1] - drive, entry.p[2]], q=entry.q)
+    if noise is not None:
+        ready = noise.pose(f"shelf entry {prop.name}", ready, (True, False, True))
     say(env, "entry posture", prop=prop.name, drive=round(drive, 3),
         entry=[round(float(v), 3) for v in entry.p])
     # The held prop stays in the planning world for the descent pre-check: it is exactly
@@ -813,7 +786,7 @@ def restore_one(env, planner, task, prop, row_xyz):
             say(env, "entry correction refused; driving in as we are")
 
     say(env, "drive into the cabinet, loaded", distance=round(drive, 3))
-    res = planner.drive_straight(drive, v=0.10, **_drive_kw(planner))
+    res = planner.drive_straight(drive, v=0.10, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
@@ -854,8 +827,9 @@ def restore_one(env, planner, task, prop, row_xyz):
 def choose_assignment(task, blind: bool, rng):
     """Which staged prop goes into which row slot — the ONE privileged read.
 
-    Sighted: the episode's own permutation. Blind: a draw over the same two slots, which
-    is the memoryless arm and must land on the 0.5 floor over a seed sweep.
+    Sighted: the episode's own permutation. Blind: a uniform assignment of the
+    three blockers to their original slots (1/6 conditional guessing reference).
+    The deepest target is still supplied; this is not a general memoryless baseline.
 
     Returns a list of `(prop_index, slot_index)`, deepest empty slot first, because
     nothing can be placed behind an occupied slot.
@@ -873,8 +847,15 @@ def choose_assignment(task, blind: bool, rng):
     return [(i, int(slots[i])) for i in sorted(movables, key=lambda i: -int(slots[i]))]
 
 
-def solve(env, seed=None, debug=False, vis=False, blind=False,
+def solve(env, seed=None, debug=False, vis=False, blind=False, *,
+          waypoint_noise_seed=None, waypoint_noise_m=0.005,
           planner_factory=common.default_planner_factory):
+    with common.planning_budget(4.0):
+        return _solve(env, seed, debug, vis, blind, waypoint_noise_seed,
+                      waypoint_noise_m, planner_factory)
+
+
+def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory):
     """Clear the row onto the counter, keep the deepest prop, put the rest back.
 
     Example:
@@ -883,11 +864,18 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
     obs, info = env.reset(seed=seed)
     if seed is not None:
         seed_everything(seed)
-    assert env.unwrapped.control_mode in (
-        "pd_joint_pos", "pd_joint_pos_vel", "pd_joint_delta_pos"
-    ), env.unwrapped.control_mode
+    assert env.unwrapped.control_mode == "pd_joint_pos", env.unwrapped.control_mode
     task = env.unwrapped
     planner = planner_factory(env, debug, vis)
+    noise = WaypointNoise((0 if seed is None else int(seed)) + 200003
+                          if noise_seed is None else noise_seed, noise_m,
+                          lambda message, **data: say(env, message, **data))
+
+    def gaze(points, tilt):
+        centre = np.asarray(points).reshape(-1, 3).mean(axis=0)
+        local = (task.agent.base_link.pose[0].sp.inv() * sapien.Pose(centre)).p
+        pan = float(np.clip(np.arctan2(local[1], local[0]), -.6, .6))
+        return planner.hold_head(pan=pan, tilt=tilt, t=12, ramp=10)
     rng = np.random.default_rng((0 if seed is None else int(seed)) + COIN_OFFSET)
 
     props = list(task.props)
@@ -915,8 +903,11 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
             return fail(env, "duck the torso for the drive")
         planner.planner.update_from_simulation()
 
+    res = gaze(row_pts, -.20)
+    if res == -1 or common.stopped_by_horizon(planner):
+        return res
     row_x = float(row_pts[0][0])
-    res = dock_at(env, planner, task, row_x, stage="dock at the row (once)")
+    res = dock_at(env, planner, task, row_x, stage="dock at the row (once)", noise=noise)
     if res != -1 and common.stopped_by_horizon(planner):
         return res
     if res == -1:
@@ -933,15 +924,20 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         say(env, "extract", prop=props[prop_i].name, to_slot=slot_k,
             where={q.name: [round(float(v), 3) for v in _np(q.pose.p).reshape(-1)[:3]]
                    for q in props})
-        res, ok = extract_one(env, planner, task, props[prop_i], slot_pts[slot_k])
+        res, ok = extract_one(env, planner, task, props[prop_i], slot_pts[slot_k], noise=noise)
         if not ok:
             return res
     say(env, "row cleared", staged={props[i].name: k for i, k in staged.items()})
 
-    # --- put the two movables back, deepest empty slot first -------------------
+    # Inspect the staged row independently of the remembered assignment.
+    res = gaze(slot_pts, .35)
+    if res == -1 or common.stopped_by_horizon(planner):
+        return res
+
+    # --- restore the three blockers, deepest empty slot first ------------------
     for prop_i, slot_idx in choose_assignment(task, blind, rng):
         say(env, "restore", prop=props[prop_i].name, to_row_slot=slot_idx)
-        res, ok = restore_one(env, planner, task, props[prop_i], row_pts[slot_idx])
+        res, ok = restore_one(env, planner, task, props[prop_i], row_pts[slot_idx], noise=noise)
         if not ok:
             return res
 
