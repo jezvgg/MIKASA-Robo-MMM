@@ -710,8 +710,18 @@ def close_and_verify(env, planner, task, door: DoorSpec, res):
                 pushed_to=round(float(_crp.LAST_PUSH["pushed"]), 3))
             from_here = False
         _crp.LAST_PUSH.clear()
-        r = close_the_door(env, planner, task, door=door,
-                           arrive_tol=CLOSE_ARRIVE_TOL, from_here=from_here)
+        # The published closer may back onto a nearby hinge-side dock. Forcing
+        # a forward-only approach there changed a short adjustment into a long
+        # turn around the open leaf (measured > pi on the restored 40-seed pool).
+        # Keep the published choice inside door work; free-floor/home drives
+        # retain their separate navigation policy.
+        forward_navigation = getattr(planner, "forward_navigation", False)
+        planner.forward_navigation = False
+        try:
+            r = close_the_door(env, planner, task, door=door,
+                              arrive_tol=CLOSE_ARRIVE_TOL, from_here=from_here)
+        finally:
+            planner.forward_navigation = forward_navigation
         if r == -1:
             # NOT -1 (D6): physics has committed; sweep 5 of the cabinet line
             # measured closing refusals as downstream symptoms of physics.
@@ -739,8 +749,7 @@ def close_and_verify(env, planner, task, door: DoorSpec, res):
 
 
 def go_home(env, planner, task, rest_tcp, res):
-    """S4: back off the closing dock unplanned, fold, drive home via the south
-    waypoint, settle. Post-commit: a refusal is said and the last tuple kept.
+    """S4: clear the closing dock if needed, fold and drive directly home. Post-commit: a refusal is said and the last tuple kept.
 
     Args:
         env, planner: as everywhere.
