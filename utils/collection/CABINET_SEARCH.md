@@ -22,7 +22,7 @@ the existing explicit rule, not an unreported new failure condition.
 The robot is the existing DSFetch from `jezvgg/MIKASA-Robo-MMM` at commit
 `4c5c8b3de941565ee2d57b153a10254fe64c2849`. Its source, joint limits,
 controllers, URDF/SRDF and meshes are preserved byte-for-byte; see
-`robots/fetch/reference.json`. The collection profile is version 4.
+`robots/fetch/reference.json`. The collection profile is version 5.
 The scene adds RoboCasa's usual wheel exclusions (bits 25-30)
 and base exclusion (bit 31), with no kitchen exclusions on the arm,
 head or fingers. Solver/head/noise fixes are separate from the robot model.
@@ -145,3 +145,12 @@ produce success. The checker does not require a final return.
 The restored door sequence contains reverse base motion. Raw D5 metrics must be
 reported; no D5 exception has been approved for this profile. Fresh fixed-pool
 collection and human E5 review are required; previous pilots do not qualify v4.
+
+Profile v5 restores the published reverse-capable approach to the nearby closing
+dock inside door work. The v4 forward-only override caused turns exceeding pi
+in 3/37 successful pilot episodes. Paired probes at those exact recorded states
+reduced total rotation on the closing-dock leg from 5.52–5.57 rad to 1.06–1.42 rad.
+This does not add a waypoint or parking offset. Free-floor/home navigation remains
+forward, and the direct home leg can still turn more overall than the published
+south-waypoint route. The D5 conflict of published door work remains explicit;
+no owner exception is assumed. The v4 pilot and its review remain historical.
