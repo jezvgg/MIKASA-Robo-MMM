@@ -26,3 +26,7 @@ Treat linked videos as immutable: editing their bytes in place would also affect
 Each episode's `video_encoding` records the actual CRF/GOP, quality measurements, attempted settings, and SHA256 of its complete decoded RGB sequence. Final verification checks that concatenation, merging and retained storage preserve this sequence. `conversion_runs` preserves the requested video policy as well as the original converter commit, so shards encoded with different settings remain attributable. The default `reference` profile retains CRF12/GOP2 for compatibility with earlier exports; actual camera settings are recorded for it too.
 
 A smaller file is not evidence of adequate quality. The compact profile enforces the same E4 limit on every actual export; synthetic codec checks and small real-data probes do not establish human E5, full-dataset qualification, or a guaranteed storage ratio.
+
+## Preserve normalization statistics when merging
+
+The pinned LeRobot runtime episode view deliberately omits every `stats/` column to speed up sample access. The linked merger reads complete original episode parquet files instead. It preserves per-episode quantiles and other statistics while updating file and episode indices. Export and merge verification check usable global and per-episode action/state statistics (G3/G4) before loading videos. Missing columns, null values, wrong vector dimensions or nonfinite values fail verification.
