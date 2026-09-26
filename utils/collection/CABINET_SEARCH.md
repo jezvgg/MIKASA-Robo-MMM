@@ -1,19 +1,20 @@
 # CabinetSearch collection profile
 
 `cabinet_search_profile.json` specifies the four-compartment NUDGE task.
-The terminal is a horizontal cube displacement of at least 0.02 m with the
+The terminal is a horizontal cola-can displacement of at least 0.02 m with the
 correct compartment open and no rule failure. Merely opening the door is not
 success. The alternative SEEN terminal is not this dataset.
 
 Before opening the first compartment, visit the floor mark. Close an empty
-compartment and return to the mark before checking a different one. Do not
-search a compartment again. The cabinet containing the found cube need not
+compartment and return to the mark before checking a different one. Return directly to its actual sampled position,
+without a south waypoint or parking offset. Finish at the can immediately after
+a successful nudge; no final return is required. Do not
+search a compartment again. The cabinet containing the found can need not
 be closed after success. Door-grasp retries before leaving are distinguished
 from a new search decision by the task's existing rules.
 
 The episode limit is 7100 control steps at 20 Hz (355 seconds). Two physical
-cabinets contain four separated searchable compartments. The red cube has
-side length 0.10 m. Its compartment and within-compartment placement, the
+cabinets contain four separated searchable compartments. A short cola-can mesh replaces the former red cube. Its compartment and within-compartment placement, the
 robot start, and instruction choice are randomized by the scene seed.
 Non-search kitchen-joint movement is logged; `foreign_drift_fails=False` is
 the existing explicit rule, not an unreported new failure condition.
@@ -21,7 +22,7 @@ the existing explicit rule, not an unreported new failure condition.
 The robot is the existing DSFetch from `jezvgg/MIKASA-Robo-MMM` at commit
 `4c5c8b3de941565ee2d57b153a10254fe64c2849`. Its source, joint limits,
 controllers, URDF/SRDF and meshes are preserved byte-for-byte; see
-`robots/fetch/reference.json`. The collection profile is version 2.
+`robots/fetch/reference.json`. The collection profile is version 4.
 The scene adds RoboCasa's usual wheel exclusions (bits 25-30)
 and base exclusion (bit 31), with no kitchen exclusions on the arm,
 head or fingers. Solver/head/noise fixes are separate from the robot model.
@@ -41,7 +42,7 @@ flags. Worker failures without a complete recording report unknown values as
 `null`. Export readback compares the summary fields against the source H5.
 No production dataset or completed qualification is implied by this profile.
 
-## Current verification
+## Historical pipeline verification
 
 On the unchanged `master` DSFetch, 13 contract tests pass, including distinct
 final-success and ever-success cases. Development seed 10001 passed state-only
@@ -53,7 +54,8 @@ release on this robot remain to be collected. No learned VLA was evaluated.
 The robot originates from the existing upstream source; the RoboBenchMart MIT
 notice is retained in `robots/fetch/LICENSE.RoboBenchMart`. Machine-readable
 source and asset hashes live in `robots/fetch/reference.json`.
-The shared [data contract](../DATA_CONTRACT.md) defines the 16 requirements.
+The current [BIBLE](../../BIBLE.md) and [41-item checklist](../../DATASET_CHECKLIST.md)
+are authoritative; older 16-item checks remain historical.
 
 ## Run the pipeline
 
@@ -103,7 +105,8 @@ python -m utils.collection.export_lerobot --input /path/to/run \
 
 The exporter uses LeRobot 0.4.3's v3 writer and reader, preserves native camera
 sizes, and checks every numerical sample plus representative decoded RGB frames.
-MP4 is H.264 at CRF 18; decoding returns RGB. `source_h5_metadata.json` retains
+MP4 is H.264; reference/compact settings and measured pixel-error fallback are
+recorded in export metadata. Decoding returns RGB. `source_h5_metadata.json` retains
 all candidate attempts, seeds, lengths, rewards, successes, versions, and sampling
 rules. `global_state` is a separate debug feature; the policy client explicitly
 passes only `observation.state`, the three images, and the instruction.
@@ -125,3 +128,20 @@ and exports every second observation/action at 10 Hz to LeRobot. Thus RGB observ
 match the actions that passed replay. The additional native-action RGB copy is omitted;
 the final RGB H5 and LeRobot videos remain available. The choice is recorded in run.json
 and cannot change when resuming the same campaign. Native physics replay is always run.
+
+## Motion restoration, profile v4 (2026-09-26)
+
+The published `317211ed` door-opening, inspection and closing sequence is restored.
+The travel arm follows the robot rest keyframe, with torso 0.20 m and wrist flex
+1.7 rad. No custom elbow fold, additional handle preparation pose or can detour
+is used. Head tracking follows the current stage continuously. All actions remain
+recorded physical commands; simulator joint coordinates are never rewritten.
+
+Success requires a revealed target compartment, >=0.02 m horizontal can
+displacement, and no search-rule violation. Discovery alone, vertical settling,
+an insufficient nudge, repeated search, or a missed required home visit cannot
+produce success. The checker does not require a final return.
+
+The restored door sequence contains reverse base motion. Raw D5 metrics must be
+reported; no D5 exception has been approved for this profile. Fresh fixed-pool
+collection and human E5 review are required; previous pilots do not qualify v4.

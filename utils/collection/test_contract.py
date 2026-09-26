@@ -170,13 +170,15 @@ def test_campaign_stops_queued_workers_after_storage_error(tmp_path, monkeypatch
     assert calls == [("oracle", 0)]
 
 
-@pytest.mark.parametrize("task_name", ["cabinet_search", "season_dish"])
+@pytest.mark.parametrize("task_name", ["cabinet_search", "season_dish", "same_drawer"])
 def test_robot_adapter_keeps_finger_counter_contact(task_name):
     """The old all-link ignore mask makes the penetrating finger fall through."""
     import sapien
     from my_scenes.cabinet_search import CabinetSearchTask
     from my_scenes.season_dish import SeasonDishTask
-    task_class = {"cabinet_search": CabinetSearchTask, "season_dish": SeasonDishTask}[task_name]
+    from my_scenes.same_drawer import SameDrawerTask
+    task_class = {"cabinet_search": CabinetSearchTask, "season_dish": SeasonDishTask,
+                  "same_drawer": SameDrawerTask}[task_name]
 
     system = sapien.physx.PhysxCpuSystem()
     scene = sapien.Scene([system])
@@ -242,10 +244,11 @@ def test_waypoint_noise_repeats_by_seed_without_mutating_goals():
         WaypointNoise(0, .02, lambda *a, **kw: None)
 
 
-def test_season_collection_requires_instruction_preflight():
+@pytest.mark.parametrize("env_id", ["MikasaSeasonDish-v0", "MikasaSameDrawer-v0"])
+def test_collection_requires_instruction_preflight(env_id):
     from .profile import validate_instructions
     with pytest.raises(ValueError, match="PaliGemma"):
-        validate_instructions({"env_id": "MikasaSeasonDish-v0"}, None)
+        validate_instructions({"env_id": env_id}, None)
 
 
 def test_export_retains_failed_source_summary_and_unknown_incomplete_worker(tmp_path):
@@ -275,3 +278,106 @@ def test_export_retains_failed_source_summary_and_unknown_incomplete_worker(tmp_
     assert incomplete["status"] == "error" and "source_h5" not in incomplete
     for key in ("success", "success_once", "reward_sum", "terminated", "truncated"):
         assert incomplete[key] is None
+
+
+@pytest.mark.parametrize("reopen_m", [None, .007, .13])
+def test_same_drawer_rejects_apple_out_of_order(reopen_m):
+    """Neither preplacement nor a re-exposed cue may bypass the memory interval.
+
+    Diagnostic state edits create both orders cheaply; contact/settling and task
+    updates still use the real environment. These are not demonstrations.
+    """
+    import gymnasium as gym
+    import torch
+    import my_scenes  # noqa: F401
+    from mani_skill.utils.structs import Pose
+
+    env = gym.make("MikasaSameDrawer-v0", scene_idx=0, sim_backend="cpu",
+                   obs_mode="state", control_mode="pd_joint_pos",
+                   sim_config={"control_freq": 20, "sim_freq": 100})
+    task = env.unwrapped
+
+    def step(count=1):
+        arm = task.agent.controller.controllers["arm"].qpos[0].cpu().numpy()
+        body = task.agent.controller.controllers["body"].qpos[0].cpu().numpy()
+        for _ in range(count):
+            info = env.step(np.r_[arm, 1., body, 0., 0.])[-1]
+        return info
+
+    def drawer(index, amount):
+        art = task._drawer_arts[index]
+        art.set_qpos(torch.full_like(art.get_qpos(), -amount))
+        art.set_qvel(torch.zeros_like(art.get_qvel()))
+
+    def place_apple():
+        task.apple.set_pose(Pose.create_from_pq(
+            p=task.plate.pose.p + torch.tensor([0., 0., .045], device=task.device)))
+        task.apple.set_linear_velocity(torch.zeros(1, 3, device=task.device))
+        task.apple.set_angular_velocity(torch.zeros(1, 3, device=task.device))
+        return step(35)
+
+    try:
+        env.reset(seed=371 if reopen_m is None else 374)
+        target = int(task.target_drawer.item())
+        if reopen_m is not None:
+            drawer(target, 0.)
+            assert step()["closed_done"].item()
+            drawer(target, reopen_m)
+            assert step()["sequence_violated"].item()
+        before = place_apple()
+        assert before["closed_done"].item() == (reopen_m is not None)
+        assert not before["apple_done"].item()
+        assert before["sequence_violated"].item()
+        drawer(int(task.target_drawer.item()), 0.)
+        after = step(20)
+        assert after["closed_done"].item()
+        assert not after["apple_done"].item() and after["failed"].item()
+        drawer(target, .13)
+        after = step(task.cfg.hold_steps + 5)
+        assert after["failed"].item() and not after["success"].item()
+
+        env.reset(seed=372)
+        target = int(task.target_drawer.item())
+        drawer(target, 0.)
+        assert step()["closed_done"].item()
+        assert place_apple()["apple_done"].item()
+        drawer(target, .13)
+        assert not step(task.cfg.hold_steps - 1)["success"].item()
+        assert step()["success"].item()
+        count = task.held_count.clone()
+        for _ in range(10):
+            assert task.get_info()["success"].item()
+        assert torch.equal(task.held_count, count)
+
+        # Enumerating another drawer invalidates even a previously successful state.
+        other = next(i for i in task.cfg.drawer_choices if i != target)
+        drawer(other, .03)
+        info = step()
+        assert info["failed"].item() and not info["success"].item()
+        drawer(other, 0.)
+        info = step()
+        assert info["failed"].item() and not info["success"].item()
+    finally:
+        env.close()
+
+
+def test_same_drawer_detent_allows_slow_opening():
+    """The first millimetres of an opening stroke must not be reset every tick."""
+    import gymnasium as gym
+    import torch
+    import my_scenes  # noqa: F401
+
+    env = gym.make("MikasaSameDrawer-v0", scene_idx=0, sim_backend="cpu",
+                   obs_mode="state", control_mode="pd_joint_pos")
+    try:
+        env.reset(seed=373)
+        task = env.unwrapped
+        art = task._drawer_arts[int(task.target_drawer.item())]
+        for velocity, expected in ((-.01, -.0025), (.01, 0.), (0., 0.)):
+            art.set_qpos(torch.full_like(art.get_qpos(), -.0025))
+            art.set_qvel(torch.full_like(art.get_qvel(), velocity))
+            task._last_eval_step[:] = -1
+            task.get_info()
+            assert float(art.get_qpos()[0, 0]) == pytest.approx(expected)
+    finally:
+        env.close()

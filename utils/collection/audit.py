@@ -65,6 +65,8 @@ def collection(root, output):
                     traj = h5["traj_0"]
                     if "cube_cab" in traj["env_states"]:
                         case["compartment"] = int(np.asarray(traj["env_states/cube_cab"][0]).item())
+                    if "target_drawer" in traj["env_states"]:
+                        case["target_drawer"] = int(np.asarray(traj["env_states/target_drawer"][0]).item())
                     if "target_is_shaker" in traj["env_states"]:
                         case["target_is_shaker"] = bool(np.asarray(traj["env_states/target_is_shaker"][0]).item())
                         case["station_left_is_shaker"] = bool(np.asarray(traj["env_states/station_left_is_shaker"][0]).item())
@@ -84,7 +86,7 @@ def collection(root, output):
                                 for phase, results in phases.items()}
         report["cases"].append(case)
     report["coverage"] = {}
-    for key in ("compartment", "planned_search_length", "target_is_shaker", "station_left_is_shaker"):
+    for key in ("compartment", "planned_search_length", "target_is_shaker", "station_left_is_shaker", "target_drawer"):
         report["coverage"][key] = {
             "all_attempts": dict(Counter(str(c[key]) for c in report["cases"] if key in c)),
             "expert_successes": dict(Counter(str(c[key]) for c in report["cases"] if key in c and c["source_status"] == "success")),
@@ -100,7 +102,7 @@ def collection(root, output):
 
 
 def check(root, output):
-    """Check every completed H5, phase lineage and SeasonDish noise sample."""
+    """Check completed H5, phase lineage and task waypoint-noise samples."""
     from .contract import (CAMERAS, check_actions, episode_summary, held_actions,
                            recording_info)
 
@@ -175,7 +177,7 @@ def check(root, output):
                 records.append(dict(seed=seed, phase=phase, status=result["status"], **summary,
                     head_target_span=np.ptp(actions[:,8:10],axis=0).tolist(),
                     post_cue_head_tilt_min=float(min(after_cue)) if len(after_cue) else None))
-            if phase == "oracle" and signature["profile"]["env_id"] == "MikasaSeasonDish-v0":
+            if phase == "oracle" and signature["profile"]["env_id"] in {"MikasaSeasonDish-v0", "MikasaSameDrawer-v0"}:
                 events_path = directory / "events.jsonl"
                 events = [json.loads(line) for line in events_path.read_text().splitlines()]
                 samples = [event for event in events if event["message"] == "waypoint noise"]
@@ -189,7 +191,7 @@ def check(root, output):
                     np.testing.assert_array_equal(event["goal_m"], np.asarray(event["original_m"])+expected)
                     noise_counts[event["waypoint"]] += 1
                 if result["status"] == "success" and not samples:
-                    raise ValueError("Successful SeasonDish oracle did not sample waypoint noise")
+                    raise ValueError("Successful oracle did not sample waypoint noise")
     report = dict(status="success", source_sha256=signature["code_sha256"],
         candidate_count=len(run["seeds"]), completed_source_attempts=source_results,
         source_pool_complete=source_results == len(run["seeds"]), checked_recordings=len(records),

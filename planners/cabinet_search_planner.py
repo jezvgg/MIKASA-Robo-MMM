@@ -77,6 +77,7 @@ import os
 import numpy as np
 
 from planners.oracle import oracle_common as common
+from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 from planners import cabinet_retrieval_planner as _crp
 from planners.cabinet_retrieval_planner import (
     FINISH_BY_HANDLE,
@@ -161,12 +162,6 @@ BACK_OFF_M = 0.35
 """The unplanned reverse off the closing dock (W20a: 73 steps, 0.361-0.362 m
 travelled at 0.10 m/s on all four seeds). 0.35 is the K106 pass-B back-off
 (0.30) plus margin: from there the fold planned 4/4."""
-
-SOUTH_WAYPOINT_DY = -0.40
-"""The waypoint (home_x, home_y - 0.40) = (1.80, -2.30) on the free floor: the
-approach to home from due south leaves the final rotate ~0 (W20a dyaw 0.0 deg
-on all four seeds) instead of a turn next to the counter, where rotates die on
-planning-world phantoms (K106 diag 7, K109, K111 item 6)."""
 
 HOME_SETTLE_STEPS = 5
 "`at_home` needs base_static (< 0.08); W20a idled 5 after the home drive."
@@ -302,7 +297,6 @@ SPRANG_BACK_TOL = 0.02
 """Steps of stillness after the pull before `info` is read: the freed door
 drifts back ~0.05 rad after the release (sweep 2), and the verdict must be
 read on the settled angle, not the pull's last frame."""
-SUCCESS_SETTLE_STEPS = 30
 
 # -- the touch (owner, 2026-09-08: "a small kick of the red cube"; cfg.terminal == "nudge") --
 NUDGE_PRE_M = float(os.environ.get("MIKASA_NUDGE_PRE_M", "0.10"))
@@ -632,37 +626,38 @@ def drive_posture(env, planner, task, *, label: str):
     Example:
         >>> res = drive_posture(env, planner, task, label="duck")  # doctest: +SKIP
     """
-    say(env, label, **{k: round(float(v), 3) for k, v in DRIVE_POSTURE.items()})
-    res = plan_joints(env, planner, task, dict(DRIVE_POSTURE), label=label)
+    targets = getattr(planner, "navigation_posture", None) or drive_posture_targets(task)
+    say(env, label, **{k: round(float(v), 3) for k, v in targets.items()})
+    with transfer_phase(planner, "fold unloaded arm for transit"):
+        res = plan_joints(env, planner, task, targets, label=label)
     if res != -1:
         planner.planner.update_from_simulation()
     return res
 
 
-def drive_home(env, planner, task, *, via_south: bool):
-    """Drive to the home mark facing +y and settle; the W20a tail's last legs.
+def drive_home(env, planner, task):
+    """Drive directly to the recorded home mark facing +y and settle.
 
     The physical yaw is preserved and rotations respect the reference URDF
     limits. The arm is frozen on every drive (the BASE_PLAN_MASK disease: an
     unfrozen base screw folds the arm through whatever is near). With
-    `via_south` the base first goes to (home_x, home_y + SOUTH_WAYPOINT_DY) so
-    the final turn is ~0; a refused waypoint is non-fatal. The home drive's
-    own refusal is -1 (the caller decides whether that is pre-commit).
+    the actual randomized marker is the only navigation goal. A refused
+    home drive returns -1 (the caller decides whether that is pre-commit).
 
     Args:
         env, planner: as everywhere.
         task: `env.unwrapped`.
-        via_south: approach from the south waypoint.
 
     Returns:
         The settle's 5-tuple, the truncated tuple, or -1 (home drive refused).
 
     Example:
-        >>> res = drive_home(env, planner, task, via_south=True)   # doctest: +SKIP
+        >>> res = drive_home(env, planner, task)   # doctest: +SKIP
         >>> if res == -1: return fail(env, "drive home")           # doctest: +SKIP
     """
     cfg = task.cfg
-    hx, hy = float(cfg.home_xy[0]), float(cfg.home_xy[1])
+    planner.track_target(lambda: task.home_marker.pose[0].sp.p)
+    hx, hy = map(float, _np(task.home_marker.pose.p)[0, :2])
     view = np.array([0.0, 1.0, 0.0])
     # Noise is applied only to free-floor waypoints, far inside the home disk.
     noise = getattr(planner, "cabinet_waypoint_noise", None)
@@ -672,15 +667,6 @@ def drive_home(env, planner, task, *, via_south: bool):
         hx, hy = hx + float(delta[0]), hy + float(delta[1])
         say(env, "waypoint noise", offset_m=delta.tolist())
     planner.planner.update_from_simulation()
-    if via_south:
-        wp = np.array([hx, hy + SOUTH_WAYPOINT_DY, 0.0])
-        say(env, "drive to the south waypoint", wp=[round(float(v), 3) for v in wp])
-        res = planner.drive_base(target_pos=wp, target_view_vec=view, freeze_arm=True)
-        if res != -1 and common.stopped_by_horizon(planner):
-            return res
-        if res == -1:
-            say(env, "south waypoint refused; driving home directly")
-        planner.planner.update_from_simulation()
     say(env, "drive home", home=[hx, hy])
     res = planner.drive_base(target_pos=np.array([hx, hy, 0.0]), target_view_vec=view,
                              freeze_arm=True)
@@ -771,7 +757,6 @@ def go_home(env, planner, task, rest_tcp, res):
     folded = False
     backed_off = False
     if FOLD_ONE_LINE:
-        common.normalize_continuous_arm_joints(env, planner, task, who=WHO)
         planner.planner.update_from_simulation()
         for attempt in range(2):
             r = plan_joints(env, planner, task, drive_posture_targets(task),
@@ -819,7 +804,7 @@ def go_home(env, planner, task, rest_tcp, res):
                 return res, res[-1]
         say(env, "arm_vs_rest after the fold", d=round(arm_vs_rest(task), 3))
     planner.planner.update_from_simulation()
-    r = drive_home(env, planner, task, via_south=True)
+    r = drive_home(env, planner, task)
     if r == -1:
         say(env, "MISSED: the drive home refused")
         return res, None
@@ -990,7 +975,9 @@ def nudge_the_cube(env, planner, task, res, cab=None):
         info = res[-1]
         moved = float(_np(info.get("moved_m", 0.0)).reshape(-1)[0]) if isinstance(info, dict) else 0.0
         say(env, "pushed", attempt=attempt, moved_m=round(moved, 3), nudged=_b(info, "nudged"))
-        # pull back so the hand is clear whatever happens next
+        if _b(info, "success"):
+            return res
+        # A failed push may retract before another attempt.
         r = common.arm_move(env, planner, pre, who=WHO, stage="retract", disable_lift_joint=raised, tries=2)
         if r != -1:
             res = r
@@ -1004,8 +991,9 @@ def nudge_the_cube(env, planner, task, res, cab=None):
 
 
 def solve(env, seed=None, debug=False, vis=False, blind=False,
-          planner_factory=common.default_planner_factory,
-          waypoint_noise_seed=None, waypoint_noise_m=0.005):
+          planner_factory=common.collection_planner_factory,
+          waypoint_noise_seed=None, waypoint_noise_m=0.005,
+          execution_noise_seed=None, action_noise=0.003, noise_hold=10):
     """Solve one episode. `-1` only for a refusal before the first fist closed
     on a bar; the gym 5-tuple otherwise (MISSED lines say what went wrong).
 
@@ -1033,6 +1021,12 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         env.unwrapped.control_mode
     task = env.unwrapped
     planner = planner_factory(env, debug, vis)
+    planner.forward_navigation = True
+    if callable(getattr(planner, "prefer_low_roll_ik", None)):
+        planner.prefer_low_roll_ik()
+    configure_execution_noise(
+        planner, env, int(seed or 0) + 300007 if execution_noise_seed is None else execution_noise_seed,
+        action_noise=action_noise, noise_hold=noise_hold)
     if not 0 <= waypoint_noise_m <= 0.01:
         raise ValueError("CabinetSearch free-floor waypoint noise must be in [0, 0.01] m")
     noise_seed = int(seed or 0) + 200003 if waypoint_noise_seed is None else int(waypoint_noise_seed)
@@ -1040,6 +1034,12 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
     planner.cabinet_waypoint_noise_m = float(waypoint_noise_m)
     say(env, "waypoint noise configuration", seed=noise_seed, amplitude_m=waypoint_noise_m)
     cfg = task.cfg
+    def compartment_gaze(cab=None):
+        centres = _np(task._spawn_centre_x).reshape(-1, int(task.layout.n_compartments))[0]
+        x = float(centres.mean() if cab is None else centres[cab])
+        return np.array([x, float(cfg.spawn_depth), float(cfg.shelf_top_z) + float(cfg.cube_half)])
+
+    planner.track_target(lambda: compartment_gaze())
     comps = tuple(cfg.compartments)
     n = len(comps)
     rng, order = search_plan(seed, n)
@@ -1057,14 +1057,14 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         return res
     if res == -1:
         return fail(env, "duck for the drive")
-    res = drive_home(env, planner, task, via_south=False)
+    res = drive_home(env, planner, task)
     if res == -1:
         return fail(env, "drive home from the start")
     if common.stopped_by_horizon(planner):
         return res
     if not _b(res[-1], "passed_home"):
         say(env, "home not credited; one re-drive", **_latches(res[-1]))
-        res = drive_home(env, planner, task, via_south=True)
+        res = drive_home(env, planner, task)
         if res == -1:
             return fail(env, "re-drive home from the start")
         if common.stopped_by_horizon(planner):
@@ -1080,6 +1080,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         # -- S1: pick ---------------------------------------------------------------
         cab = pick_compartment(rng, order, k, blind=blind)
         comp = comps[cab]
+        planner.track_target(lambda cab=cab: compartment_gaze(cab))
         door = door_spec_for(comp, closed_rad=cfg.theta_closed)
         wall_park = str(getattr(comp, "close_policy", "push")) == "wall_park"
         say(env, "round", k=k, compartment=comp.name, pick=cab,
@@ -1100,29 +1101,13 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
             else:
                 say(env, "re-duck refused; driving with the posture as it is")
 
-        # A representation change, not a motion (K55/K111): the drives leave the
-        # continuous roll joints wound (the previous round's grasp + pull + push +
-        # three drives), and a wound wrist is what the bar screw then refuses —
-        # W21 measured the LEFT leaf holding on 8 of 8 offset cells from a clean
-        # rest pose (fingers 0.026, pull -1.755) while the same leaf, entered from
-        # a driven posture, refused with `joint limit at index [7]`, 5.158 rad of
-        # twist left, and the pads on nothing. Free, and it cannot make the arm
-        # move: it rewrites qpos into the branch nearest rest.
-        # OPEN THE HAND. The closing stage's fist is a TOOL (`close_gripper(t=12)`,
-        # cabinet_retrieval_planner) and nothing reopens it — in the Closed variant
-        # the episode ends there, so it never mattered. Here the next round's bar
-        # grasp then approaches with the pads shut: `stop_on_touch` fires when the
-        # fist touches the cabinet 5.2 cm short of the bar and `close_gripper`
-        # finds nothing between the pads (`pull hinge arc: nothing between the
-        # pads`, fingers 0.0/0.0). Measured on seed 11: the pre-open qpos of round
-        # 0 ends `0.05, 0.05` and of round 1 `0.0, 0.0` — the ONLY difference
-        # between a round that opens its door and one that refuses it.
+        # The closing push leaves a fist; reopen before the next bar approach.
         if k > 0:
             planner.open_gripper()
-        # A representation change, not a motion (K55/K111): three drives and a
-        # push leave the continuous roll joints wound, and a wound wrist is what
-        # the bar screw refuses. Free, and it cannot make the arm move.
-        common.normalize_continuous_arm_joints(env, planner, task, who=WHO)
+        # Preserve physical joint coordinates. Wrapping qpos here has no action
+        # on the recording and breaks native/10 Hz replay. The next primitive
+        # must plan from the measured state, even when a roll joint is wound.
+        planner.planner.update_from_simulation()
 
         # -- S2: open (the stage drives to the leaf's handle dock itself) -----------
         # A wall-park compartment (cab_1, W24) is driven straight on to
@@ -1201,7 +1186,10 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 # leaves the arm where the retreat left it.
                 tuck = drive_posture_targets(task)
                 tuck.pop("torso_lift_joint", None)
-                common.normalize_continuous_arm_joints(env, planner, task, who=WHO)
+                # Preserve the published rest elbow before panel closing.
+                elbow = task.agent.robot.active_joints_map["elbow_flex_joint"]
+                tuck["elbow_flex_joint"] = float(
+                    task.agent.keyframes["rest"].qpos[int(elbow.active_index[0])])
                 planner.planner.update_from_simulation()
                 r = plan_joints(env, planner, task, tuck, label="tuck the arm for the look",
                                 tries=1, line_only=True)
@@ -1254,9 +1242,16 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 # needs the revealed cube seen for `reveal_dwell_steps`), and stops the
                 # moment success latches.
                 dwell = int(getattr(task.cfg, "reveal_dwell_steps", 0) or 0)
-                r = planner.hold_head(pan, tilt, stop_on_success=True, ramp=LOOK_HEAD_RAMP_STEPS,
-                                      t=LOOK_HEAD_RAMP_STEPS + LOOK_STEPS + LOOK_HEAD_SETTLE_STEPS + dwell
-                                      + LOOK_HEAD_DWELL_EXTRA)
+                # Tracking has already aimed at this compartment during the
+                # approach. Wait only for actual alignment and the reveal dwell.
+                aligned_steps = 0
+                for _ in range(LOOK_HEAD_RAMP_STEPS + LOOK_HEAD_SETTLE_STEPS + max(dwell, 1)):
+                    r = planner.idle_steps(t=1)
+                    if common.stopped_by_horizon(planner):
+                        return r
+                    aligned_steps = aligned_steps + 1 if planner._head_tracker.aligned() else 0
+                    if aligned_steps >= max(dwell, 1):
+                        break
             else:
                 theta += LOOK_TURN_RAD * (1.0 if theta < np.pi / 2 else -1.0)
                 aim = np.array([float(np.cos(theta)), float(np.sin(theta)), 0.0])
@@ -1281,33 +1276,24 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
             planner.planner.update_from_simulation()
         else:
             say(env, "the look drive refused; reading the verdict where we stand")
-        res = planner.idle_steps(t=LOOK_STEPS)
+        res = r if LOOK_BY_TURN and LOOK_BY_HEAD and r != -1 else planner.idle_steps(t=LOOK_STEPS)
         if common.stopped_by_horizon(planner):
             return res
         info = res[-1]
         if _b(info, "success"):
             say(env, "FOUND", compartment=comp.name, k=k, **_latches(info))
-            res = planner.idle_steps(t=SUCCESS_SETTLE_STEPS)
             say(env, "episode over", success=_b(res[-1], "success"))
             return res
         if getattr(task.cfg, "terminal", "seen") == "nudge" and _b(info, "revealed"):
             # The cube's compartment is open and (with the head look) seen; the touch
             # terminal wants it pushed before the episode counts.
             say(env, "FOUND, not yet touched", compartment=comp.name, k=k, **_latches(info))
-            if LOOK_BY_TURN and LOOK_BY_HEAD and heading_before is not None:
-                r = planner.hold_head(0.0, 0.0, t=LOOK_HEAD_RAMP_STEPS + LOOK_HEAD_RETURN_STEPS,
-                                      ramp=LOOK_HEAD_RAMP_STEPS)
-                if r != -1:
-                    res = r
-                    if common.stopped_by_horizon(planner):
-                        return res
-                    planner.planner.update_from_simulation()
+            planner.track_target(lambda: task.cube.pose[0].sp.p)
             r = nudge_the_cube(env, planner, task, res, cab=cab)
             if r != -1:
                 res = r
             if common.stopped_by_horizon(planner):
                 return res
-            res = planner.idle_steps(t=SUCCESS_SETTLE_STEPS)
             say(env, "episode over", success=_b(res[-1], "success"), **_latches(res[-1]))
             return res
         if _b(info, "fail"):
@@ -1315,15 +1301,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 **_latches(info))
             return res
         say(env, "empty", compartment=comp.name, k=k, **_latches(info))
-        if LOOK_BY_TURN and LOOK_BY_HEAD and heading_before is not None:
-            r = planner.hold_head(0.0, 0.0, t=LOOK_HEAD_RAMP_STEPS + LOOK_HEAD_RETURN_STEPS,
-                                  ramp=LOOK_HEAD_RAMP_STEPS)
-            if r != -1:
-                res = r
-                if common.stopped_by_horizon(planner):
-                    return res
-                planner.planner.update_from_simulation()
-        elif LOOK_BY_TURN and heading_before is not None:
+        if LOOK_BY_TURN and not LOOK_BY_HEAD and heading_before is not None:
             r = planner.turn_in_place(heading_before, tol=LOOK_TURN_TOL, stop_when=leaf_moved)
             if r != -1:
                 res = r
@@ -1410,7 +1388,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 res, info = go_home(env, planner, task, rest_tcp, res)
             else:
                 say(env, "home not credited; one re-drive", **_latches(info))
-                r = drive_home(env, planner, task, via_south=True)
+                r = drive_home(env, planner, task)
                 if r == -1:
                     say(env, "MISSED: the re-drive home refused")
                     return res
