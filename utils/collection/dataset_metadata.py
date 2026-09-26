@@ -55,7 +55,11 @@ def episode_rows(metadata):
             source_h5=item["source_h5"],
             source_runtime_sha256=item["source_sha256"],
         )
-        for key in ("numeric_source_h5", "numeric_source_sha256", "numeric_metadata_sha256"):
+        for key in (
+            "numeric_source_h5",
+            "numeric_source_sha256",
+            "numeric_metadata_sha256",
+        ):
             if key in item:
                 rows[index][key] = item[key]
     return rows
@@ -129,7 +133,10 @@ def write_dataset_metadata(output, metadata):
 
 
 def verify_dataset_metadata(output, metadata):
+    from .normalization_stats import verify_normalization
+
     output = Path(output)
+    verify_normalization(output)
     expected = episode_rows(metadata)
     seen = set()
     for path in sorted((output / "meta/episodes").rglob("*.parquet")):

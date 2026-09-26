@@ -18,3 +18,15 @@ Retention and successful format checks do not waive any of the41requirements. In
 Add `--link-videos` to the merge command when all inputs and the output are on the same filesystem. The merger creates a hardlink for each existing video file, preserves its episode timestamps, and rewrites only the numerical parquet files and metadata with explicit file mappings. It never concatenates, re-encodes, or appends to linked videos. Cross-filesystem linking fails without falling back to a large copy. Full LeRobot numerical and RGB verification still runs for every input and the output. The aggregation metadata records the linked files and their identities.
 
 Treat linked videos as immutable: editing their bytes in place would also affect the input shard. Deleting one video pathname leaves its other hardlink intact. Do not remove entire input directories: retained numerical H5 sources may still live there and be referenced by the merged metadata. Keep those numerical sources, original recordings, and campaign metadata. This option removes the second video payload at merge time; reserve space for numerical parquet rewriting, a working collection batch, and final checks.
+
+## Compact encoding with a measured quality limit
+
+`export_lerobot --video-profile compact` uses H264/YUV444P with GOP12. It first tries CRF16 and compares every decoded frame with the lossless source PNGs. If the episode/camera mean pixel error exceeds2/255, it retries CRF12 and then CRF0. Invalid dimensions or missing/extra frames fail immediately. Source PNGs are removed only after an acceptable video has been encoded; final LeRobot verification still checks every RGB frame against the original render.
+
+Each episode's `video_encoding` records the actual CRF/GOP, quality measurements, attempted settings, and SHA256 of its complete decoded RGB sequence. Final verification checks that concatenation, merging and retained storage preserve this sequence. `conversion_runs` preserves the requested video policy as well as the original converter commit, so shards encoded with different settings remain attributable. The default `reference` profile retains CRF12/GOP2 for compatibility with earlier exports; actual camera settings are recorded for it too.
+
+A smaller file is not evidence of adequate quality. The compact profile enforces the same E4 limit on every actual export; synthetic codec checks and small real-data probes do not establish human E5, full-dataset qualification, or a guaranteed storage ratio.
+
+## Preserve normalization statistics when merging
+
+The pinned LeRobot runtime episode view deliberately omits every `stats/` column to speed up sample access. The linked merger reads complete original episode parquet files instead. It preserves per-episode quantiles and other statistics while updating file and episode indices. Export and merge verification check usable global and per-episode action/state statistics (G3/G4) before loading videos. Missing columns, null values, wrong vector dimensions or nonfinite values fail verification.

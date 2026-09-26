@@ -12,14 +12,24 @@ from utils.collection.provenance import dataset_provenance_complete
 
 def batch(root, candidates, selected):
     return dict(
-        control_hz=20, policy_hz=10, action_repeat=2, tokenizer_sha256="tokenizer",
+        control_hz=20,
+        policy_hz=10,
+        action_repeat=2,
+        tokenizer_sha256="tokenizer",
         source_root=root,
         source_run=dict(seeds=candidates, signature=dict(code_sha256="same-code")),
-        source_episode_outcomes=[dict(scene_seed=s, success=s in selected,
-                                      status="success" if s in selected else "missed")
-                                 for s in candidates],
-        episodes=[dict(scene_seed=s, episode_index=i, success=True, truncated=False)
-                  for i, s in enumerate(selected)],
+        source_episode_outcomes=[
+            dict(
+                scene_seed=s,
+                success=s in selected,
+                status="success" if s in selected else "missed",
+            )
+            for s in candidates
+        ],
+        episodes=[
+            dict(scene_seed=s, episode_index=i, success=True, truncated=False)
+            for i, s in enumerate(selected)
+        ],
     )
 
 
@@ -28,10 +38,20 @@ def test_merge_keeps_real_campaigns_and_failed_attempts():
     merged = merge_provenance([a, b])
     assert merged["source_run"]["seeds"] == [1, 2]
     assert [s["run"]["seeds"] for s in merged["source_runs"]] == [[1, 2], [3, 4, 5]]
-    assert [e["scene_seed"] for e in merged["source_episode_outcomes"]] == [1, 2, 3, 4, 5]
+    assert [e["scene_seed"] for e in merged["source_episode_outcomes"]] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
     assert sum(e["success"] for e in merged["source_episode_outcomes"]) == 3
     assert [e["episode_index"] for e in merged["episodes"]] == [0, 1, 2]
-    assert [e["source_root"] for e in merged["episodes"]] == ["/first", "/second", "/second"]
+    assert [e["source_root"] for e in merged["episodes"]] == [
+        "/first",
+        "/second",
+        "/second",
+    ]
     assert "source_runs" not in a
 
 
@@ -45,7 +65,9 @@ def test_two_shards_count_one_campaign_only_once():
     assert len(merged["source_episode_outcomes"]) == 2
 
 
-@pytest.mark.parametrize("kind", ["duplicate", "runtime", "attempt_overlap", "outcome", "truncated"])
+@pytest.mark.parametrize(
+    "kind", ["duplicate", "runtime", "attempt_overlap", "outcome", "truncated"]
+)
 def test_invalid_inputs_are_rejected(kind):
     a, b = batch("/one", [1, 2], [1]), batch("/two", [3, 4], [3])
     if kind == "duplicate":
@@ -67,15 +89,25 @@ def test_invalid_inputs_are_rejected(kind):
 def qualified_batch(root, start, stop, converter):
     metadata = batch(root, list(range(start, stop)), list(range(start, stop)))
     files = {"scene.py": "f" * 64}
-    signature = dict(source_files=files,
-                     code_sha256=hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest(),
-                     profile=dict(robot_reference=dict(commit="a" * 40)))
+    signature = dict(
+        source_files=files,
+        code_sha256=hashlib.sha256(
+            json.dumps(files, sort_keys=True).encode()
+        ).hexdigest(),
+        profile=dict(robot_reference=dict(commit="a" * 40)),
+    )
     metadata["source_run"]["signature"] = signature
     metadata["provenance"] = dict(
-        source_signature_sha256=signature["code_sha256"], source_file_count=1,
-        component_commits=dict(robot="a" * 40, environment="b" * 40,
-                              planner="b" * 40, converter=converter * 40),
-        exporter_source_files={"converter.py": converter * 64})
+        source_signature_sha256=signature["code_sha256"],
+        source_file_count=1,
+        component_commits=dict(
+            robot="a" * 40,
+            environment="b" * 40,
+            planner="b" * 40,
+            converter=converter * 40,
+        ),
+        exporter_source_files={"converter.py": converter * 64},
+    )
     return metadata
 
 
@@ -86,21 +118,28 @@ def test_nested_merge_keeps_each_original_converter():
     ab = merge_provenance([a, b])
     merged = merge_provenance([ab, c])
     by_id = {c["id"]: c for c in merged["conversion_runs"]}
-    original = [by_id[e["conversion_id"]]["provenance"]["component_commits"]["converter"]
-                for e in merged["episodes"]]
+    original = [
+        by_id[e["conversion_id"]]["provenance"]["component_commits"]["converter"]
+        for e in merged["episodes"]
+    ]
     assert original == ["c" * 40] * 2 + ["d" * 40] * 2 + ["e" * 40] * 2
     assert dataset_provenance_complete(merged)
     assert "conversion_id" not in a["episodes"][0]
 
 
-@pytest.mark.parametrize("missing", ["original_converter", "final_converter", "episode_binding", "source_manifest"])
+@pytest.mark.parametrize(
+    "missing",
+    ["original_converter", "final_converter", "episode_binding", "source_manifest"],
+)
 def test_production_merge_cannot_bypass_commit_gate_with_small_batches(missing):
     a = qualified_batch("/one", 0, 500, "c")
     b = qualified_batch("/two", 500, 1000, "d")
     merged = merge_provenance([a, b])
     validate_release(merged, "release-1000ep")
     if missing == "original_converter":
-        merged["conversion_runs"][1]["provenance"]["component_commits"]["converter"] = None
+        merged["conversion_runs"][1]["provenance"]["component_commits"][
+            "converter"
+        ] = None
     elif missing == "final_converter":
         merged["provenance"]["component_commits"]["converter"] = None
     elif missing == "episode_binding":
@@ -118,3 +157,17 @@ def test_legacy_pilot_is_not_a_production_release():
     assert not dataset_provenance_complete(merged)
     with pytest.raises(ValueError, match="sub-1000"):
         validate_release(merged, "release")
+
+
+def test_nested_merge_keeps_distinct_video_settings_for_same_converter():
+    a, b = batch("/one", [1], [1]), batch("/two", [2], [2])
+    a["video"] = {"profile": "reference", "gop": 2}
+    b["video"] = {"profile": "compact", "gop": 12}
+    a["episodes"][0]["video_encoding"] = {"fetch_hand": {"crf": 12}}
+    b["episodes"][0]["video_encoding"] = {"fetch_hand": {"crf": 16}}
+    merged = merge_provenance([merge_provenance([a]), b])
+    by_id = {row["id"]: row for row in merged["conversion_runs"]}
+    assert len(by_id) == 2
+    for episode, expected in zip(merged["episodes"], [a, b]):
+        assert by_id[episode["conversion_id"]]["video"] == expected["video"]
+        assert episode["video_encoding"] == expected["episodes"][0]["video_encoding"]

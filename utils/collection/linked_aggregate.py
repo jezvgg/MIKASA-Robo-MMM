@@ -106,7 +106,11 @@ def aggregate_linked(repo_ids, repo_id, roots, output, *, chunk_size=1000):
     data_number = 0
     video_numbers = {key: 0 for key in video_keys}
     for meta_number, src in enumerate(all_meta):
-        episodes = src.episodes.to_pandas()
+        # The runtime src.episodes view deliberately removes every stats/ column.
+        # Preserve quantiles and all other original episode metadata for G4.
+        from .normalization_stats import read_episode_metadata
+
+        episodes = read_episode_metadata(src.root)
         if sorted(episodes["episode_index"].tolist()) != list(
             range(src.total_episodes)
         ):
