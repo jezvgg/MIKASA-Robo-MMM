@@ -1,5 +1,5 @@
 {
-  "profile_version": 4,
+  "profile_version": 5,
   "env_id": "MikasaSameDrawer-v0",
   "task_variant": "four_drawers_apple_interlude",
   "robot_reference": {
@@ -125,6 +125,15 @@
     "apple_grasp_stop_on_touch": false,
     "motion_revision": "owner_restoration_2026_09_26",
     "navigation_posture": "canonical_rest",
-    "initial_push_gripper": "open"
+    "initial_push_gripper": "open",
+    "pre_release_settling": {
+      "measurement": "consecutive_physical_pose_differences_and_arm_qvel",
+      "linear_speed_m_s": 0.01,
+      "angular_speed_rad_s": 0.5,
+      "arm_speed_rad_s": 0.05,
+      "stable_control_steps": 4,
+      "max_control_steps": 20,
+      "timeout": "reject_without_opening"
+    }
   }
 }

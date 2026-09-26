@@ -37,3 +37,12 @@ A fixed 40-attempt pilot and new human E5 review are required before mass collec
 Earlier setup notes and measured qualification remain in the unchanged
 [pre-v4 documentation](history/SAME_DRAWER_BEFORE_V4.md). Those results do not
 qualify the restored movements.
+
+Profile v5 enforces pre-release settling: four consecutive 20 Hz intervals with
+measured apple displacement speed < 0.01 m/s, rotation speed < 0.5 rad/s, and
+maximum arm joint velocity < 0.05 rad/s. Wait at most 20 control steps; a timeout
+is an explicit refusal with the gripper closed. The window ends on an even step.
+The former v4 six-step callback did not enforce its stop condition and its 20/40
+pilot is historical. Physical replay showed contact solver instantaneous apple
+velocity disagreeing with actual pose motion; v5 records both but uses physical
+pose differences for this pre-release check. The task success checker is unchanged.

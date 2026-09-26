@@ -17,6 +17,7 @@ import my_scenes  # noqa: F401
 from my_scenes.same_drawer import DRAWER_ART_SUFFIX, DRAWER_FIXTURES
 from planners.oracle import oracle_common as common
 from planners.oracle.rest_paths import curved_rest
+from planners.oracle.settling import ReleaseSettling
 from planners.same_drawer_paths import DrawerPathPlanner
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
@@ -482,20 +483,27 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                       contact=True, contact_stretch=1)
     if stopped(result):
         return result
-    # The object can momentarily have zero velocity while the arm still tracks
-    # the noisy transfer's last command. Require a short stable interval before
-    # opening; this also leaves the held-action replay time to settle.
-    stable_steps = 0
+    # Enforce settling before release. The prior six-step wait ignored failure
+    # of its stop condition. Pose differences measure the actual held-object
+    # motion rather than the contact solver's instantaneous velocity field.
+    settle = ReleaseSettling(array(task.apple.pose.raw_pose)[0], task.control_timestep)
+    settle_started = int(task.elapsed_steps.item())
     def settled_for_release():
-        nonlocal stable_steps
         arm_velocity = array(task.agent.robot.get_qvel())[0, [5, 7, 8, 9, 10, 11, 12]]
-        stable = (float(np.linalg.norm(array(task.apple.linear_velocity)[0])) < 0.01
-                  and float(np.max(np.abs(arm_velocity))) < 0.05)
-        stable_steps = stable_steps + 1 if stable else 0
-        return stable_steps >= 4
-    result = close_gripper(t=6, stop_when=settled_for_release)
+        ready = settle.update(array(task.apple.pose.raw_pose)[0], arm_velocity)
+        # Leave on a complete held-action pair, so opening needs no unmeasured
+        # padding step after the stable window.
+        return ready and int(task.elapsed_steps.item()) % 2 == 0
+    result = close_gripper(t=20, stop_when=settled_for_release)
+    log("settle before apple release", reached=settle.ready,
+        waited_steps=int(task.elapsed_steps.item()) - settle_started,
+        stable_steps=settle.stable_steps, linear_speed=settle.linear_speed,
+        angular_speed=settle.angular_speed, arm_speed=settle.arm_speed,
+        solver_linear_speed=float(np.linalg.norm(array(task.apple.linear_velocity)[0])))
     if stopped(result):
         return result
+    if not settle.ready:
+        return common.fail(env, WHO, "apple or arm did not settle before release")
     result = open_gripper(t=6)
     common.hold_object_in_planner(env, planner, task, task.apple, False, who=WHO)
     if stopped(result):
