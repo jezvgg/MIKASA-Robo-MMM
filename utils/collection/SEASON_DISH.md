@@ -50,7 +50,7 @@ to 5 mm per enabled world axis to these goals:
 | Free approach before grasp | x, y, z |
 | Lift above the neighbouring object | z |
 | Base stop at the bowl dock | x, y |
-| Hover, optional pre-hover and hover correction | x, y, z |
+| Feasible hover and hover correction | x, y, z |
 
 Contact grasps and orientations remain geometry-derived. Each goal is perturbed
 before the existing collision/IK checks. A candidate's feasibility probe and
@@ -237,3 +237,17 @@ a hover only after checking its full wrist-only pour, and approaches left-wall
 docks diagonally from the open aisle with the same rest arm. This avoids driving
 a west-facing forearm into the wall without adding a different transport pose.
 These changes require their own fixed-pool qualification and E5 review.
+
+## Restored profile v5 pilot (2026-09-26)
+
+Fixed pool `season-restore-pilot-002`: 30/40 source successes, all 30
+native replays, held-action replays and three-camera RGB recordings pass.
+No failed seed was replaced. Roll-range and individual-turn checks pass for all
+successful episodes. New E5 packages contain ten complete three-camera episodes
+and storyboards for the remaining successes; human acceptance is pending.
+D6 is not fully qualified: 7 successful episodes exceed the pause
+fraction limit; no additional exception is assumed. The authorized initial
+five-second cue exception is evaluated separately; post-cue failures remain failures.
+Every successful pour has constant commands for all non-wrist arm joints/torso
+and zero base commands. Segmentation visibility exceeds 95% overall in every
+episode, but brief manipulation occlusions remain for E1 review.
