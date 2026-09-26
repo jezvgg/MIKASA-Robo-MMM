@@ -22,8 +22,10 @@ def merge_provenance(metadata_list):
         for key in ("control_hz", "policy_hz", "action_repeat", "tokenizer_sha256"):
             if metadata[key] != first[key]:
                 raise ValueError(f"Incompatible {key}")
-        source_runs = metadata.get("source_runs", [dict(
-            source_root=metadata["source_root"], run=metadata["source_run"])])
+        source_runs = metadata.get(
+            "source_runs",
+            [dict(source_root=metadata["source_root"], run=metadata["source_run"])],
+        )
         for source in source_runs:
             root, run = source["source_root"], source["run"]
             if run["signature"] != first["source_run"]["signature"]:
@@ -36,14 +38,19 @@ def merge_provenance(metadata_list):
             row.setdefault("source_root", metadata["source_root"])
             key = (row["source_root"], row["scene_seed"])
             if key in outcomes and outcomes[key] != row:
-                raise ValueError("Campaign outcomes changed; refresh batch provenance first")
+                raise ValueError(
+                    "Campaign outcomes changed; refresh batch provenance first"
+                )
             outcomes[key] = row
         input_conversions = metadata.get("conversion_runs")
         if input_conversions is None:
-            conversion = dict(provenance=metadata.get("provenance", {}),
-                              exporter=metadata.get("exporter", {}))
+            conversion = dict(
+                provenance=metadata.get("provenance", {}),
+                exporter=metadata.get("exporter", {}),
+            )
             conversion["id"] = hashlib.sha256(
-                json.dumps(conversion, sort_keys=True).encode()).hexdigest()
+                json.dumps(conversion, sort_keys=True).encode()
+            ).hexdigest()
             input_conversions = [conversion]
         input_ids = {c["id"] for c in input_conversions}
         if not input_ids or len(input_ids) != len(input_conversions):
@@ -55,7 +62,9 @@ def merge_provenance(metadata_list):
             conversions[key] = copy.deepcopy(conversion)
         for item in metadata["episodes"]:
             if item.get("success") is not True or item.get("truncated") is not False:
-                raise ValueError("Only successful, non-truncated episodes can be merged")
+                raise ValueError(
+                    "Only successful, non-truncated episodes can be merged"
+                )
             if item["scene_seed"] in seen_seeds:
                 raise ValueError("Duplicate episode seed across batches")
             seen_seeds.add(item["scene_seed"])
@@ -70,12 +79,18 @@ def merge_provenance(metadata_list):
     candidate_seeds = [seed for run in runs.values() for seed in run["seeds"]]
     if len(candidate_seeds) != len(set(candidate_seeds)):
         raise ValueError("Independent campaigns contain overlapping candidate seeds")
-    expected_keys = [(root, seed) for root, run in runs.items() for seed in run["seeds"]]
+    expected_keys = [
+        (root, seed) for root, run in runs.items() for seed in run["seeds"]
+    ]
     if set(outcomes) != set(expected_keys):
         raise ValueError("Missing or unexpected source-attempt outcomes")
     if len({"numeric_source_h5" in e for e in episodes}) > 1:
-        raise ValueError("Prepare retention for every input batch before mixing storage modes")
-    merged["source_runs"] = [dict(source_root=root, run=run) for root, run in runs.items()]
+        raise ValueError(
+            "Prepare retention for every input batch before mixing storage modes"
+        )
+    merged["source_runs"] = [
+        dict(source_root=root, run=run) for root, run in runs.items()
+    ]
     merged["source_episode_outcomes"] = [outcomes[key] for key in expected_keys]
     merged["episodes"] = episodes
     merged["conversion_runs"] = list(conversions.values())
@@ -89,10 +104,12 @@ def validate_release(metadata, output):
         if "test" not in Path(output).name.lower():
             raise ValueError("Label a sub-1000-episode merged dataset with -test-Nep")
     elif not dataset_provenance_complete(metadata):
-        raise ValueError("Checklist A2: commit and bind the merger and every input batch converter")
+        raise ValueError(
+            "Checklist A2: commit and bind the merger and every input batch converter"
+        )
 
 
-def merge(roots, output, repo_id):
+def merge(roots, output, repo_id, *, link_videos=False):
     from lerobot.datasets.aggregate import aggregate_datasets
     from .dataset_metadata import write_dataset_metadata
 
@@ -102,23 +119,46 @@ def merge(roots, output, repo_id):
     metadata_list = [read_json(p / "source_h5_metadata.json") for p in roots]
     metadata = merge_provenance(metadata_list)
     metadata["provenance"] = export_provenance(
-        Path(__file__).resolve().parents[2], metadata["source_run"]["signature"])
+        Path(__file__).resolve().parents[2], metadata["source_run"]["signature"]
+    )
     validate_release(metadata, output)
     batches = []
     for root in roots:
         verify(root)
-        batches.append(dict(
-            root=str(root), metadata_sha256=file_sha256(root / "source_h5_metadata.json"),
-            readback_sha256=file_sha256(root / "readback.json"),
-            video_quality_sha256=file_sha256(root / "video_quality.json")))
-    aggregate_datasets([m["repository_id"] for m in metadata_list], repo_id,
-                       roots=roots, aggr_root=output)
+        batches.append(
+            dict(
+                root=str(root),
+                metadata_sha256=file_sha256(root / "source_h5_metadata.json"),
+                readback_sha256=file_sha256(root / "readback.json"),
+                video_quality_sha256=file_sha256(root / "video_quality.json"),
+            )
+        )
+    if link_videos:
+        from .linked_aggregate import aggregate_linked, verify_links
+
+        storage = aggregate_linked(
+            [m["repository_id"] for m in metadata_list], repo_id, roots, output
+        )
+    else:
+        aggregate_datasets(
+            [m["repository_id"] for m in metadata_list],
+            repo_id,
+            roots=roots,
+            aggr_root=output,
+        )
+        storage = dict(mode="copy_videos")
     metadata["repository_id"] = repo_id
-    metadata["aggregation"] = dict(module=__name__, source_sha256=file_sha256(__file__),
-                                   batches=batches)
+    metadata["aggregation"] = dict(
+        module=__name__,
+        source_sha256=file_sha256(__file__),
+        batches=batches,
+        storage=storage,
+    )
     write_json(output / "source_h5_metadata.json", metadata)
     write_dataset_metadata(output, metadata)
     verify(output)
+    if link_videos:
+        verify_links(storage["videos"])
     return metadata
 
 
@@ -127,9 +167,22 @@ def main():
     parser.add_argument("--inputs", type=Path, nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repo-id", required=True)
+    parser.add_argument(
+        "--link-videos",
+        action="store_true",
+        help="Hardlink immutable videos on the same filesystem; no video copying",
+    )
     args = parser.parse_args()
-    metadata = merge(args.inputs, args.output, args.repo_id)
-    print("Merged", len(metadata["episodes"]), "episodes from", len(metadata["source_runs"]), "campaigns")
+    metadata = merge(
+        args.inputs, args.output, args.repo_id, link_videos=args.link_videos
+    )
+    print(
+        "Merged",
+        len(metadata["episodes"]),
+        "episodes from",
+        len(metadata["source_runs"]),
+        "campaigns",
+    )
 
 
 if __name__ == "__main__":
