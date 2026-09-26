@@ -1,5 +1,12 @@
 # Repository Guidelines
 
+## Current dataset requirements
+
+`BIBLE.md` and `DATASET_CHECKLIST.md` are the primary requirements (user update,
+2026-09-24). Older 16-item qualification does not establish compliance with the
+41-item checklist. Work in this task's existing branch; keep private audits and
+large recordings outside Git. Robot model/controller changes remain prohibited.
+
 ## Project Overview
 
 This repository is a **fork of ManiSkill 3** repurposed as a **VLA (Vision-Language-Action) memory benchmark** for household robotic tasks. The benchmark tests whether VLA models can remember and execute multi-step manipulation sequences in kitchen environments (RoboCasa scenes). The upstream ManiSkill engine (SAPIEN 3.0+ / NVIDIA PhysX CUDA) is used as-is for GPU-parallelized simulation and Vulkan rendering.

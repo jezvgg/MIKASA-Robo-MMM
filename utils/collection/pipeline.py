@@ -1,4 +1,4 @@
-"""CabinetSearch: state-only attempts, action replay, then success-only RGB."""
+"""State-only attempts, action replay, then success-only RGB."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,7 @@ import numpy as np
 from .contract import (ACTION_NAMES, ACTION_REPEAT, CAMERAS, CONTROL_FPS,
                        POLICY_FPS, episode_summary, read_json, recording_info, write_json)
 from .client import as_numpy, execute_actions, scalar_bool
-from .profile import REPO, load_profile, make_env, runtime_signature
+from .profile import REPO, TASKS, load_profile, make_env, runtime_signature, validate_instructions
 
 PHASES = ("oracle", "native", "validated", "native_rgb", "rgb")
 
@@ -57,6 +57,9 @@ def collection_contract(base, *, run: dict, seed: int, stage: str, source=None, 
     instruction = base.get_language_instruction()[0]
     if not isinstance(instruction, str) or not instruction.strip():
         raise ValueError("The task must supply a nonempty get_language_instruction()")
+    language = run.get("language_validation")
+    if language and instruction not in language["instruction_tokens"]:
+        raise ValueError("Task instruction was not checked before collection")
     native = stage in {"oracle", "native"}
     return {
         "version": 3,
@@ -73,7 +76,9 @@ def collection_contract(base, *, run: dict, seed: int, stage: str, source=None, 
         "global_state_use": "debug_only_never_policy_input",
         "policy_fps": CONTROL_FPS if native else POLICY_FPS,
         "action_repeat": 1 if native else ACTION_REPEAT,
+        "source_action_repeat": run["signature"]["profile"]["data"].get("source_action_repeat", 1),
         "instruction": instruction,
+        "language_validation": language,
         "action_names": ACTION_NAMES,
         "state_joint_names": [j.name for j in base.agent.robot.get_active_joints()],
         "source": source,
@@ -191,9 +196,18 @@ def action_only_oracle(env):
             env.reset = reset_override
 
 
+def classify_collection_result(result) -> str:
+    """A success at the time limit is diagnostic, not accepted training data."""
+    from utils.test_planner import classify_result
+
+    if isinstance(result, tuple) and len(result) == 5 and scalar_bool(result[3]):
+        return "truncated"
+    return classify_result(result)
+
+
 def collect_one(root: Path, run: dict, seed: int) -> dict:
     from utils.mikasa.seeding import seed_everything
-    from utils.test_planner import classify_result, load_planner
+    from utils.test_planner import load_planner
 
     seed_everything(seed)
     path = episode_path(root, "oracle", seed)
@@ -205,11 +219,16 @@ def collect_one(root: Path, run: dict, seed: int) -> dict:
         seed_everything(seed)
         configure_events(env, path.parent)
         planner_cfg = run["signature"]["profile"]["planner"]
+        execution_kwargs = {}
+        if "action_noise" in planner_cfg:
+            execution_kwargs = dict(
+                action_noise=planner_cfg["action_noise"], noise_hold=planner_cfg["noise_hold"],
+                execution_noise_seed=seed + planner_cfg["execution_noise_seed_offset"])
         try:
             with action_only_oracle(env):
-                verdict = classify_result(load_planner(planner_cfg["module"])(
+                verdict = classify_collection_result(load_planner(planner_cfg["module"])(
                     env, seed, waypoint_noise_seed=seed + planner_cfg["noise_seed_offset"],
-                    waypoint_noise_m=planner_cfg["waypoint_noise_m"]))
+                    waypoint_noise_m=planner_cfg["waypoint_noise_m"], **execution_kwargs))
         except NonReplayableMotion as exc:
             traceback.print_exc()
             verdict, reason = "non_replayable", str(exc)
@@ -280,8 +299,8 @@ def validate_one(root: Path, run: dict, seed: int, *, native=False) -> dict:
             if not initial_state_matches(traj["env_states"], base.get_state_dict()):
                 return {"status": "initial_state_mismatch"}
         result = execute_actions(env, actions, repeat=repeat)
-        success = result["completed"] and result["success"]
-        if not result["completed"]:
+        success = result["completed"] and result["success"] and result["status"] == "completed"
+        if result["status"] != "completed":
             status = result["status"]
         env.flush_trajectory(save=result["control_steps"] > 0)
         if result["control_steps"] > 0:
@@ -387,7 +406,7 @@ def render_one(
 
 
 def assert_signature(run):
-    if runtime_signature() != run["signature"]:
+    if runtime_signature(load_profile(run["signature"]["profile"]["env_id"])) != run["signature"]:
         raise ValueError("Source, robot, task settings or engine changed since run creation")
 
 
@@ -493,6 +512,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="command", required=True)
     collect = subs.add_parser("collect")
+    collect.add_argument("--profile", choices=TASKS, default="cabinet_search")
+    collect.add_argument("--tokenizer", type=Path)
     collect.add_argument("--output", type=Path, required=True)
     collect.add_argument("--start-seed", type=int, required=True)
     collect.add_argument("--num-seeds", type=int, required=True)
@@ -514,9 +535,10 @@ def main():
     if args.command == "collect":
         if args.num_seeds < 1 or args.start_seed < 0:
             raise ValueError("Positive candidate count and nonnegative seeds required")
-        signature = runtime_signature()
+        signature = runtime_signature(load_profile(args.profile))
+        language = validate_instructions(signature["profile"], args.tokenizer)
         root.mkdir(parents=True, exist_ok=False)
-        run = dict(version=1, purpose=args.purpose,
+        run = dict(version=1, purpose=args.purpose, language_validation=language,
                    seeds=list(range(args.start_seed, args.start_seed + args.num_seeds)),
                    signature=signature, scene=signature["profile"]["env_id"],
                    env_kwargs=signature["profile"]["env_kwargs"],

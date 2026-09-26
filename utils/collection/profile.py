@@ -1,9 +1,10 @@
-"""Pinned CabinetSearch configuration and simulator provenance."""
+"""Pinned task configuration and simulator provenance."""
 from __future__ import annotations
 
 import ast
 import dataclasses
 import hashlib
+import importlib
 import importlib.metadata
 import json
 import os
@@ -14,6 +15,18 @@ from .contract import ACTION_NAMES, CAMERAS, read_json
 
 REPO = Path(__file__).resolve().parents[2]
 PROFILE = Path(__file__).with_name("cabinet_search_profile.json")
+TASKS = {
+    "same_drawer": ("MikasaSameDrawer-v0", "my_scenes.same_drawer", "SameDrawerTask"),
+    "cabinet_search": ("MikasaCabinetSearch-v0", "my_scenes.cabinet_search", "CabinetSearchTask"),
+    "season_dish": ("MikasaSeasonDish-v0", "my_scenes.season_dish", "SeasonDishTask"),
+}
+
+
+def profile_name(name):
+    for key, (env_id, _, _) in TASKS.items():
+        if name in (key, env_id):
+            return key
+    raise ValueError(f"Unknown collection profile: {name}")
 
 
 def json_value(value):
@@ -33,8 +46,8 @@ def class_methods_sha(path):
     return hashlib.sha256("\n".join(methods).encode()).hexdigest()
 
 
-def load_profile():
-    profile = read_json(PROFILE)
+def load_profile(name="cabinet_search"):
+    profile = read_json(PROFILE.with_name(profile_name(name) + "_profile.json"))
     overrides = {k: v for k, v in os.environ.items() if k.startswith("MIKASA_")}
     if overrides:
         raise ValueError(f"Pinned collection forbids implicit MIKASA overrides: {sorted(overrides)}")
@@ -49,6 +62,9 @@ def load_profile():
         path = REPO / "robots/fetch" / relative
         if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
             raise ValueError(f"Reference robot asset changed: {relative}")
+    source = REPO / "robots/fetch/ds_fetch.py"
+    if hashlib.sha256(source.read_bytes()).hexdigest() != reference["source_file_sha256"]:
+        raise ValueError("DSFetch source differs from the pinned master reference")
     if class_methods_sha(REPO / "robots/fetch/ds_fetch.py") != reference["methods_source_sha256"]:
         raise ValueError("DSFetch methods differ from the original reference")
     return profile
@@ -56,13 +72,12 @@ def load_profile():
 
 def task_config(profile):
     import my_scenes  # noqa: F401
-    from my_scenes.cabinet_search import CabinetSearchTask
-
-    cfg = CabinetSearchTask.cfg
+    _, module, cls = TASKS[profile_name(profile["env_id"])]
+    cfg = getattr(importlib.import_module(module), cls).cfg
     cfg.validate()
     for key, expected in profile["task"].items():
         actual = len(cfg.compartments) if key == "num_compartments" else getattr(cfg, key)
-        if actual != expected:
+        if json_value(actual) != expected:
             raise ValueError(f"Task parameter {key}: {actual!r} != {expected!r}")
     return json_value(dataclasses.asdict(cfg))
 
@@ -72,11 +87,11 @@ def runtime_signature(profile=None):
     files = {}
     for folder in ("my_scenes", "planners", "robots/fetch", "utils"):
         for path in sorted((REPO / folder).rglob("*")):
-            if path.name.startswith("test_") or path.suffix not in {".py", ".urdf", ".srdf", ".json"}:
+            if path.name.startswith("test_") or path.suffix not in {".py", ".urdf", ".srdf", ".json", ".png", ".obj"}:
                 continue
             if "collection" in path.parts and path.name not in {
                 "__init__.py", "pipeline.py", "contract.py", "client.py", "profile.py",
-                "cabinet_search_profile.json",
+                "cabinet_search_profile.json", "season_dish_profile.json", "same_drawer_profile.json",
             }:
                 continue
             files[str(path.relative_to(REPO))] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -127,6 +142,27 @@ def verify_env(env, profile):
             if abs(float(getattr(actual, key)) - value) > 1e-6:
                 raise ValueError(f"Camera {name} {key} differs from the reference")
     return joints
+
+
+
+def validate_instructions(profile, tokenizer):
+    """Check full language strings with the supplied PaliGemma tokenizer."""
+    if tokenizer is None:
+        if profile["env_id"] in {"MikasaSeasonDish-v0", "MikasaSameDrawer-v0"}:
+            raise ValueError("Collection requires --tokenizer (PaliGemma SentencePiece)")
+        return None  # Existing CabinetSearch runs remain resumable.
+    import sentencepiece as spm
+    _, module, _ = TASKS[profile_name(profile["env_id"])]
+    task = importlib.import_module(module)
+    texts = set(task.INSTRUCTIONS) | set(getattr(task, "INSTRUCTIONS_NUDGE", ()))
+    sp = spm.SentencePieceProcessor(model_file=str(tokenizer))
+    counts = {text: len(sp.encode(text.strip() + "\n", add_bos=True)) for text in sorted(texts)}
+    if max(counts.values()) > profile["data"]["max_instruction_tokens"]:
+        raise ValueError(f"Instruction exceeds the PaliGemma budget: {counts}")
+    return {"tokenizer_sha256": hashlib.sha256(Path(tokenizer).read_bytes()).hexdigest(),
+            "sentencepiece_version": spm.__version__,
+            "encoding": "stripped instruction + newline, BOS included, no EOS",
+            "instruction_tokens": counts}
 
 
 def make_env(run, *, rgb=False, render_backend=None):

@@ -85,7 +85,10 @@ from mani_skill.utils.building import actors
 from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneBuilder
 from mani_skill.utils.structs import Actor, Pose
 
-from utils.robocasa_utils import require_get_fixture, restore_task_tensor, parking_pose
+from utils.initial_pose import randomize_initial_joints
+from utils.robocasa_utils import (require_get_fixture, restore_task_tensor, parking_pose,
+                                  load_objaverse_actor, objaverse_mjcf)
+from pathlib import Path
 
 #: Keys `get_state_dict` adds beyond the simulator state — every one is task
 #: MEMORY or the ticket. One place, so the state tests and `SearchLatches`
@@ -95,7 +98,7 @@ TASK_STATE_KEYS = (
     "opened_count", "is_open", "passed_home", "last_opened",
     "reopened", "two_open", "skipped_home", "foreign_moved",
     "second_decision_made", "second_decision_ok", "retry_count",
-    "succeeded", "articulation_home", "last_eval_step", "seen_count", "cube_spawn",
+    "succeeded", "articulation_home", "last_eval_step", "seen_count", "cube_spawn", "found", "inspected",
 )
 #: Keys a recording may lack and still replay: added after the key was frozen, and
 #: restoring them as zero changes nothing but the step the success latches on
@@ -109,35 +112,27 @@ TASK_STATE_OPTIONAL = ("seen_count", "cube_spawn")
 #: an unstated rule with an instant fail would fail an agent that follows the
 #: instruction literally (review finding).
 INSTRUCTIONS = (
-    "Find the cube hidden in the wall cabinets. Go to the marked spot on the "
-    "floor before opening any cabinet, close empty cabinets, and "
-    "return to the mark before opening the next. Never open a cabinet you "
-    "have already opened.",
-    "A cube is hidden in the wall cabinets. Starting from the floor mark, "
-    "open cabinets to look for it; close an empty cabinet behind you and come "
-    "back to the mark before trying another. Do not open a cabinet you "
-    "already opened.",
-    "Search the wall cabinets for the cube. Every search starts at the "
-    "marked spot: shut empty cabinets after looking and head back to the mark "
-    "before the next. Opening the same cabinet again fails the task.",
+    "Find the cola can hidden in the wall cabinets. Start at the marked spot on "
+    "the floor, close empty cabinets, and return to the mark after every "
+    "inspection, including when you find the can. Never inspect a cabinet again.",
+    "Search the wall cabinets for a cola can. Visit the floor mark before "
+    "searching and after each inspection. Shut empty cabinets and avoid "
+    "cabinets you already inspected. Finish back at the mark.",
+    "Look for the cola can in the wall cabinets. Begin at the floor mark, close "
+    "empty cabinets, and come back after each search. Remember the cabinets "
+    "already inspected and finish at the mark after finding the can.",
 )
 
-#: The same three under the touch terminal (`cfg.terminal == "nudge"`): the goal
-#: is STATED — the episode ends on a push of the cube, and a policy that only
-#: looks would wait out the horizon without being told why. Same word rules.
 INSTRUCTIONS_NUDGE = (
-    "Find the cube hidden in the wall cabinets and nudge it when you find it. "
-    "Go to the marked spot on the floor before opening any cabinet, close "
-    "empty cabinets, and return to the mark before opening the next. "
-    "Never open a cabinet you have already opened.",
-    "A cube is hidden in the wall cabinets. Starting from the floor mark, "
-    "open cabinets to look for it and give it a push when you see it; close "
-    "an empty cabinet behind you and come back to the mark before trying another. "
-    "Do not open a cabinet you already opened.",
-    "Search the wall cabinets for the cube and push it when you find it. "
-    "Every search starts at the marked spot: shut empty cabinets after looking "
-    "and head back to the mark before the next. Opening the same cabinet "
-    "again fails the task.",
+    "Find the cola can hidden in the wall cabinets and nudge it when you find "
+    "it. Start at the floor mark, close empty cabinets, and return to the mark "
+    "after every inspection, including the successful one. Never inspect a cabinet again.",
+    "Search the wall cabinets for a cola can and gently push it when found. "
+    "Visit the floor mark before searching and after each inspection. Close "
+    "empty cabinets and avoid cabinets already inspected. Finish at the mark.",
+    "Look for the cola can in the wall cabinets. Begin at the floor mark, shut "
+    "empty cabinets, and come back after each search. Do not inspect a cabinet "
+    "again. Nudge the can when found, then return to the mark.",
 )
 
 #: The W13-measured graspable depth band on the cabinet shelf (y, world). The
@@ -598,6 +593,8 @@ class CabinetSearchConfig:
 
     # -- the home spot ---------------------------------------------------------
     home_xy: tuple = (1.80, -1.90)
+    home_jitter_xy: tuple = (0.25, 0.08)
+    "Independent uniform reset offsets, wholly inside the free floor area."
     """Free floor south of the counter row, between the cab_2 dock (x 1.30)
     and the cab_main docks (2.20/2.30), 0.6 m south of the dock line."""
     home_yaw_deg: float = 90.0
@@ -622,6 +619,8 @@ class CabinetSearchConfig:
     has more to hit). `MIKASA_CUBE_HALF` overrides for a probe; the spawn asserts in
     `validate` (compartment band, cabinet height) and `_build_layout` bound it."""
     cube_color: tuple = (1.0, 0.1, 0.1, 1.0)
+    can_model: str = "can_11"
+    "Pinned RoboCasa Objaverse Coca-Cola can; cube_half remains a clearance bound."
     shelf_top_z: float = 1.4200
     "The cabinet's interior floor (W13, mesh-bottom at settle)."
     spawn_clearance: float = 0.02
@@ -639,6 +638,11 @@ class CabinetSearchConfig:
     first decision needs a real home visit (validate() checks the margin)."""
     start_yaw_deg: float = 90.0
     start_jitter_xy: float = 0.08
+    # Uniform reset offsets around the unchanged DSFetch rest pose (C1).
+    initial_arm_jitter_rad: float = 0.04
+    initial_torso_jitter_m: float = 0.01
+    initial_head_jitter_rad: float = 0.05
+
     start_jitter_yaw: float = 0.10
 
     # -- foreign kitchen joints ------------------------------------------------
@@ -761,7 +765,11 @@ class CabinetSearchConfig:
         assert self.start_jitter_xy >= 0 and self.start_jitter_yaw >= 0
         d_start = math.hypot(self.start_xy[0] - self.home_xy[0],
                              self.start_xy[1] - self.home_xy[1])
-        assert d_start > self.home_radius + math.sqrt(2.0) * self.start_jitter_xy, (
+        assert all(v >= 0 for v in self.home_jitter_xy)
+        start_home_gap = np.maximum(
+            np.abs(np.array(self.start_xy) - self.home_xy)
+            - self.start_jitter_xy - np.asarray(self.home_jitter_xy), 0.)
+        assert np.linalg.norm(start_home_gap) > self.home_radius, (
             f"the start ({d_start:.2f} m from home) can land inside the home "
             "disk: the first decision would need no home visit"
         )
@@ -978,7 +986,8 @@ def hinge_theta(qpos: torch.Tensor, open_dir: torch.Tensor) -> torch.Tensor:
 
 
 def at_home_predicate(base_xy: torch.Tensor, base_yaw: torch.Tensor,
-                      base_speed: torch.Tensor, cfg: CabinetSearchConfig) -> torch.Tensor:
+                      base_speed: torch.Tensor, cfg: CabinetSearchConfig,
+                      home_xy=None) -> torch.Tensor:
     """Inside the home disk, facing home_yaw within the tolerance, parked.
 
     Example:
@@ -989,7 +998,8 @@ def at_home_predicate(base_xy: torch.Tensor, base_yaw: torch.Tensor,
         >>> at_home_predicate(xy, yaw, v, cfg).tolist()
         [True, True, False]
     """
-    home = torch.tensor(cfg.home_xy, dtype=base_xy.dtype, device=base_xy.device)
+    home = torch.as_tensor(cfg.home_xy if home_xy is None else home_xy,
+                           dtype=base_xy.dtype, device=base_xy.device)
     d_xy = torch.linalg.norm(base_xy - home, dim=-1)
     dyaw = base_yaw - math.radians(cfg.home_yaw_deg)
     dyaw = torch.atan2(torch.sin(dyaw), torch.cos(dyaw)).abs()
@@ -1093,6 +1103,8 @@ class SearchLatches:
     last_eval_step: torch.Tensor
     seen_count: torch.Tensor
     cube_spawn: torch.Tensor
+    found: torch.Tensor
+    inspected: torch.Tensor
 
     @classmethod
     def zeros(cls, n: int, n_compartments: int, n_foreign: int, device="cpu"):
@@ -1114,6 +1126,8 @@ class SearchLatches:
             last_eval_step=torch.full((n,), -1, dtype=torch.int32, device=device),
             seen_count=i32(n),
             cube_spawn=torch.zeros((n, 3), dtype=torch.float32, device=device),
+            found=b(n),
+            inspected=b(n, n_compartments),
         )
 
 
@@ -1259,7 +1273,8 @@ def step_search_latches(latches, *, step: torch.Tensor, theta: torch.Tensor,
     same_as_last = torch.arange(N, device=dev).unsqueeze(0) == last_opened.unsqueeze(-1)
     decision = rising & passed_home.unsqueeze(-1)
     retry = rising & ~passed_home.unsqueeze(-1) & same_as_last
-    repeat_now = (decision & (opened_count >= 1)).any(dim=-1)
+    repeat_now = ((decision & (opened_count >= 1)) |
+                  (retry & latches.inspected)).any(dim=-1)
     decision_any = decision.any(dim=-1)
 
     reopened = latches.reopened | repeat_now
@@ -1303,7 +1318,9 @@ def step_search_latches(latches, *, step: torch.Tensor, theta: torch.Tensor,
     # None (the offline traces) reads as the displacement being enough.
     nudged = revealed if moved_m is None else (revealed & (moved_m >= float(cfg.cube_nudge_m)))
     done = nudged if getattr(cfg, "terminal", "seen") == "nudge" else dwelt
-    succeeded = latches.succeeded | (revealed & done & ~fail_latched)
+    found = latches.found | (advance & revealed & done & ~fail_latched)
+    # Every inspection ends at the floor mark, including the successful one.
+    succeeded = (latches.succeeded | (found & at_home)) & ~fail_latched
 
     latches.reopened = reopened
     latches.two_open = two_open
@@ -1317,11 +1334,14 @@ def step_search_latches(latches, *, step: torch.Tensor, theta: torch.Tensor,
     latches.is_open = is_open
     latches.passed_home = passed_home
     latches.succeeded = succeeded
+    latches.found = found
+    latches.inspected = latches.inspected | (adv & (th_max_after >= cfg.theta_reveal))
     latches.seen_count = seen_count
     latches.last_eval_step = torch.where(advance, step, latches.last_eval_step)
 
     info = {
         "success": succeeded,
+        "found": found,
         "fail": fail_latched & ~succeeded,
         "revealed": revealed,
         "seen": seen_now,
@@ -1502,7 +1522,9 @@ class CabinetSearchTask(BaseEnv):
                 centres[i, c_i] = centre
                 bar_x = _bar_x(c.open_hinge, h_lo, h_hi, cfg.handle_hpad)
                 docks[i, c_i] = (bar_x, cfg.handle_dock_y)
-                d_home = math.hypot(bar_x - cfg.home_xy[0], cfg.handle_dock_y - cfg.home_xy[1])
+                closest = np.maximum(np.abs(np.array([bar_x, cfg.handle_dock_y])
+                                     - cfg.home_xy) - np.array(cfg.home_jitter_xy), 0.)
+                d_home = float(np.linalg.norm(closest))
                 assert d_home >= cfg.home_dock_min_m, (
                     f"{c.name}: home is {d_home:.2f} m from its handle dock "
                     f"({bar_x:.2f}, {cfg.handle_dock_y})"
@@ -1551,17 +1573,19 @@ class CabinetSearchTask(BaseEnv):
                         f"{c.name}: the cube band touches the partition at x={mid:.2f}"
                     )
 
-        # The cube: dynamic, red, parked in the air at load; per-episode spawn
-        # by MESH BOTTOM in _initialize_episode.
-        self.cube = actors.build_cube(
-            self.scene,
-            half_size=cfg.cube_half,
-            color=list(cfg.cube_color),
-            name="cube",
-            body_type="dynamic",
+        # Keep the existing actor/state key for collection compatibility; its
+        # geometry and appearance are the pinned Coca-Cola can from RoboCasa.
+        if Path(objaverse_mjcf("can", 1)).parent.name != cfg.can_model:
+            raise ValueError("RoboCasa can registry changed; expected can_11")
+        self.cube = load_objaverse_actor(
+            self, "can", "cube", index=1,
             initial_pose=sapien.Pose(p=[float(centres[0, 0]), cfg.spawn_depth,
-                                        cfg.shelf_top_z + 0.20]),
+                                       cfg.shelf_top_z + 0.20]),
         )
+        bounds = self.cube.get_first_collision_mesh(to_world_frame=False).bounds
+        self._target_rest_lift = float(-bounds[0, 2])
+        if np.abs(bounds[:, :2]).max() > cfg.cube_half:
+            raise ValueError("Can exceeds the checked compartment clearance envelope")
 
         # The home marker: a visual-only disk on the floor (no collision shapes
         # — `add_collision=False`; kinematic, not static: the pose setter
@@ -1750,13 +1774,14 @@ class CabinetSearchTask(BaseEnv):
             # the start's (the family's shared-jitter shortcut was a review
             # finding), and the instruction is its own draw.
             n_comp = self.layout.n_compartments
-            cabs, cube_j, start_j, instr = [], [], [], []
+            cabs, cube_j, start_j, instr, home_j = [], [], [], [], []
             for i in env_idx.tolist():
                 rng = self._batched_episode_rng[i]
                 cabs.append(rng.randint(n_comp))
                 cube_j.append(rng.uniform(-1.0, 1.0, size=2))
                 start_j.append(rng.uniform(-1.0, 1.0, size=3))
                 instr.append(rng.randint(len(INSTRUCTIONS)))
+                home_j.append(rng.uniform(-1.0, 1.0, size=2))
             cab_t = torch.as_tensor(np.asarray(cabs), dtype=torch.long)
             cj = torch.as_tensor(np.stack(cube_j), dtype=torch.float32)
             sj = torch.as_tensor(np.stack(start_j), dtype=torch.float32)
@@ -1767,11 +1792,20 @@ class CabinetSearchTask(BaseEnv):
             spawn = torch.zeros((b, 3))
             spawn[:, 0] = self._spawn_centre_x[env_idx, cab_t] + cj[:, 0] * cfg.spawn_jitter_x
             spawn[:, 1] = cfg.spawn_depth + cj[:, 1] * cfg.spawn_jitter_depth
-            spawn[:, 2] = cfg.shelf_top_z + cfg.spawn_clearance + cfg.cube_half
+            spawn[:, 2] = cfg.shelf_top_z + cfg.spawn_clearance + self._target_rest_lift
             self.cube.set_pose(Pose.create_from_pq(p=spawn))
             self.cube_spawn[env_idx] = spawn.to(self.cube_spawn.device)
             self.cube.set_linear_velocity(torch.zeros((b, 3)))
             self.cube.set_angular_velocity(torch.zeros((b, 3)))
+
+            # The marker's recorded actor pose is the authoritative home position.
+            home = torch.zeros((b, 3), device=self.device)
+            home[:, :2] = torch.as_tensor(cfg.home_xy, device=self.device) + (
+                torch.as_tensor(np.stack(home_j), device=self.device) *
+                torch.as_tensor(cfg.home_jitter_xy, device=self.device))
+            home[:, 2] = cfg.home_marker_z
+            self.home_marker.set_pose(Pose.create_from_pq(
+                p=home, q=euler.euler2quat(0.0, math.pi / 2.0, 0.0)))
 
             # The robot start: south of home, outside the disk (validate()).
             base = torch.zeros((b, 3))
@@ -1797,8 +1831,12 @@ class CabinetSearchTask(BaseEnv):
             self.second_decision_ok[env_idx] = False
             self.retry_count[env_idx] = 0
             self.succeeded[env_idx] = False
+            self.found[env_idx] = False
+            self.inspected[env_idx] = False
             self.last_eval_step[env_idx] = -1
             self.seen_count[env_idx] = 0
+
+            randomize_initial_joints(self, env_idx)
 
     def _restore_robot(self, env_idx: torch.Tensor):
         """The rest keyframe for every robot uid (scene_builder only restores
@@ -1925,7 +1963,8 @@ class CabinetSearchTask(BaseEnv):
         tcp = self.agent.tcp_pose.p
         tcp_far = torch.linalg.norm(tcp.unsqueeze(1) - self._bar_xyz, dim=-1) > cfg.hand_far_m
         base_xy, base_yaw, base_speed = self._base_state()
-        at_home = at_home_predicate(base_xy, base_yaw, base_speed, cfg)
+        at_home = at_home_predicate(base_xy, base_yaw, base_speed, cfg,
+                                    self.home_marker.pose.p[:, :2])
         foreign_q = self._read_foreign()
         drift = (foreign_q - self.articulation_home).abs()
         if drift.shape[1]:
@@ -2011,4 +2050,3 @@ class CabinetSearchTask(BaseEnv):
             setattr(self, key, restore_task_tensor(
                 getattr(self, key), state[key], self.device
             ))
-
