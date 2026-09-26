@@ -154,3 +154,14 @@ This does not add a waypoint or parking offset. Free-floor/home navigation remai
 forward, and the direct home leg can still turn more overall than the published
 south-waypoint route. The D5 conflict of published door work remains explicit;
 no owner exception is assumed. The v4 pilot and its review remain historical.
+
+## Restored profile v5 pilot (2026-09-26)
+
+Fixed pool `cabinet-restore-pilot-002`: 37/40 source successes; all three prior
+long closing-dock turns are removed. D2 roll range, D4 individual turns, even
+gripper switching and termination at the can pass in all 37 successes.
+D6 pause metrics fail in one of the 37 successful episodes.
+The episode still has the published door-work reversals: D5 is not qualified.
+Centered home parking also occludes the mark, so E1 fails; neither a parking
+offset nor an owner exception has been silently introduced. The new E5 review
+and unresolved checklist items must be addressed before mass collection.

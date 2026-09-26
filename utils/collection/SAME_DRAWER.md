@@ -59,3 +59,10 @@ fraction limit; no additional exception is assumed. H2 fails: the 50% source
 success rate is below 60%. All 20 successful releases pass the measured four-interval
 settling audit, initial pushes keep the fingers open and reopening keeps the base
 stopped with a confirmed handle grasp. No mass-collection qualification is claimed.
+
+The fixed pilot attempted the top drawer eight times without a complete success.
+A separate, previously known diagnostic seed 512 passes profile v5 with both
+physical replays and RGB; it supplements the E5 package and never replaces a
+fixed-pool failure. Apple grasp signs also fail D3 consistency: (+,-)8, (+,+)7,
+(-,+)5 of 20 successful episodes. The restored published grasp is preserved;
+no D3 exception or full qualification is implied.
