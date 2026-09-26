@@ -37,13 +37,12 @@ def fixture(target):
 
 
 @pytest.mark.parametrize("target", range(4))
-def test_found_requires_final_return(target):
+def test_nudge_ends_at_can_without_final_return(target):
     tick, state = fixture(target)
     tick(home=True)
     info = tick(target, moved=.03)
-    assert info["found"].item() and not info["success"].item()
-    info = tick(target, home=True, moved=.03)
-    assert info["success"].item()
+    assert info["found"].item() and info["success"].item()
+    assert not info["at_home"].item()
 
 
 @pytest.mark.parametrize("home_between", [False, True])
@@ -74,3 +73,18 @@ def test_random_home_uses_recorded_marker_not_config_center():
     speed = torch.zeros(1)
     assert at_home_predicate(home, yaw, speed, cfg, home).item()
     assert not at_home_predicate(home, yaw, speed, cfg).item()
+
+
+@pytest.mark.parametrize("target", range(4))
+@pytest.mark.parametrize("moved", [0., .019])
+def test_reveal_or_insufficient_push_does_not_finish(target, moved):
+    tick, _ = fixture(target)
+    tick(home=True)
+    assert not tick(target, moved=moved)["success"].item()
+
+
+@pytest.mark.parametrize("target", range(4))
+def test_push_without_initial_home_fails(target):
+    tick, _ = fixture(target)
+    info = tick(target, moved=.03)
+    assert info["fail"].item() and not info["success"].item()

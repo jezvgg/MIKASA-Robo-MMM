@@ -112,27 +112,23 @@ TASK_STATE_OPTIONAL = ("seen_count", "cube_spawn")
 #: an unstated rule with an instant fail would fail an agent that follows the
 #: instruction literally (review finding).
 INSTRUCTIONS = (
-    "Find the cola can hidden in the wall cabinets. Start at the marked spot on "
-    "the floor, close empty cabinets, and return to the mark after every "
-    "inspection, including when you find the can. Never inspect a cabinet again.",
-    "Search the wall cabinets for a cola can. Visit the floor mark before "
-    "searching and after each inspection. Shut empty cabinets and avoid "
-    "cabinets you already inspected. Finish back at the mark.",
-    "Look for the cola can in the wall cabinets. Begin at the floor mark, close "
-    "empty cabinets, and come back after each search. Remember the cabinets "
-    "already inspected and finish at the mark after finding the can.",
+    "Find the cola can hidden in the wall cabinets. Start at the floor mark. "
+    "Close empty cabinets and return directly to the mark before the next search. "
+    "Never inspect a cabinet again. Finish when you find the can.",
+    "Search the wall cabinets for a cola can. Visit the floor mark first and "
+    "between empty searches. Shut empty cabinets and avoid inspected cabinets. "
+    "Stop at the cabinet containing the can.",
+    "Look for the cola can. Begin at the floor mark, close each empty cabinet "
+    "and return directly to the mark. Remember inspected cabinets. Finish on finding the can.",
 )
-
 INSTRUCTIONS_NUDGE = (
-    "Find the cola can hidden in the wall cabinets and nudge it when you find "
-    "it. Start at the floor mark, close empty cabinets, and return to the mark "
-    "after every inspection, including the successful one. Never inspect a cabinet again.",
-    "Search the wall cabinets for a cola can and gently push it when found. "
-    "Visit the floor mark before searching and after each inspection. Close "
-    "empty cabinets and avoid cabinets already inspected. Finish at the mark.",
-    "Look for the cola can in the wall cabinets. Begin at the floor mark, shut "
-    "empty cabinets, and come back after each search. Do not inspect a cabinet "
-    "again. Nudge the can when found, then return to the mark.",
+    "Find the cola can in the wall cabinets and gently push it. Start at the floor mark. "
+    "Close empty cabinets and return directly to the mark before searching another. "
+    "Never inspect a cabinet twice. Finish after pushing the can.",
+    "Search for the cola can. Visit the floor mark first and between empty searches. "
+    "Shut empty cabinets and avoid inspected cabinets. Gently push the can when found and stop.",
+    "Begin at the floor mark and look for the cola can. Close each empty cabinet and "
+    "return directly to the mark. Remember inspected cabinets. End by nudging the can.",
 )
 
 #: The W13-measured graspable depth band on the cabinet shelf (y, world). The
@@ -1319,8 +1315,8 @@ def step_search_latches(latches, *, step: torch.Tensor, theta: torch.Tensor,
     nudged = revealed if moved_m is None else (revealed & (moved_m >= float(cfg.cube_nudge_m)))
     done = nudged if getattr(cfg, "terminal", "seen") == "nudge" else dwelt
     found = latches.found | (advance & revealed & done & ~fail_latched)
-    # Every inspection ends at the floor mark, including the successful one.
-    succeeded = (latches.succeeded | (found & at_home)) & ~fail_latched
+    # The can interaction ends the episode here; home is required between searches.
+    succeeded = (latches.succeeded | found) & ~fail_latched
 
     latches.reopened = reopened
     latches.two_open = two_open

@@ -1,7 +1,7 @@
 {
-  "profile_version": 3,
+  "profile_version": 4,
   "env_id": "MikasaCabinetSearch-v0",
-  "task_variant": "four_compartments_cola_random_home_nudge_return",
+  "task_variant": "four_compartments_cola_random_home_nudge",
   "robot_reference": {
     "repository": "https://github.com/jezvgg/MIKASA-Robo-MMM",
     "commit": "4c5c8b3de941565ee2d57b153a10254fe64c2849",
@@ -87,10 +87,10 @@
     "h5py": "3.16.0"
   },
   "planner": {
-    "module": "cabinet_search_arm_planner",
+    "module": "planners.cabinet_search_planner",
     "waypoint_noise_m": 0.005,
     "noise_seed_offset": 200003,
-    "noise_scope": "free_floor_home_and_south_waypoints",
+    "noise_scope": "free_floor_direct_home",
     "action_noise": 0.003,
     "noise_hold": 10,
     "execution_noise_seed_offset": 300007,
@@ -99,6 +99,9 @@
       -1,
       1
     ],
-    "gripper_switch_control_step_parity": 0
+    "gripper_switch_control_step_parity": 0,
+    "motion_revision": "owner_restoration_2026_09_26",
+    "navigation_posture": "upstream_rest_torso_0.20_wrist_flex_1.7",
+    "final_return_required": false
   }
 }
