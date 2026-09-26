@@ -49,12 +49,19 @@ def verify_video_quality(output, limit=2.0):
             for start, length, eid, camera in segments:
                 if eid not in files:
                     reference = mapping[eid].get("render_verification", {}).get(camera)
-                    if (not reference or reference.get("frames") != length
-                            or reference.get("seed") != mapping[eid]["scene_seed"]
-                            or reference.get("camera") != camera
-                            or len(reference.get("decoded_rgb_sha256", "")) != 64
-                            or not 0 <= reference.get("mean_absolute_error_255", -1) <= limit):
-                        raise ValueError("Missing full-render evidence for retained RGB")
+                    if (
+                        not reference
+                        or reference.get("frames") != length
+                        or reference.get("seed") != mapping[eid]["scene_seed"]
+                        or reference.get("camera") != camera
+                        or len(reference.get("decoded_rgb_sha256", "")) != 64
+                        or not 0
+                        <= reference.get("mean_absolute_error_255", -1)
+                        <= limit
+                    ):
+                        raise ValueError(
+                            "Missing full-render evidence for retained RGB"
+                        )
                     references[eid, camera] = reference
                 digests[eid, camera] = hashlib.sha256()
                 stats[(eid, camera)] = dict(
@@ -65,7 +72,11 @@ def verify_video_quality(output, limit=2.0):
                     pixel_error_sum=0.0,
                     pixels=0,
                     max_frame_mae=0.0,
-                    verification="source_render" if eid in files else "render_verified_rgb_digest",
+                    verification=(
+                        "source_render"
+                        if eid in files
+                        else "render_verified_rgb_digest"
+                    ),
                 )
                 for i in range(length):
                     if start + i in by_frame:
@@ -93,7 +104,9 @@ def verify_video_quality(output, limit=2.0):
                     delta = np.abs(actual.astype(np.int16) - expected.astype(np.int16))
                     row["pixels"] += delta.size
                     row["pixel_error_sum"] += float(delta.sum())
-                    row["max_frame_mae"] = max(row["max_frame_mae"], float(delta.mean()))
+                    row["max_frame_mae"] = max(
+                        row["max_frame_mae"], float(delta.mean())
+                    )
             if by_frame:
                 raise ValueError("Video missing required episode frames")
             for key, row in stats.items():
@@ -101,13 +114,32 @@ def verify_video_quality(output, limit=2.0):
                 if key in references:
                     reference = references[key]
                     if row["decoded_rgb_sha256"] != reference["decoded_rgb_sha256"]:
-                        raise ValueError("Decoded RGB differs from the render-verified recording")
-                    row["mean_absolute_error_255"] = reference["mean_absolute_error_255"]
+                        raise ValueError(
+                            "Decoded RGB differs from the render-verified recording"
+                        )
+                    row["mean_absolute_error_255"] = reference[
+                        "mean_absolute_error_255"
+                    ]
                     row["max_frame_mae"] = reference["max_frame_mae"]
                     row.pop("pixel_error_sum")
                     row.pop("pixels")
                 else:
-                    row["mean_absolute_error_255"] = row.pop("pixel_error_sum") / row.pop("pixels")
+                    row["mean_absolute_error_255"] = row.pop(
+                        "pixel_error_sum"
+                    ) / row.pop("pixels")
+                encoding = (
+                    mapping[row["episode_index"]]
+                    .get("video_encoding", {})
+                    .get(row["camera"], {})
+                )
+                if "decoded_rgb_sha256" in encoding:
+                    if (
+                        encoding["decoded_rgb_sha256"] != row["decoded_rgb_sha256"]
+                        or encoding.get("frames") != row["frames"]
+                    ):
+                        raise ValueError(
+                            "RGB differs from the encoder-verified frame sequence"
+                        )
                 checks.append(row)
     passed = all(row["mean_absolute_error_255"] <= limit for row in checks)
     report = dict(

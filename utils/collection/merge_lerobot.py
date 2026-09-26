@@ -47,6 +47,7 @@ def merge_provenance(metadata_list):
             conversion = dict(
                 provenance=metadata.get("provenance", {}),
                 exporter=metadata.get("exporter", {}),
+                video=metadata.get("video", {}),
             )
             conversion["id"] = hashlib.sha256(
                 json.dumps(conversion, sort_keys=True).encode()
