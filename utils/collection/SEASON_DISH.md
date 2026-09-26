@@ -1,31 +1,38 @@
 # Season Dish collection
 
 This profile prepares `MikasaSeasonDish-v0` in kitchen 0 for the shared
-[16-point data contract](../DATA_CONTRACT.md). It uses the unchanged DSFetch
+[BIBLE](../../BIBLE.md) and [41-item checklist](../../DATASET_CHECKLIST.md). It uses the unchanged DSFetch
 from upstream `master` at `4c5c8b3de941565ee2d57b153a10254fe64c2849`.
 The branch currently depends on `feat/cabinet-search-collection`, which supplies
 the shared H5/replay/LeRobot implementation. No replacement robot is introduced.
 
 ## Task and information
 
-Two condiments and a bowl are randomly positioned on the usable counter.
-A yellow marker indicates the requested condiment for 40 control steps (2 s),
-then disappears. The two condiments swap sides independently of the answer.
-The demonstrator looks at their midpoint during the cue, independent of the
-answer. The language instruction also does not name the answer.
+Two short salt/pepper models and a bowl are randomly positioned on the counter.
+The robot starts by the refrigerator. A picture identifies the requested
+condiment for 100 control steps (5 seconds); the robot waits until it disappears
+before driving. Condiment sides are randomized independently of the answer.
+Language does not disclose which condiment is requested.
 
-The requested condiment must be grasped, within 0.10 m horizontally of the
-bowl, 0.05–0.30 m above it, and tilted at least 155 degrees for 15 consecutive
-control steps. Success is allowed after the 40-step cue and 40-step delay.
-The other condiment must not be grasped or displaced more than 0.10 m from
-its initial position. These are the existing task predicates; seasoning is
-a pose proxy, without substance/fluid simulation. The horizon is 1100 steps
-(55 s). The manipulation docks are derived from the object placements. The robot starts
-0.75 ± 0.05 m behind the station dock, facing the condiments. After the cue disappears
-it drives to that dock, then begins grasping. Distance jitter uses the seeded
-placement RNG after the object draw. Initial poses vary across seeds; they are
-not statistically independent of the station. The cue marker radius is 4.5 cm so
-it remains visible from the distant start; the robot cameras are unchanged.
+The condiment must be held within 0.10 m horizontally of the bowl, 0.05–0.30 m
+above it and tilted at least 155 degrees for 15 consecutive control steps, after
+the cue and delay. The unchanged horizon is 1100 steps (55 seconds). The other
+condiment must not be grasped or displaced more than 0.10 m. This is a pose proxy
+for seasoning; no fluid/substance simulation is implied.
+
+Profile v4 restores a horizontal side grasp with the wrist camera above the hand.
+There is no empty-arm fold before driving or additional arrival preparation pose.
+After grasp/lift the arm folds to the canonical robot rest keyframe. The hover is
+prepared before pouring. Pouring changes only `wrist_roll`: the other arm/torso
+commands stay constant and both base commands remain zero. The complete wrist arc
+is checked for collisions, available roll range and a reachable 165-degree target
+while the object is held. An infeasible arc is a failure, without an arm-motion
+fallback or relaxed success threshold. The head follows the current stage.
+
+The owner explicitly approved a D6 exception only for the initial 100 control
+steps of picture observation. All frames remain in the recordings and exports.
+The checklist reports raw pause metrics and a separate post-cue check; a later
+pause is not covered by this exception.
 
 ## Motion and noise
 
@@ -44,7 +51,6 @@ to 5 mm per enabled world axis to these goals:
 | Lift above the neighbouring object | z |
 | Base stop at the bowl dock | x, y |
 | Hover, optional pre-hover and hover correction | x, y, z |
-| Pour candidates above the bowl | x, y, z |
 
 Contact grasps and orientations remain geometry-derived. Each goal is perturbed
 before the existing collision/IK checks. A candidate's feasibility probe and
@@ -215,3 +221,10 @@ in the list. The manifest records the pinned implementation and pool outcomes.
 
 These measurements qualify collection on this task configuration. No learned
 VLA performance or coverage of all kitchens is claimed.
+
+## Restoration provenance
+
+Profile v4 follows the owner's selected changes 1, 2, 4, 8, 9 and common 43.
+The movement reference is published commit `dbb95ed`. Old profile v1/v2/v3
+recordings and their qualification below retain their original provenance.
+New source/native/held-action/RGB runs and human E5 review qualify v4 separately.

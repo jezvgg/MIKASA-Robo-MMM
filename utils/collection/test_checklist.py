@@ -58,3 +58,21 @@ def test_gripper_parity_and_base_roundoff_are_separate_from_real_reverse():
     a[4:, 11] = -0.1
     m = motion_metrics(a, q, NAMES)
     assert m["reverse_frames"] == 4
+
+
+def test_cue_exception_does_not_hide_later_pauses_or_other_tasks():
+    from utils.collection.checklist import pause_check
+    a = np.zeros((150, 13)); a[:, 7] = 1
+    a[50:, 0] = np.arange(100) * .01
+    profile = {"env_id": "MikasaSeasonDish-v0", "profile_version": 4,
+               "quality_exceptions": {"D6": {"initial_observation_control_steps": 100,
+               "phase": "fridge_cue_observation", "preserve_all_frames": True}}}
+    check = pause_check(a, profile)
+    assert check["passed"] and not check["raw"]["passed"]
+    assert check["excluded_initial_frames"] == 50
+    other = dict(profile, env_id="MikasaSameDrawer-v0")
+    assert not pause_check(a, other)["passed"]
+    a[70:110] = a[70]
+    assert not pause_check(a, profile)["passed"]
+    a[:5, 11] = .1
+    assert not pause_check(a, profile)["passed"]

@@ -1,5 +1,5 @@
 {
-  "profile_version": 3,
+  "profile_version": 4,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -126,6 +126,18 @@
       -1,
       1
     ],
-    "gripper_switch_control_step_parity": 0
+    "gripper_switch_control_step_parity": 0,
+    "motion_revision": "owner_restoration_2026_09_26",
+    "navigation_posture": "canonical_rest",
+    "pour_motion": "wrist_roll_only",
+    "cue_observation_steps": 100
+  },
+  "quality_exceptions": {
+    "D6": {
+      "reason": "Owner explicitly requires the complete five-second initial fridge cue observation.",
+      "initial_observation_control_steps": 100,
+      "phase": "fridge_cue_observation",
+      "preserve_all_frames": true
+    }
   }
 }
