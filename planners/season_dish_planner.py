@@ -1,76 +1,21 @@
-"""Oracle for MikasaSeasonDish-v0, and its blind twin.
+"""Action-only oracle for SeasonDish and its blind control.
 
-Written against `tools/stub_planner.py` on a Mac and run for real in the amd64 CPU
-container (`tools/docker/planner.sh run …`) since 2026-08-18 (T5) — the geometry
-below is what the container measured. The stage kit is `oracle_common.py` (D7);
-the four poses that were `TODO(owner)` here are now built from it: the grasp from
-`grasp_geometry`/`try_grasp`, the drive to the task's own bowl dock, the hover
-from `pose_over`, and the pour from `pour_pose_for` (this file's one piece of
-geometry of its own, pure and tested against the task's predicate arithmetic).
+Read the fixed fridge picture, then travel to the condiment station with the arm
+in a fixed compact joint pose. The scene hides the picture at control step 100.
+The blind control replaces the remembered answer with a seeded uniform choice.
+Grasp with an upright wrist camera and a consistent elbow/wrist branch, lift
+clear of the neighbouring condiment, and fold while keeping the payload upright.
+Track the condiment before the grasp and the bowl afterwards.
 
-What the oracle does, in order, and why:
+Drive to the bowl with the same compact pose, move to an upright hover, then
+find a collision-checked screw or joint line to a pour pose. Pour candidates vary
+axial spin and horizontal tilt axis while preserving the task's angle, height,
+location, grasp and distractor requirements. All paths obey the recorded roll
+history. Execution noise is limited to transfer motions; contacts and pouring
+are clean. Poll the environment's hold counter until success or the horizon.
 
-1. **Waits the cue out** (`wait_cue`, to `cfg.cue_steps` — K36; the repo rule: an
-   oracle does not act through the cue) and only then reads the answer once,
-   `info["target_is_shaker"]` — privileged, as `template_planner.py` allows a
-   demonstrator; `--blind` replaces that read with a **uniform draw** of the
-   condiment from `np.random.default_rng(seed)` (the burner's convention) and
-   changes nothing else, so the arms differ only in memory (blind ≈ 0.5× sighted).
-   (Until the T5 fix round it took "always the shaker" — the harder grasp — and
-   scored structurally below the floor; both numbers are in the journal.)
-2. **Slides the base along the counter** until the target is straight ahead
-   (`dock_for_target`, K55). The station dock is drawn midway between the two
-   condiments, so the target sits `station_spacing / 2` = 12 cm to one side and the
-   reach is a diagonal; the slide costs a ~12 cm drive and leaves the standoff
-   alone. A refusal is not fatal — the grasp from the dock as drawn is what the
-   oracle did before.
-
-3. **Grasps the target**, and keeps asking when refused (K55). First the inherited
-   attempts: OBB thin side, one more draw of the same grasp (RRT is randomized),
-   then the closing direction reversed. Then a ladder over the three things that
-   are free to choose, cheapest first — **wrist yaw** (both condiments are bodies
-   of revolution, and the shaker's 0.051 x 0.052 m footprint means the yaw the OBB
-   picks is decided by a millimetre), **grip height** (+2.5 cm lifts the wrist out
-   of the counter it was sweeping through), and finally **stance** (±10 cm toward
-   the counter, when the refusal is a bare `IK Failed` and no wrist angle can help).
-   A refused plan costs no episode steps, so the ladder is nearly free in horizon —
-   only in wall clock. Verifies with `agent.is_grasping`, then reads
-   `distractor_ok` off the step's info — a nudged distractor is a **miss** (D6:
-   the 5-tuple, not `-1`).
-4. **Attaches the object in the planning world** (`hold_object_in_planner`;
-   honest since K53), **lifts** with the torso frozen to `lift_z = max(grasp.z +
-   0.15, tallest condiment top + 0.10)` (K40 — the base turn carries the object
-   over its neighbour), takes the object's pose in the base frame, and **drives**
-   straight to the bowl dock, facing the counter — no carry pose (K57: measured
-   free, 30 seeds per arm, and a quarter of the motion cheaper); `d_dock`/`dyaw`
-   in the trace (K26); `distractor_ok` again.
-5. **Hovers** the object origin `HOVER_ABOVE` over the bowl, upright as it was
-   grasped relative to the base (`object_q_from_base` — the base turns under it),
-   using `T_tcp_obj` read *after* the drive (the emulated burner showed the object
-   shifting in the fingers during base turns).
-6. **Pours**: `pour_pose_for` puts the object origin `POUR_ABOVE` over the bowl,
-   tilted about a horizontal world axis — the candidates in order: the base's
-   facing (+tilt, −tilt), then along the counter (±), first at `POUR_TILT_DEG` and
-   then at `POUR_TILT_STRONG_DEG`. The second rung is for the arm that reaches the
-   pose but not the angle: the predicate wants 55°, the first rung commands 65°,
-   and seed 2 came to rest at 47.5° — a 10° margin against a 17.5° tracking error.
-   Each executed candidate is given `POUR_SETTLE_STEPS` to come to rest before its
-   angle is believed, because a tilt read mid-motion is the commanded pose's error
-   rather than the object's attitude. After each the predicate's own flags are read
-   from info; a plan that ran
-   but did not satisfy them moves on to the next; `grasp_target` gone → a miss
-   ("dropped during the tilt"); none satisfied after all candidates → a miss
-   ("no pour pose reached", with the last `tilt_rad`); `-1` only if **no**
-   candidate planned at all (D6).
-7. **Holds**, polled in `HOLD_POLL_CHUNK` steps to `HOLD_POLL_BUDGET` and breaking
-   as soon as `success` latches — `pour_hold` resets on any single step where
-   `pour_now` is false, so one flicker inside a fixed window loses an episode that
-   would have latched a few steps later. Returns the last 5-tuple. Every stage checks
-   `stopped_by_horizon(planner)` before interpreting its result (K23).
-
-Contract, as `template_planner.py:32-45`: the solution owns the reset; return `-1`
-on a failed plan and the gym 5-tuple otherwise; do not catch exceptions; do not
-decide success; do not call `env.evaluate()` — read `info` from the tuple.
+The solver owns reset and returns -1 for a planning refusal, otherwise the last
+Gym step tuple. Physical task success comes from the environment's predicates.
 """
 
 from __future__ import annotations
@@ -91,6 +36,7 @@ from mani_skill.utils.wrappers import RecordEpisode
 from planners.oracle import oracle_common as common
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
+from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 
 # The mplib-dependent imports live inside oracle_common's factories, so this module
 # imports on a Mac and tests/test_season_dish_oracle.py runs the *real* solve()
@@ -130,13 +76,12 @@ POUR_ABOVE = 0.20
 # when refused, and re-measuring it is its own experiment.
 PRE_HOVER_BACK = 0.35
 
-# Tilt asked of the object at the pour: the predicate wants ≥ 55° (`pour_tilt_deg`);
-# 65° leaves 10° for the plan's orientation error. May be lowered toward 60° by
-# measurement, never the predicate's bound widened.
+# Pour candidates use 165 degrees against the task threshold of 155 degrees.
+# Settling verifies the measured object tilt without relaxing that threshold.
 POUR_SETTLE_STEPS = 4
 """Steps to let the object come to rest before its tilt is believed."""
 
-HOLD_POLL_CHUNK = 5
+HOLD_POLL_CHUNK = 1
 HOLD_POLL_BUDGET = 60
 """The hold is polled in `HOLD_POLL_CHUNK` steps up to `HOLD_POLL_BUDGET`, breaking as
 soon as `success` latches. `cfg.hold_steps` is 15, so the first three chunks are the
@@ -827,7 +772,7 @@ JOINT_LIMIT_SCALE = float(os.environ.get("MIKASA_JOINT_LIMITS", "0.9"))
 
 def default_planner_factory(env, debug: bool, vis: bool):
     """The real Fetch solver at the oracle refinement cap (`oracle_common`)."""
-    return common.default_planner_factory(
+    return common.collection_planner_factory(
         env, debug, vis,
         joint_vel_limits=JOINT_LIMIT_SCALE, joint_acc_limits=JOINT_LIMIT_SCALE,
     )
@@ -850,7 +795,7 @@ close across the short axis and the yaw is not ours to spend."""
 
 
 def approach_aligned_grasp_info(obb, ee_direction, target_closing) -> dict:
-    """Grasp frame for a body of revolution: approach along `ee_direction`, jaws across it.
+    """Pitch down toward a short cylindrical condiment, with horizontal jaws.
 
     Why (K59): a parallel jaw closing on a 5.1 cm circle grips identically at every
     yaw, so for these condiments the wrist yaw is a free parameter. `default_grasp_info`
@@ -873,7 +818,7 @@ def approach_aligned_grasp_info(obb, ee_direction, target_closing) -> dict:
         >>> obb = trimesh.primitives.Box(extents=[0.051, 0.052, 0.094])
         >>> info = approach_aligned_grasp_info(obb, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
         >>> np.round(info["approaching"], 3).tolist()
-        [1.0, 0.0, 0.0]
+        [0.819, 0.0, -0.574]
         >>> np.round(info["closing"], 3).tolist()
         [-0.0, 1.0, 0.0]
 
@@ -891,8 +836,14 @@ def approach_aligned_grasp_info(obb, ee_direction, target_closing) -> dict:
     n = float(np.linalg.norm(a))
     if long_ - short > CYL_FOOTPRINT_TOL * long_ or n < 1e-6:
         return default_grasp_info(obb, ee_direction, target_closing)
-    approaching = a / n
-    closing = np.array([-approaching[1], approaching[0], 0.0])
+    # Both current condiments are the same short cylindrical shaker geometry.
+    # Reach down from above the rim so the wrist clears the worktop while the
+    # jaw axis stays horizontal. This keeps the hand camera above the gripper.
+    heading = a / n
+    pitch = math.radians(35)
+    approaching = heading * math.cos(pitch)
+    approaching[2] = -math.sin(pitch)
+    closing = np.array([-heading[1], heading[0], 0.0])
     if target_closing is not None and float(np.asarray(target_closing, dtype=np.float64) @ closing) < 0:
         closing = -closing  # parallel jaws: theta and theta+180 close identically
     radius = 0.25 * (float(extents[0]) + float(extents[1]))
@@ -901,11 +852,80 @@ def approach_aligned_grasp_info(obb, ee_direction, target_closing) -> dict:
 
 
 
+
+# D9: the same torso/arm targets precede empty and loaded floor navigation.
+NAVIGATION_POSTURE = {
+    "torso_lift_joint": 0.38,
+    "shoulder_pan_joint": -0.37,
+    "shoulder_lift_joint": -0.8,
+    "upperarm_roll_joint": 1.7,
+    "elbow_flex_joint": 2.1,
+    "forearm_roll_joint": -0.6,
+    "wrist_flex_joint": 0.5,
+    "wrist_roll_joint": -0.4,
+}
+
+
+def navigation_posture(env, planner, task):
+    """Fold along a checked joint line, keeping the condiment nearly upright."""
+    planner.planner.update_from_simulation()
+    with transfer_phase(planner, "fold for navigation"):
+        return common.plan_joints(
+            env, planner, task, NAVIGATION_POSTURE,
+            label="fixed navigation posture", tries=1, who=WHO, line_only=True,
+        )
+
+
+def move_to_pour_pose(planner, task, pose):
+    """Execute a bounded screw or joint line to a physically reachable pour pose.
+
+    A Cartesian screw can hit a torso stop even when the final pose is reachable.
+    Try collision-checked joint lines to IK endpoints before abandoning that pose.
+    Every path still obeys the full recorded roll history; there is no RRT detour.
+    """
+    import mplib
+
+    p = planner.planner
+    cur = _np(task.agent.robot.get_qpos())[0].astype(float)
+    goal = mplib.Pose(pose.p, pose.q)
+    path = p.plan_screw(
+        goal, cur, time_step=task.control_timestep,
+        masked_joints=np.array([False] * 3 + [True] * 12),
+        goal_tolerance=planner.ARM_SCREW_GOAL_TOLERANCE,
+    )
+    if path.get("status") == "Success" and len(path["position"]) <= 100:
+        return planner.follow_forward_path_w_refinement(path, refine=True)
+    folded = p.fold_qpos(cur)
+    status, candidates = p.IK(
+        p._transform_goal_to_wrt_base(goal), folded,
+        [True] * 3 + [False] * 12, n_init_qpos=60,
+    )
+    if status != "Success":
+        return -1
+    candidates = sorted(
+        candidates,
+        key=lambda q: float(np.linalg.norm(
+            (q - folded)[p.move_group_joint_indices])),
+    )
+    for candidate in candidates:
+        candidate = candidate.copy()
+        # IK uses folded world root coordinates; joint-line planning expects
+        # simulator coordinates. The base is fixed throughout this manipulation.
+        candidate[:3] = cur[:3]
+        path = p.plan_qpos_line(
+            candidate, cur, time_step=task.control_timestep, ref_yaw=float(cur[2]),
+        )
+        if path.get("status") == "Success" and len(path["position"]) <= 100:
+            return planner.follow_forward_path_w_refinement(path, refine=True)
+    return -1
+
+
 def cue_head_target(task):
-    """View the whole station from the distant start, independent of the answer."""
-    mid = (_np(task.shaker.pose.p)[0] + _np(task.condiment_bottle.pose.p)[0]) / 2
-    local = (task.agent.base_link.pose[0].sp.inv() * sapien.Pose(mid)).p
-    return float(np.clip(np.arctan2(local[1], local[0]), -0.6, 0.6)), 0.20
+    """Aim the unchanged DSFetch cameras at the fixed fridge picture."""
+    from planners.oracle.head_tracking import HeadTracker
+    tracker = HeadTracker(task.agent, task.control_timestep)
+    tracker.target = _np(task.fridge_pictures.home)[0, :3]
+    return tuple(tracker.desired())
 
 
 def wait_cue(env, planner, info):
@@ -919,7 +939,7 @@ def choose_target(info, blind: bool, rng: np.random.Generator) -> bool:
     arm B ignores the cue and grasps a uniformly random condiment —
     `rng.integers(2)` from `np.random.default_rng(seed)`, so the draw is
     deterministic per seed and both objects appear over the eval seeds — and it
-    never touches the key. Called only after `wait_cue`.
+    never touches the key. Called after viewing the fridge picture.
 
     Example:
         >>> choose_target({"target_is_shaker": np.array([False])}, blind=False, rng=np.random.default_rng(0))
@@ -1104,6 +1124,10 @@ def try_grasp(env, planner, task, obj, grasp, reach, target_pad: float | None = 
     # Measured, 180 seeds per arm interleaved: shipped **175/180**, above-then-descend
     # **172/180**, with an almost disjoint failing set and two new stage failures
     # (`no pour pose reached`, `distractor moved during the drive`). Withdrawn.
+    # At the standoff the upright wrist camera already sees the condiment.
+    # Start looking toward the bowl during the clean contact stroke, allowing
+    # the head to arrive before the loaded arm starts its lift and fold.
+    planner.track_target(lambda: _np(obj.pose.p)[0])
     res, grasped = common.try_grasp(
         env, planner, task, obj, grasp, reach,
         keepout_actors=[task.shaker, task.condiment_bottle],
@@ -1123,6 +1147,7 @@ def try_grasp(env, planner, task, obj, grasp, reach, target_pad: float | None = 
         narrow_approach=NARROW_APPROACH, abort_on_touch=ABORT_ON_TOUCH,
         approach_aperture=APPROACH_APERTURE, approach_skim_cap=APPROACH_SKIM_CAP,
         full_dof_reach=FULL_DOF_REACH,
+        before_contact=lambda: planner.track_target(lambda: _np(task.bowl.pose.p)[0]),
     )
     if res != -1 and not grasped and not common.stopped_by_horizon(planner):
         _say_close_miss(env, task, obj)
@@ -1283,6 +1308,9 @@ def solve(
     grasp_info=approach_aligned_grasp_info,
     waypoint_noise_seed=None,
     waypoint_noise_m=0.005,
+    execution_noise_seed=None,
+    action_noise=0.003,
+    noise_hold=10,
 ):
     """`_solve` under this oracle's own RRT budget (`PLANNING_TIME_S`).
 
@@ -1294,6 +1322,7 @@ def solve(
             env, seed=seed, debug=debug, vis=vis, blind=blind,
             planner_factory=planner_factory, grasp_info=grasp_info,
             waypoint_noise_seed=waypoint_noise_seed, waypoint_noise_m=waypoint_noise_m,
+            execution_noise_seed=execution_noise_seed, action_noise=action_noise, noise_hold=noise_hold,
         )
 
 
@@ -1308,6 +1337,9 @@ def _solve(
     grasp_info=approach_aligned_grasp_info,
     waypoint_noise_seed=None,
     waypoint_noise_m=0.005,
+    execution_noise_seed=None,
+    action_noise=0.003,
+    noise_hold=10,
 ):
     """Season the dish with the condiment the recipe asked for. `-1` on a failed
     plan, the gym 5-tuple otherwise (a physical miss included, D6).
@@ -1326,6 +1358,12 @@ def _solve(
     ), env.unwrapped.control_mode
 
     planner = planner_factory(env, debug, vis)
+    planner.navigation_arrival_tolerance = 0.10
+    planner.forward_navigation = True
+    planner.prefer_low_roll_ik()
+    configure_execution_noise(
+        planner, env, int(seed or 0) + 300007 if execution_noise_seed is None else execution_noise_seed,
+        action_noise=action_noise, noise_hold=noise_hold)
     task = env.unwrapped
     rng = np.random.default_rng(seed)  # the blind arm's draw, deterministic per seed
     noise = WaypointNoise(
@@ -1333,24 +1371,31 @@ def _solve(
         waypoint_noise_m, lambda message, **data: say(env, message, **data),
     )
 
-    # -- STAGE 0: sit through the cue -------------------------------------------
-    # Look at the station midpoint, independent of which condiment the cue names.
+    # -- STAGE 0: read the fridge picture --------------------------------------
+    # Look at the fixed fridge picture, independent of which condiment it names.
     # Thus head proprioception does not encode the answer after the cue disappears.
     pan, tilt = cue_head_target(task)
-    gaze = planner.hold_head(pan=pan, tilt=tilt, t=12, ramp=10)
+    planner.track_target(_np(task.fridge_pictures.home)[0, :3])
+    gaze = planner.hold_head(pan=pan, tilt=tilt, t=20, ramp=10)
     if gaze == -1:
         return fail(env, "look at the cue station")
-    info = wait_cue(env, planner, gaze[-1])
-    if info == -1:
-        return info
+    # Remember the picture while looking at it, then start the trip. The scene
+    # hides it at step 100 even if the robot has already turned away; waiting
+    # motionless for the full cue would violate the dataset's pause limit.
+    info = gaze[-1]
 
     # -- STAGE 1: the privileged read (or the blind draw) ---------------------------
     target_is_shaker = choose_target(info, blind, rng)
     target = task.shaker if target_is_shaker else task.condiment_bottle
     say(env, "target chosen", target_is_shaker=target_is_shaker, blind=bool(blind))
+    planner.track_target(lambda: _np(target.pose.p)[0])
+    res = navigation_posture(env, planner, task)
+    if res == -1:
+        return fail(env, "fold before the condiment station")
+    if common.stopped_by_horizon(planner):
+        return res
 
-    # Travel only after the cue disappears. Both answers use the same dock,
-    # so this approach cannot leave an answer-dependent head or base cue.
+    # Both answers use the same physical station dock.
     dock = _np(task._station_dock_np)[0].astype(np.float64)
     dock_xyz = noise.point("station_dock", [dock[0], dock[1], 0.0], axes=(True, True, False))
     face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.0])
@@ -1361,13 +1406,32 @@ def _solve(
         return fail(env, "approach condiment station")
     if common.stopped_by_horizon(planner):
         return res
-    pan, _ = cue_head_target(task)
-    res = planner.hold_head(pan=pan, tilt=0.45, t=12, ramp=10)
+    pan, tilt = planner._head_tracker.desired()
+    res = planner.hold_head(pan=pan, tilt=tilt, t=12, ramp=10)
     if res == -1 or common.stopped_by_horizon(planner):
+        return res
+
+    # Unfold at the station into the same camera-up grasp branch. Starting IK
+    # directly from the compact travel pose can select a configuration whose
+    # lift needs a long detour or whose loaded fold crosses the counter.
+    ready = dict(
+        torso_lift_joint=0.38, shoulder_pan_joint=-0.37,
+        shoulder_lift_joint=-1.0, upperarm_roll_joint=0.7,
+        elbow_flex_joint=1.0, forearm_roll_joint=-0.1,
+        wrist_flex_joint=2.1, wrist_roll_joint=0.0,
+    )
+    planner.planner.update_from_simulation()
+    res = common.plan_joints(env, planner, task, ready,
+                             label="ready for condiment grasp", tries=1,
+                             who=WHO, line_only=True)
+    if res == -1:
+        return fail(env, "unfold at the condiment station")
+    if common.stopped_by_horizon(planner):
         return res
 
     # -- STAGE 2: grasp the target ---------------------------------------------------
     say(env, "grasp the target")
+    planner.set_grasp_branch(elbow=1, wrist=1)
     mesh = target.get_first_collision_mesh(to_world_frame=True)
     if mesh is None:
         return fail(env, "grasp the target: no collision mesh")
@@ -1403,7 +1467,11 @@ def _solve(
     ee_direction = np.asarray(obb.center_mass, dtype=np.float64) - base_pos
     ee_direction[2] = 0.0
     ee_direction = ee_direction / np.linalg.norm(ee_direction)
-    target_closing = _np(task.agent.tcp.pose.to_transformation_matrix())[0, :3, 1]
+    # Pick the camera-up jaw assignment from the approach direction, not from
+    # the randomized starting wrist orientation. The opposite sign puts the
+    # wrist camera underneath the hand during a side grasp.
+    target_closing = np.cross(ee_direction, np.array([0.0, 0.0, 1.0]))
+    target_closing /= np.linalg.norm(target_closing)
 
     z_grasp = max(float(obb.center_mass[2]), float(mesh.bounds[1][2]) - GRASP_BELOW_TOP)
     grasp, reach = raise_grasp_to(*grasp_geometry(task, obb, ee_direction, target_closing, grasp_info), z_grasp)
@@ -1422,6 +1490,15 @@ def _solve(
     line_now = [APPROACH_BY_LINE]
 
     def try_grasp(env_, planner_, task_, obj_, grasp_, reach_):     # the stage's pad and line
+        tcp_to_hand = (task_.agent.tcp.pose[0].sp.inv()
+                       * task_.agent.robot.links_map["gripper_link"].pose[0].sp)
+        hand = grasp_ * tcp_to_hand
+        camera = next(c for c in task_.agent._sensor_configs if c.uid == "fetch_hand")
+        camera_pose = hand * camera.pose[0].sp
+        if (camera_pose.p[2] - hand.p[2] < 0.02
+                or camera_pose.to_transformation_matrix()[2, 2] < 0.2):
+            say(env_, "reject inverted hand-camera grasp")
+            return -1, False
         # Perturb only the free approach; the contact grasp remains geometry-derived.
         reach_ = noise.pose("grasp_approach", reach_)
         return _try_grasp_with_pad(env_, planner_, task_, obj_, grasp_, reach_,
@@ -1900,6 +1977,8 @@ def _solve(
             distractor_moved=round(float(_np(res[-1]["distractor_moved"]).reshape(-1)[0]), 3))
         return res
     say(env, "grasped", distractor_ok=True)
+    planner.track_target(lambda: _np(task.bowl.pose.p)[0])
+    planner._grasp_branch = {}
     planner.planner.update_from_simulation()
     hold_object_in_planner(env, planner, task, target, held=True)
 
@@ -2059,16 +2138,21 @@ def _solve(
             object_z=round(float(_np(target.pose.p)[0][2]), 3))
         return res
     planner.planner.update_from_simulation()
-    # The object's orientation relative to the base, read before the drive turns it.
+    # Keep the grasp's upright heading relative to the base. The navigation
+    # fold changes the payload orientation but must not redefine the pour frame.
     obj_rel = common.object_pose_in_base(task, target)
-
-    # There is no carry pose here (K57). The tuck was inherited from the burner oracle,
-    # where `rotate_base_z` sweeps the turn's arc against the *attached* object (K51)
-    # and a stretched-out arm makes the turn unplannable. This task's two docks sit on
-    # the same counter run, so that turn is small: measured over 30 seeds per arm at
-    # matched load, **no episode failed the drive without the tuck** and the tuck itself
-    # never once refused — it was buying nothing and costing a quarter of the motion.
-    # jezv's planners have no equivalent stage at all.
+    res = navigation_posture(env, planner, task)
+    if res == -1:
+        return fail(env, "fold before the bowl drive")
+    if common.stopped_by_horizon(planner):
+        return res
+    if not bool(_np(task.agent.is_grasping(target)).any()):
+        say(env, "missed: dropped while folding for navigation")
+        return res
+    if not _flag(res[-1], "distractor_ok"):
+        say(env, "missed: distractor moved while folding for navigation")
+        return res
+    planner.planner.update_from_simulation()
 
     # -- STAGE 4: drive to the bowl dock -----------------------------------------------------
     dock = _np(task._bowl_dock_np)[0].astype(np.float64)
@@ -2087,44 +2171,7 @@ def _solve(
     if res != -1 and common.stopped_by_horizon(planner):
         return res
     if res == -1:
-        # The drive refused with the arm out. Pull the object in over the base and ask
-        # again (K74). This is `carry_pose` earning its place back: K57 deleted it as a
-        # stage because on a fixed 0.39 m drive it never once fired and cost a quarter of
-        # the motion — true then, and still true for short drives, which is why this is a
-        # recovery and not a stage. The drawn layout puts the dock as far as x = 0.33,
-        # against `wall_left_room_0_31`, and the refusals name it: `rotation sweep hits
-        # gripper_link<->wall` from `rotate_base_z`, `screw plan failed: collision
-        # ...finger_link<->wall, shaker<->wall` from `move_base_forward`. An arm folded
-        # over the base sweeps a far smaller volume past that wall.
-        say(env, "drive refused with the arm out; tucking and retrying")
-        tucked = common.carry_pose(env, planner, task, target, who=WHO,
-                                   max_knots=CARRY_MAX_KNOTS, knot_draws=CARRY_KNOT_DRAWS)
-        if tucked != -1 and common.stopped_by_horizon(planner):
-            return tucked
-        if tucked == -1:
-            return fail(env, "drive to bowl dock")
-        planner.planner.update_from_simulation()
-        with common.capture_refusal("collision ") as cap:
-            res = planner.drive_base(target_pos=dock_xyz, target_view_vec=face, freeze_arm=True)
-        if res == -1 and DRIVE_ALLOW_HELD_TOUCH and cap.refusal is not None:
-            # 2025 @0.15 (2026-09-06): the tuck (yaw 90) executed to 2 mm and the drive's
-            # screw was then refused `shoulder_lift_link <-> condiment_bottle after 1
-            # step` — the held bottle rests against the shoulder in the MODEL, and mplib
-            # will not plan out of a start it considers in collision. The object is held;
-            # that contact is harmless. Allow it for the attachment and drive once more.
-            stem = "shaker" if target is task.shaker else "condiment_bottle"
-            link = held_touch_link(cap.refusal, stem)
-            if link is not None:
-                say(env, "the tucked object touches the arm in the model; allowing that contact",
-                    link=link, refusal=cap.refusal[:80])
-                common.hold_object_in_planner(env, planner, task, target, held=True, who=WHO,
-                                              extra_touch=(link,))
-                planner.planner.update_from_simulation()
-                res = planner.drive_base(target_pos=dock_xyz, target_view_vec=face, freeze_arm=True)
-        if res != -1 and common.stopped_by_horizon(planner):
-            return res
-        if res == -1:
-            return fail(env, "drive to bowl dock (after the tuck)")
+        return fail(env, "drive to bowl dock in the fixed navigation posture")
     planner.planner.update_from_simulation()
     d_dock, dyaw = common.dock_error(task, (dock[0], dock[1], dock[2]))
     say(env, "parked at the dock", d_dock=round(d_dock, 3), dyaw_deg=round(dyaw, 1))
@@ -2133,9 +2180,8 @@ def _solve(
             distractor_moved=round(float(_np(res[-1]["distractor_moved"]).reshape(-1)[0]), 3))
         return res
 
-    # World-frame, read *after* the drive: the object as it was grasped relative to
-    # the base — the base has turned underneath it — with the base parked; and the
-    # grasp transform from the same still moment.
+    # Restore the pre-fold upright heading in the parked base frame; read the
+    # physical attachment now, since folding can change its small contact offset.
     obj_q = common.object_q_from_base(task, obj_rel)
     T_tcp_obj = (task.agent.tcp.pose[0].inv() * target.pose[0]).sp
     bowl_p = _np(task.bowl.pose.p)[0].astype(np.float64)
@@ -2198,7 +2244,7 @@ def _solve(
                     p=[round(float(v), 3) for v in _np(task.bowl.pose.p)[0]])
         say(env, "hover over bowl", hover=[round(float(v), 3) for v in hover.p],
             extra=round(float(extra), 3), back=round(float(back), 3), spin_deg=float(spin))
-        with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
+        with transfer_phase(planner, "carry condiment over bowl"), common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
             res = common.arm_move(env, planner, hover, who=WHO, stage="hover over bowl",
                                   disable_lift_joint=False,
                                   max_knots=HOVER_MAX_KNOTS, knot_draws=HOVER_KNOT_DRAWS)
@@ -2285,35 +2331,35 @@ def _solve(
             say(env, "the corrected hover refused; pouring as hovered")
 
     # -- STAGE 6: pour — the tilt candidates -------------------------------------------------
-    along = _np(task._along_np)[0].astype(np.float64)
-    along = np.array([along[0], along[1], 0.0])
     planned_any = False
     last = res
-    # K61: order the candidates so the ones a **straight** screw can reach come first.
-    # `static_manipulation` falls back to RRTConnect silently, and an RRT path wanders
-    # in joint space — on seed 0 the pour came back `plan=rrt knots=115` after the screw
-    # refused on joint 3 (the torso), and that wander is what the video shows as the arm
-    # rotating twice and rising before it tips. Seed 1's pour planned by screw (37 knots)
-    # and looks smooth. The probe plans only, so a candidate it rejects costs no episode
-    # steps; the order is a permutation, so every candidate is still tried and the
-    # measured tilt-ladder semantics are unchanged.
-    cands = list(pour_candidates(face, along))
-    # Indices, not membership: a candidate is `(numpy axis, tilt)` and `in` would compare
-    # the arrays element-wise and raise on the ambiguous truth value.
-    # Sample each candidate once, then probe and execute that exact pose.
-    poses = [noise.pose("pour", pour_pose_for(bowl_p, POUR_ABOVE, obj_q_held,
-                                             T_tcp_obj, axis, tilt))
-             for axis, tilt in cands]
-    straight = [i for i, pose in enumerate(poses) if common.screw_plans(planner, pose)]
-    order = straight + [i for i in range(len(cands)) if i not in straight]
-    say(env, "pour candidates ordered", straight=len(straight), total=len(cands))
-    for index in order:
-        axis, tilt = cands[index]
-        pour = poses[index]
+    # Both condiments are round: their axial heading is free, while their tilt
+    # and placement must still satisfy the task. Search this freedom with short,
+    # checked paths instead of rotating through an arbitrary RRT configuration.
+    heading = math.atan2(float(face[1]), float(face[0]))
+    cands = [
+        (np.array([math.cos(heading + math.radians(deg)),
+                   math.sin(heading + math.radians(deg)), 0.]), spin)
+        for spin in (-90, -135, 0, 45, 90, -45, 135, 180)
+        for deg in range(-30, 330, 30)
+    ]
+    for axis, spin in cands:
+        # Re-read the real grip after each executed move, including the hover.
+        # Old code refreshed it only when the hover needed position correction.
+        T_tcp_obj = (task.agent.tcp.pose[0].inv() * target.pose[0]).sp
+        live_q = target.pose[0].sp.q
+        upright = (sapien.Pose(q=common.level_correction(live_q))
+                   * sapien.Pose(q=live_q)).q
+        spun = (sapien.Pose(q=quat_about(np.array([0., 0., 1.]), math.radians(spin)))
+                * sapien.Pose(q=upright)).q
+        tilt = POUR_TILT_DEG
+        pour = pour_pose_for(_np(task.bowl.pose.p)[0], POUR_ABOVE,
+                             spun, T_tcp_obj, axis, tilt)
         say(env, "pour", axis=[round(float(v), 2) for v in axis], tilt_deg=tilt,
-            tcp=[round(float(v), 3) for v in pour.p])
+            spin_deg=spin, tcp=[round(float(v), 3) for v in pour.p])
+        planner.planner.update_from_simulation()
         with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-            res = planner.static_manipulation(pour, disable_lift_joint=False)
+            res = move_to_pour_pose(planner, task, pour)
         if res != -1 and common.stopped_by_horizon(planner):
             return res
         if res == -1:
@@ -2359,7 +2405,11 @@ def _solve(
         if common.stopped_by_horizon(planner):
             say(env, "stopped by the horizon during the hold")
             return res
-        if _flag(res[-1], "success"):
+        # Keep one 10 Hz sample of physical success beyond the 20 Hz threshold.
+        # A held-action replay can reach the pour predicate one raw step later.
+        # Check each step so this margin does not add a full polling block.
+        if (_flag(res[-1], "success")
+                and int(_np(res[-1]["pour_hold"]).reshape(-1)[0]) >= int(task.cfg.hold_steps) + 2):
             break
         if spent >= HOLD_POLL_BUDGET:
             break

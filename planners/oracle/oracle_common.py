@@ -142,7 +142,7 @@ DELTA_JOINT_ACC_LIMIT = float(os.environ.get("MIKASA_DELTA_ACC", "0.9"))
 
 
 def default_planner_factory(env, debug: bool, vis: bool, *, max_refine_steps: int = ORACLE_MAX_REFINE_STEPS,
-                            joint_vel_limits=None, joint_acc_limits=None):
+                            joint_vel_limits=None, joint_acc_limits=None, solver_class=None):
     """The real Fetch solver, capped at the oracle refinement budget. Needs mplib.
 
     Imported here, not at the top, so this module (and the oracles that defer to
@@ -177,7 +177,8 @@ def default_planner_factory(env, debug: bool, vis: bool, *, max_refine_steps: in
         joint_vel_limits = DELTA_JOINT_VEL_LIMIT
         if joint_acc_limits is None:
             joint_acc_limits = DELTA_JOINT_ACC_LIMIT
-    return FetchMotionPlanningSapienSolver(
+    solver_class = FetchMotionPlanningSapienSolver if solver_class is None else solver_class
+    return solver_class(
         env,
         debug=debug,
         vis=vis,
@@ -188,6 +189,12 @@ def default_planner_factory(env, debug: bool, vis: bool, *, max_refine_steps: in
         **({} if joint_vel_limits is None else {"joint_vel_limits": joint_vel_limits}),
         **({} if joint_acc_limits is None else {"joint_acc_limits": joint_acc_limits}),
     )
+
+
+def collection_planner_factory(*args, **kwargs):
+    """Collection motion commands without changing DSFetch or its controllers."""
+    from planners.oracle.collection_solver import CollectionMotionPlanner
+    return default_planner_factory(*args, solver_class=CollectionMotionPlanner, **kwargs)
 
 
 def default_grasp_info(obb, ee_direction, target_closing, finger_length: float = FINGER_LENGTH) -> dict:
@@ -386,7 +393,7 @@ def try_grasp(env, planner, task, obj, grasp, reach, *, keepout_actors=None, kee
               grasp_max_knots: int | None = None, grasp_knot_draws: int = 3,
               freeze_torso: bool = False, approach_max_knots: int | None = None,
               approach_clearance_pad: float | None = None, grasp_stretch: int = 1,
-              approach_by_line: bool = False):
+              approach_by_line: bool = False, before_contact=None):
     """reach -> grasp -> close. Returns (res, grasped) with res == -1 on a failed plan.
 
     `grasped` is read from `task.agent.is_grasping(obj)` — the state, not the
@@ -543,6 +550,8 @@ def try_grasp(env, planner, task, obj, grasp, reach, *, keepout_actors=None, kee
     gstretch = {}
     if int(grasp_stretch) > 1 and "stretch" in _params:
         gstretch = {"stretch": int(grasp_stretch)}
+    if before_contact is not None:
+        before_contact()
     res = planner.static_manipulation(grasp, disable_lift_joint=bool(freeze_torso), **ik, **gtouch, **gknots,
                                       **gstretch, **{k: v for k, v in draws.items() if k == "skim_cap"})
     if res == -1 and full_dof_reach and callable(
@@ -1876,8 +1885,9 @@ def fold_via_tcp(env, planner, task, rest_tcp, *, stage: str, who: str = "oracle
 
     A torso LINE first (the duck's own form, reversed), then a Cartesian move
     (`static_manipulation`, torso frozen) to the episode-start rest TCP point
-    re-based onto the current base pose, then the continuous joints wrapped and
-    a branch LINE to the exact rest configuration. Solo 5/6 (K111) measured
+    re-based onto the current base pose, then a branch LINE from the actual
+    measured joint coordinates to the rest configuration. No qpos wrapping:
+    every physical change must be represented by recorded actions. Solo 5/6 (K111) measured
     `plan_joints`' RRT branch executing 185 knots and moving the arm by NOTHING
     (arm_vs_rest 0.562 before and after, bit-for-bit) — the line branch and
     `static_manipulation` are the two channels this repo has verified end to end,
@@ -1914,7 +1924,7 @@ def fold_via_tcp(env, planner, task, rest_tcp, *, stage: str, who: str = "oracle
     if r == -1:
         r = planner.static_manipulation(goal, disable_lift_joint=True)
     say(env, who, f"{stage}: fold via tcp {'ok' if r != -1 else 'REFUSED'}")
-    normalize_continuous_arm_joints(env, planner, task, who=who)
+    planner.planner.update_from_simulation()
     rest_q = np.asarray(task.agent.keyframes["rest"].qpos,
                         dtype=np.float64).reshape(-1)
     jm = task.agent.robot.active_joints_map
@@ -1936,7 +1946,7 @@ def fold_via_tcp(env, planner, task, rest_tcp, *, stage: str, who: str = "oracle
         r2 = planner.static_manipulation(goal2, disable_lift_joint=True)
         if r2 == -1:
             planner.static_manipulation(goal2, disable_lift_joint=True)
-        normalize_continuous_arm_joints(env, planner, task, who=who)
+        planner.planner.update_from_simulation()
         plan_joints(env, planner, task, targets,
                     label=f"{stage}: branch line retry", tries=1, who=who)
         q_now = _np(task.agent.robot.get_qpos()).reshape(-1)

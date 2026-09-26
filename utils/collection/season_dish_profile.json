@@ -1,7 +1,7 @@
 {
-  "profile_version": 2,
+  "profile_version": 3,
   "env_id": "MikasaSeasonDish-v0",
-  "task_variant": "two_condiments_distant_cue_tilt_155",
+  "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
     "repository": "https://github.com/jezvgg/MIKASA-Robo-MMM",
     "commit": "4c5c8b3de941565ee2d57b153a10254fe64c2849",
@@ -22,7 +22,7 @@
   },
   "task": {
     "horizon": 1100,
-    "cue_steps": 40,
+    "cue_steps": 100,
     "delay_steps": 40,
     "hold_steps": 15,
     "bowl_along": 0.85,
@@ -59,7 +59,12 @@
     "marker_radius": 0.045,
     "require_return": false,
     "start_backoff_m": 0.75,
-    "start_backoff_jitter_m": 0.05
+    "start_backoff_jitter_m": 0.05,
+    "initial_arm_jitter_rad": 0.04,
+    "initial_torso_jitter_m": 0.01,
+    "initial_head_jitter_rad": 0.05,
+    "fridge_picture_width": 0.3,
+    "fridge_start_distance": 0.9
   },
   "data": {
     "control_hz": 20,
@@ -70,7 +75,8 @@
     "debug_global_state_dim": 3,
     "lerobot_format": "v3.0",
     "rgb_only": true,
-    "max_instruction_tokens": 100
+    "max_instruction_tokens": 100,
+    "source_action_repeat": 2
   },
   "cameras": {
     "left_base_camera_link": {
@@ -108,9 +114,18 @@
     "module": "planners.season_dish_planner",
     "waypoint_noise_m": 0.005,
     "noise_seed_offset": 200003,
-    "noise_scope": "station_dock_approach_lift_dock_hover_prehover_corrected_hover_pour",
+    "noise_scope": "station_dock_approach_lift_dock_hover_prehover_corrected_hover",
     "noise_distribution": "independent_uniform_world_axes",
     "contact_grasp_noise": false,
-    "cue_gaze": "station_midpoint_independent_of_answer"
+    "cue_gaze": "fridge_picture_independent_of_answer",
+    "action_noise": 0.003,
+    "noise_hold": 10,
+    "execution_noise_seed_offset": 300007,
+    "execution_noise_scope": "follow_path: fold for navigation, carry condiment over bowl; no grasp/release/pour",
+    "gripper_commands": [
+      -1,
+      1
+    ],
+    "gripper_switch_control_step_parity": 0
   }
 }

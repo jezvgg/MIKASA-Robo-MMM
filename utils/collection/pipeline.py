@@ -76,6 +76,7 @@ def collection_contract(base, *, run: dict, seed: int, stage: str, source=None, 
         "global_state_use": "debug_only_never_policy_input",
         "policy_fps": CONTROL_FPS if native else POLICY_FPS,
         "action_repeat": 1 if native else ACTION_REPEAT,
+        "source_action_repeat": run["signature"]["profile"]["data"].get("source_action_repeat", 1),
         "instruction": instruction,
         "language_validation": language,
         "action_names": ACTION_NAMES,
@@ -195,9 +196,18 @@ def action_only_oracle(env):
             env.reset = reset_override
 
 
+def classify_collection_result(result) -> str:
+    """A success at the time limit is diagnostic, not accepted training data."""
+    from utils.test_planner import classify_result
+
+    if isinstance(result, tuple) and len(result) == 5 and scalar_bool(result[3]):
+        return "truncated"
+    return classify_result(result)
+
+
 def collect_one(root: Path, run: dict, seed: int) -> dict:
     from utils.mikasa.seeding import seed_everything
-    from utils.test_planner import classify_result, load_planner
+    from utils.test_planner import load_planner
 
     seed_everything(seed)
     path = episode_path(root, "oracle", seed)
@@ -209,11 +219,16 @@ def collect_one(root: Path, run: dict, seed: int) -> dict:
         seed_everything(seed)
         configure_events(env, path.parent)
         planner_cfg = run["signature"]["profile"]["planner"]
+        execution_kwargs = {}
+        if "action_noise" in planner_cfg:
+            execution_kwargs = dict(
+                action_noise=planner_cfg["action_noise"], noise_hold=planner_cfg["noise_hold"],
+                execution_noise_seed=seed + planner_cfg["execution_noise_seed_offset"])
         try:
             with action_only_oracle(env):
-                verdict = classify_result(load_planner(planner_cfg["module"])(
+                verdict = classify_collection_result(load_planner(planner_cfg["module"])(
                     env, seed, waypoint_noise_seed=seed + planner_cfg["noise_seed_offset"],
-                    waypoint_noise_m=planner_cfg["waypoint_noise_m"]))
+                    waypoint_noise_m=planner_cfg["waypoint_noise_m"], **execution_kwargs))
         except NonReplayableMotion as exc:
             traceback.print_exc()
             verdict, reason = "non_replayable", str(exc)
@@ -284,8 +299,8 @@ def validate_one(root: Path, run: dict, seed: int, *, native=False) -> dict:
             if not initial_state_matches(traj["env_states"], base.get_state_dict()):
                 return {"status": "initial_state_mismatch"}
         result = execute_actions(env, actions, repeat=repeat)
-        success = result["completed"] and result["success"]
-        if not result["completed"]:
+        success = result["completed"] and result["success"] and result["status"] == "completed"
+        if result["status"] != "completed":
             status = result["status"]
         env.flush_trajectory(save=result["control_steps"] > 0)
         if result["control_steps"] > 0:

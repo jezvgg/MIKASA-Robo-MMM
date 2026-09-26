@@ -1,14 +1,14 @@
 """Season the dish — a memory task in a RoboCasa kitchen, driven by Fetch.
 
 The chore: a bowl waits on the counter and two condiments stand at a station
-further along it. A recipe marker shows which condiment the dish needs, then
+further along it. A photo on the fridge shows which condiment the dish needs, then
 disappears. The robot must fetch **that** condiment, hold it over the bowl,
 tip it past an angle, and keep it there.
 
 What makes it a memory task rather than a pick-and-place with a colour:
 
 - the answer is drawn per episode and is visible only while `elapsed_steps <
-  cue_steps`. After that the marker is at z = 1000 and the post-cue observation
+  cue_steps`. After that both pictures are at z = 1000 and the post-cue observation
   is *identical* under swapping the answer;
 - the two condiments swap sides per episode, so "always go left" is worth 50 %,
   not 100 %;
@@ -49,6 +49,9 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneBuilder
 from mani_skill.utils.structs import Actor, Pose
 
+from utils.initial_pose import randomize_initial_joints
+from utils.fridge_picture import FridgePictures
+from pathlib import Path
 from utils.robocasa_utils import (
     parking_pose,
     counter_frame,
@@ -65,8 +68,9 @@ from utils.robocasa_utils import (
 #: It names the chore, never the answer: which condiment the dish needs is shown by
 #: the recipe marker during the cue and is the memory content. No numerals.
 INSTRUCTIONS = (
-    "Season the dish using the condiment marked by the yellow cue. Remember it "
-    "after the cue disappears. Tip and hold it over the bowl, leaving the other "
+    "Remember the salt or pepper shown in the picture on the fridge. After the "
+    "picture disappears, take that condiment and tip it over the bowl to season "
+    "the dish, leaving the other "
     "condiment untouched.",
 )
 
@@ -115,8 +119,15 @@ class SeasonDishConfig:
     multiple of 50); + cue 40 + delay 40 = 1030 → **1100** (a multiple of 100). Was 600
     (a guess): seed 12 truncated at 600 inside the hover with the pour still to come."""
 
-    cue_steps: int = 40
-    "The marker is visible while elapsed_steps < cue_steps."
+    # Uniform reset offsets around the unchanged DSFetch rest pose (C1).
+    initial_arm_jitter_rad: float = 0.04
+    initial_torso_jitter_m: float = 0.01
+    initial_head_jitter_rad: float = 0.05
+
+    cue_steps: int = 100
+    "The fridge picture is visible at steps 0 through 99 and absent at step 100."
+    fridge_picture_width: float = 0.3
+    fridge_start_distance: float = 0.9
 
     delay_steps: int = 40
     "Blank window after the cue. Earliest possible success is cue_steps + delay_steps."
@@ -621,10 +632,10 @@ class SeasonDishTask(BaseEnv):
             self, "bowl", "bowl", sapien.Pose(p=bowl_home[0]), index=0
         )
         self.shaker = load_objaverse_actor(
-            self, "shaker", "shaker", sapien.Pose(p=station_left[0]), index=0
+            self, "shaker", "shaker", sapien.Pose(p=station_left[0]), index=1
         )
         self.condiment_bottle = load_objaverse_actor(
-            self, "condiment_bottle", "condiment_bottle", sapien.Pose(p=station_right[0]), index=0
+            self, "shaker", "condiment_bottle", sapien.Pose(p=station_right[0]), index=0
         )
         # Diagnostic only (K98): scale both condiments' density by MIKASA_CONDIMENT_MASS_X.
         # The asset default weighs 15.8 g and tips at 0.0038 N*s — below the gentlest
@@ -676,31 +687,13 @@ class SeasonDishTask(BaseEnv):
             dtype=np.float32,
         )
 
-        # One marker. `recipe_marker` is phase-teleported to HIDDEN_Z in evaluate(),
-        # which is the only hiding mechanism that can be a function of elapsed_steps
-        # and so the only one that can express "visible until step 40".
-        #
-        # A second, magenta `recipe_ghost` used to sit above it in `self._hidden_objects`
-        # — hidden from every sensor capture (sapien_env.py:603) but left in the human
-        # render (:1375), so a recording showed what the answer had been while the policy
-        # could never see it. Removed on request: it reads as a second cue that never goes
-        # away, which is exactly what a viewer should not see in a memory task's clip. It
-        # was a debug annotation only — invisible to every sensor, absent from `evaluate`
-        # and from `_get_obs_extra` — so nothing about the task, the predicate or the
-        # policy's observations changes with it gone.
-        #
-        # add_collision=False (hide_visual asserts no collision shapes,
-        # structs/actor.py:184) and kinematic, not static (the pose setter asserts
-        # non-static under GPU sim, :367).
-        marker_pose = sapien.Pose(p=station_left[0] + np.array([0, 0, self.cfg.marker_height]))
-        self.recipe_marker = actors.build_sphere(
-            self.scene,
-            radius=self.cfg.marker_radius,
-            color=[0.95, 0.85, 0.1, 1.0],
-            name="recipe_marker",
-            body_type="kinematic",
-            add_collision=False,
-            initial_pose=marker_pose,
+        # The cue is a photo of the actual condiment model, fixed on the fridge.
+        # Its position and the robot's initial gaze never depend on the answer.
+        pictures = Path(__file__).parent / "assets/season_dish"
+        self.fridge_pictures = FridgePictures(
+            self, [pictures / "salt.png", pictures / "pepper.png"],
+            width=self.cfg.fridge_picture_width,
+            front_distance=self.cfg.fridge_start_distance,
         )
 
         # Cache the homes as device tensors once. Rebuilding numpy every step costs
@@ -826,10 +819,14 @@ class SeasonDishTask(BaseEnv):
             else:
                 self._placement_fell_back[env_idx] = False
 
-            # After the draw, never before: `_restore_robot` puts the base at
-            # `_robot_start`, behind the station dock the draw just computed. Restoring first placed the robot at the previous episode's dock
-            # and then moved the objects away from it — every one of the first 30
-            # randomized episodes failed, 14 of them at the grasp, on exactly that.
+            # Start in front of the fridge; the same distribution serves both answers.
+            offsets = np.asarray(rng.uniform(
+                -self.cfg.start_backoff_jitter_m, self.cfg.start_backoff_jitter_m,
+                size=2)).reshape(b, 2)
+            starts = self.fridge_pictures.starts[env_idx.cpu().numpy()].copy()
+            starts[:, :2] += offsets
+            self._robot_start_np[env_idx.cpu().numpy()] = starts
+            self._robot_start[env_idx] = torch.as_tensor(starts, device=self.device)
             self._restore_robot(env_idx)
 
             left = self._station_left[env_idx]
@@ -867,9 +864,11 @@ class SeasonDishTask(BaseEnv):
             distractor_pos = torch.where(target_bits.unsqueeze(-1), bottle_pos, shaker_pos)
             self._distractor_home[env_idx] = distractor_pos
 
-            marker_pos = target_pos + torch.tensor([0.0, 0.0, self.cfg.marker_height])
-            self._marker_home[env_idx] = marker_pos
-            self.recipe_marker.set_pose(Pose.create_from_pq(p=marker_pos))
+            self._marker_home[env_idx] = self.fridge_pictures.home[env_idx, :3]
+            self.fridge_pictures.update(
+                (~self.target_is_shaker).long(),
+                torch.ones(self.num_envs, dtype=torch.bool, device=self.device), env_idx,
+            )
 
             # Task state is not sim state — mask it by hand.
             self.pour_hold[env_idx] = 0
@@ -877,6 +876,8 @@ class SeasonDishTask(BaseEnv):
             # overwritten with the settled pose at that step (K73).
             self._bowl_settled[env_idx] = bowl_pos[..., :2]
             self._pour_last_eval_step[env_idx] = -1
+
+            randomize_initial_joints(self, env_idx)
 
     def _draw_placement(self, i: int, rng) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
         """Draw (bowl, station_left, station_right) on env `i`'s counter (K74).
@@ -1057,11 +1058,7 @@ class SeasonDishTask(BaseEnv):
         """
         # --- the cue, on its schedule --------------------------------------
         cue_visible = self.elapsed_steps < self.cfg.cue_steps
-        marker = self._marker_home.clone()
-        marker[:, 2] = torch.where(
-            cue_visible, marker[:, 2], torch.full_like(marker[:, 2], HIDDEN_Z)
-        )
-        self.recipe_marker.set_pose(Pose.create_from_pq(p=marker))
+        self.fridge_pictures.update((~self.target_is_shaker).long(), cue_visible)
 
         # --- select target vs distractor by mask, never by indexing actors ---
         m = self.target_is_shaker
@@ -1195,7 +1192,7 @@ class SeasonDishTask(BaseEnv):
            in that order, and no key is ever named for the target.
         2. **Conditional keys.** The observation space is frozen from the t=0
            observation (sapien_env.py:330, :377). Emitting the cue only during the
-           cue phase changes the dict shape at step 40. It is always emitted, and
+           cue phase changes the dict shape at step 100. It is always emitted, and
            masked to zeros instead.
         3. **Obs mode.** _get_obs_extra runs in every mode, so an ungated cue hands
            an image policy the answer in clean symbolic form and the marker becomes
@@ -1217,14 +1214,16 @@ class SeasonDishTask(BaseEnv):
             ).to(torch.float32),
         )
         if self.obs_mode_struct.use_state:
-            zero = torch.zeros_like(self.recipe_marker.pose.p)
+            cue = torch.stack([self.target_is_shaker, ~self.target_is_shaker,
+                               torch.zeros_like(self.target_is_shaker)], dim=-1).float()
+            zero = torch.zeros_like(cue)
             obs.update(
                 bowl_pose=self.bowl.pose.raw_pose,
                 shaker_pose=self.shaker.pose.raw_pose,
                 bottle_pose=self.condiment_bottle.pose.raw_pose,
                 # Masked, not omitted. After the cue phase this is exactly zeros,
                 # which is the same tensor in both halves of the answer symmetry.
-                recipe_cue=torch.where(cue_visible.unsqueeze(-1), self.recipe_marker.pose.p, zero),
+                recipe_cue=torch.where(cue_visible.unsqueeze(-1), cue, zero),
             )
         return obs
 
