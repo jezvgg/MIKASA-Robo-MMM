@@ -1,5 +1,5 @@
 {
-  "profile_version": 3,
+  "profile_version": 4,
   "env_id": "MikasaSameDrawer-v0",
   "task_variant": "four_drawers_apple_interlude",
   "robot_reference": {
@@ -114,7 +114,7 @@
       1
     ],
     "gripper_switch_control_step_parity": 0,
-    "gaze": "continuous_column_apple_plate_column",
+    "gaze": "current_phase_only",
     "gaze_rate_limit_rad_s": 1.0,
     "gaze_deadband_rad": 0.005,
     "apple_placement_height_m": 0.035,
@@ -122,8 +122,9 @@
     "low_handle_opening_standoff_m": 0.32,
     "low_handle_contact_lookahead": true,
     "low_handle_opening_torso_m": 0.1,
-    "apple_grasp_stretch": 2,
-    "apple_grasp_stop_on_touch": true,
-    "apple_grasp_close_steps": 6
+    "apple_grasp_stop_on_touch": false,
+    "motion_revision": "owner_restoration_2026_09_26",
+    "navigation_posture": "canonical_rest",
+    "initial_push_gripper": "open"
   }
 }

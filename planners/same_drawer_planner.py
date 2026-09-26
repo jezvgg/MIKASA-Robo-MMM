@@ -16,6 +16,7 @@ import sapien
 import my_scenes  # noqa: F401
 from my_scenes.same_drawer import DRAWER_ART_SUFFIX, DRAWER_FIXTURES
 from planners.oracle import oracle_common as common
+from planners.oracle.rest_paths import curved_rest
 from planners.same_drawer_paths import DrawerPathPlanner
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
@@ -83,6 +84,9 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     cfg = task.cfg
     planner = planner_factory(env, debug, vis)
     planner.prefer_low_roll_ik()
+    reserved = np.asarray(task.agent.keyframes["rest"].qpos)[planner._roll_indices]
+    planner._roll_low = np.minimum(planner._roll_low, reserved)
+    planner._roll_high = np.maximum(planner._roll_high, reserved)
     planner.planner = DrawerPathPlanner(planner.planner._planner, planner)
     planner.forward_navigation = True
     planner.navigation_arrival_tolerance = 0.10
@@ -160,69 +164,34 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         planner._grasp_branch = {}
         return result
 
-    def stow():
-        result = close_gripper(t=4)
-        if stopped(result):
-            return result
-        # Travel has one joint-space pose, independent of the previous grasp's
-        # IK branch. A TCP waypoint can leave the elbow extended or twist the wrist.
+    def stow(*, from_handle=False):
+        planner._grasp_branch = {}
         rest = np.asarray(task.agent.keyframes["rest"].qpos)
         joints = task.agent.robot.active_joints_map
-        names = task.agent.controller.controllers["arm"].config.joint_names
+        names = [*task.agent.controller.controllers["arm"].config.joint_names,
+                 "torso_lift_joint"]
         targets = {name: float(rest[int(joints[name].active_index[0])]) for name in names}
-        targets.update(torso_lift_joint=0.30, elbow_flex_joint=2.1, wrist_flex_joint=1.7)
         planner.planner.update_from_simulation()
-        result = common.plan_joints(env, planner, task, targets, label="fold for travel",
-                                   tries=1, who=WHO, line_only=True)
-        if not (isinstance(result, (int, np.integer)) and result == -1):
-            return result
-        if common.stopped_by_horizon(planner):
-            return result
-        # Raise the empty hand before folding across the counter edge. Check
-        # both joint lines before executing, preserving the recorded roll range.
-        p = planner.planner
-        for clearance in ({"torso_lift_joint": 0.38},
-                          {"torso_lift_joint": 0.38, "elbow_flex_joint": 1.5},
-                          {"torso_lift_joint": 0.38, "elbow_flex_joint": 1.0},
-                          {"torso_lift_joint": 0.38, "shoulder_lift_joint": -1.2}):
-            p.update_from_simulation()
-            cur = array(task.agent.robot.get_qpos())[0].astype(float)
-            middle, final = cur.copy(), cur.copy()
-            for name, value in clearance.items():
-                middle[int(joints[name].active_index[0])] = value
-            for name, value in targets.items():
-                final[int(joints[name].active_index[0])] = value
-            kwargs = dict(time_step=task.control_timestep, ref_yaw=float(cur[2]))
-            first = p.plan_qpos_line(middle, cur, **kwargs)
-            if first.get("status") != "Success":
-                continue
-            second = p.plan_qpos_line(final, middle, **kwargs)
-            if second.get("status") != "Success" or not p.accepts(
-                np.vstack([first["position"], second["position"]]), move_group=True
-            ):
-                continue
-            log("raise empty hand before folding", targets=clearance)
-            if len(first["position"]) > 1:
-                result = planner.follow_forward_path_w_refinement(first, refine=True)
-                if stopped(result):
-                    return result
-            p.update_from_simulation()
+        # The selected hand withdrawal must clear the entire rest trajectory,
+        # not just the handle. Extend that same straight retreat in bounded
+        # increments if the countertop still obstructs the fold.
+        for attempt in range(4 if from_handle else 1):
             result = common.plan_joints(env, planner, task, targets,
-                label="fold after arm clearance", tries=1, who=WHO, line_only=True)
-            if not stopped(result) or common.stopped_by_horizon(planner):
+                                       label="fold to canonical rest", tries=1,
+                                       who=WHO, line_only=True)
+            if not stopped(result):
                 return result
-        # A refused arm-only clearance can still use the original short retreat.
-        # The final navigation pose remains identical for every episode.
-        base = task.agent.base_link.pose[0].sp
-        point = base.p - 0.25 * base.to_transformation_matrix()[:3, 0]
-        point = noise.point("room to fold arm", point, (True, True, False))
-        log("back off to fold arm", position=point.tolist())
-        result = planner.move_base_forward(point, freeze_arm=True)
-        if stopped(result):
-            return result
-        planner.planner.update_from_simulation()
-        return common.plan_joints(env, planner, task, targets, label="fold for travel",
-                                  tries=1, who=WHO)
+            result = curved_rest(env, planner, task, targets, who=WHO)
+            if not stopped(result) or not from_handle or attempt == 3:
+                return result
+            tcp = task.agent.tcp.pose[0].sp
+            clearance = sapien.Pose(
+                tcp.p - 0.04 * tcp.to_transformation_matrix()[:3, 2], tcp.q)
+            result = move("extend handle withdrawal for rest clearance", clearance,
+                          noisy=False, contact=True, contact_stretch=1)
+            if stopped(result):
+                return result
+            planner.planner.update_from_simulation()
 
     def drawer_stroke(drawer, opening):
         amount = float(array(task.drawer_open_amounts())[0, drawer])
@@ -312,15 +281,30 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
             if stopped(result):
                 return result, False
             planner._drawer_initial_wrist_budget = False
-            result = close_gripper(t=6)
+            result = close_gripper(t=6) if opening else open_gripper(t=6)
             if stopped(result):
                 return result, False
             aperture = float(array(task.agent.robot.get_qpos())[0, -2:].sum())
             touching = planner.gripper_touching(task._drawer_arts[drawer])
+            if not opening and not touching:
+                # Re-aim from the measured state if compliant contact was lost
+                # during settling. Stop at hand contact and keep fingers open.
+                result = move("establish open-hand push contact", grasp,
+                              noisy=False, sync=False, contact=True,
+                              contact_stretch=1, stop_on_touch=task._drawer_arts[drawer])
+                if stopped(result):
+                    return result, False
+                touching = planner.gripper_touching(task._drawer_arts[drawer])
+            reliable_grip = opening and any(
+                bool(array(task.agent.is_grasping(link)).any())
+                for link in task._drawer_arts[drawer].get_links())
             log("handle grip" if opening else "drawer push contact",
-                aperture_m=aperture, drawer_contact=touching)
-            # Closing may push the drawer with the hand; reopening needs a grip.
-            if aperture <= common.FINGER_EMPTY_M and (opening or not touching):
+                aperture_m=aperture, drawer_contact=touching,
+                reliable_grip=bool(reliable_grip))
+            # A palm contact can push; pulling requires opposing finger forces
+            # on the selected drawer, not merely a nonzero finger aperture.
+            if (opening and (aperture <= common.FINGER_EMPTY_M or not reliable_grip)
+                    or not opening and not touching):
                 return result, False
             # Contact can move the drawer. Use its remaining travel now, and
             # stop at closed rather than loading the grasp past the hard stop.
@@ -351,10 +335,10 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
             else:
                 # Contact compliance makes base displacement differ from slider
                 # travel. Stop on the drawer position at a gentle approach speed;
-                # the extra 3 cm only bounds a refused/incomplete closing stroke.
-                log("close drawer with base", max_travel_m=amount + 0.03, speed_m_s=0.06)
+                # the extra 4 cm only bounds a refused/incomplete closing stroke.
+                log("close drawer with base", max_travel_m=amount + 0.04, speed_m_s=0.06)
                 result = planner.idle_steps(t=1) if amount <= cfg.closed_tol else planner.drive_straight(
-                    amount + 0.03, v=0.06,
+                    amount + 0.04, v=0.06,
                     stop_when=lambda: float(array(task.drawer_open_amounts())[0, drawer]) <= cfg.closed_tol)
             if stopped(result):
                 return result, False
@@ -367,16 +351,16 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
             if opening:
                 result = open_gripper(t=6)
             else:
-                # The wrist still observes the handle during release. Turn the
-                # external cameras toward the next object before folding away.
-                planner.track_target(lambda: task.apple.pose[0].sp.p)
-                # Fully open, then clear the bar along the finger axis. The
+                # Keep observing the handle until release and withdrawal finish.
+                # Fully open, then withdraw far enough that the canonical rest
+                # transition clears the countertop (6 cm leaves a collision). The
                 # next primitive folds the arm with all drawer obstacles restored.
                 result = open_gripper(t=6)
                 if stopped(result):
                     return result, False
                 tcp = task.agent.tcp.pose[0].sp
-                clearance = sapien.Pose(tcp.p - 0.06 * tcp.to_transformation_matrix()[:3, 2], tcp.q)
+                withdraw_m = 0.24
+                clearance = sapien.Pose(tcp.p - withdraw_m * tcp.to_transformation_matrix()[:3, 2], tcp.q)
                 # The diagonal exit includes lateral motion, so move the arm;
                 # a forward-only base cannot execute that Cartesian translation.
                 result = move("clear handle with arm", clearance,
@@ -409,7 +393,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     result, closed = drawer_stroke(target, False)
     if stopped(result) or not closed:
         return result
-    result = stow()
+    result = stow(from_handle=True)
     if stopped(result):
         return result
     dock = array(task.apple_dock)[0]
@@ -443,42 +427,13 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                                        np.array([1., 0., 0.]), centre)
     reach = sapien.Pose(grasp.p + [0, -0.06, 0.06], grasp.q)
     reach = noise.pose("apple approach", reach)
-    planner.planner.update_from_simulation()
-    result = approach_for_contact(
-        reach, grasp, 160, torso_height=None,
-        contact_context=lambda: common.touchable(planner, "apple"))
-    if isinstance(result, (int, np.integer)) and result == -1:
-        # A direct approach can sweep the countertop. Unfold the empty hand
-        # above it, keeping the object in the free-space collision model.
-        result = common.plan_joints(
-            env, planner, task,
-            {"shoulder_lift_joint": -1.2, "elbow_flex_joint": 1.0,
-             "wrist_flex_joint": 1.7},
-            label="clear counter before apple", who=WHO, line_only=True, tries=1)
-        if stopped(result):
-            return result
-        # A higher standoff keeps the open fingers above the counter on the
-        # positive elbow/wrist branch; retain the original grasp point.
-        reach = noise.pose("higher apple approach",
-                           sapien.Pose(grasp.p + [0, -0.10, 0.10], grasp.q))
-        planner.planner.update_from_simulation()
-        result = approach_for_contact(
-            reach, grasp, 240, torso_height=None,
-            contact_context=lambda: common.touchable(planner, "apple"))
-    if stopped(result):
-        return result
-    planner.planner.update_from_simulation()
-    with common.touchable(planner, "apple"):
-        result = move("grasp apple", grasp, noisy=False, sync=False, contact=True,
-                      freeze_lift=True, stop_on_touch=task.apple, contact_stretch=2)
-    if stopped(result):
-        return result
-    result = close_gripper()
-    held = bool(array(task.agent.is_grasping(task.apple)).item())
+    result, held = common.try_grasp(env, planner, task, task.apple, grasp, reach,
+        resync_before_grasp=True, close_on_contact=True, n_init_qpos=REACH_N_INIT,
+        approach_by_line=True, approach_max_knots=160, grasp_max_knots=80, grasp_knot_draws=1)
+    planner._grasp_branch = {}
     if stopped(result) or not held:
         return result
     common.hold_object_in_planner(env, planner, task, task.apple, True, who=WHO)
-    planner.track_target(lambda: task.plate.pose[0].sp.p)
     tcp = task.agent.tcp.pose[0].sp
     result = move("lift apple", sapien.Pose(tcp.p + [0, 0, 0.07], tcp.q),
                   axes=(False, False, True), contact=True, contact_stretch=1)
@@ -487,7 +442,14 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     if not bool(array(task.agent.is_grasping(task.apple)).item()):
         log("apple lost during lift")
         return result
-    # The base is already at the transfer dock; carry sideways with the arm.
+    planner.track_target(lambda: task.plate.pose[0].sp.p)
+    # Restore the published small forward alignment before the lateral transfer.
+    base = task.agent.base_link.pose[0].sp
+    face = base.to_transformation_matrix()[:3, 0]
+    yaw = math.atan2(float(face[1]), float(face[0]))
+    result = drive("step toward plate", base.p + 0.08 * face, yaw)
+    if stopped(result):
+        return result
     tcp = task.agent.tcp.pose[0].sp
     apple = task.apple.pose[0].sp
     hover = sapien.Pose(task.plate.pose[0].sp.p + [0, 0, 0.10], apple.q) * (tcp.inv() * apple).inv()
@@ -497,7 +459,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     planner.planner.update_from_simulation()
     with transfer_phase(planner, "carry apple over plate"):
         log("transfer apple over plate", goal=hover.p.tolist())
-        result = approach_for_contact(
+        result = planner.approach_for_contact(
             hover, placement_preview, 160,
             contact_context=lambda: common.touchable(planner, "plate"))
     planner.planner.update_from_simulation()
@@ -539,27 +501,14 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     if stopped(result):
         return result
     tcp = task.agent.tcp.pose[0].sp
-    retreat = tcp.p - 0.14 * tcp.to_transformation_matrix()[:3, 2]
-    result = move("withdraw from apple", sapien.Pose(retreat, tcp.q),
-                  noisy=False, contact=True)
-    if isinstance(result, (int, np.integer)) and result == -1 and not common.stopped_by_horizon(planner):
-        # The long diagonal can reach the wrist-flex stop. Lift the released
-        # empty hand vertically before attempting the fixed travel fold.
-        retreat = task.agent.tcp.pose[0].sp.p + [0, 0, 0.10]
-        result = move("lift empty hand above plate", sapien.Pose(retreat, tcp.q),
-                      noisy=False, contact=True)
-    if isinstance(result, (int, np.integer)) and result == -1 and not common.stopped_by_horizon(planner):
-        # The apple is already released. A free-space, collision-checked path
-        # may clear the empty hand when the straight retreat is unreachable.
-        result = move("clear empty hand above plate", sapien.Pose(retreat, tcp.q),
-                      noisy=False, freeze_lift=True)
+    face = task.agent.base_link.pose[0].sp.to_transformation_matrix()[:3, 0]
+    result = move("withdraw from apple", sapien.Pose(tcp.p - 0.18 * face, tcp.q))
     if stopped(result):
         return result
     result = wait_for_state("wait for apple to settle",
                             lambda: bool(array(task.apple_done).item()), 35, result)
     if stopped(result) or not bool(array(task.apple_done).item()):
         return result
-    planner.track_target(lambda: array(task.handle_home)[0].mean(0))
     result = stow()
     if stopped(result):
         return result
@@ -567,7 +516,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     # arrival sweeps the folded hand into the left wall before the final turn.
     # This nearer corner keeps clearance without the old deep southern detour.
     home = task._robot_start_np[0]
-    aisle = np.array([home[0] + 0.30, home[1] - 0.50])
+    aisle = np.array([home[0] + 0.30, home[1] - 0.70])
     dock_offset = 0.10 if array(task.handle_home)[0, reopen, 2] < 0.5 else -0.10
     dock = np.array([home[0], home[1] + dock_offset])
     # Leave the intermediate corner facing the next leg, avoiding a redundant

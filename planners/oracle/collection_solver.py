@@ -354,6 +354,8 @@ class CollectionMotionPlanner(FetchMotionPlanningSapienSolver):
         tracker = getattr(self, "_head_tracker", None)
         if tracker is not None and sample_tick:
             action[8:10] = tracker.command()
+        for index, value in getattr(self, "fixed_action_targets", {}).items():
+            action[index] = value
         # Generate policy targets on the 10 Hz clock, while physics, observation
         # and recording still step at 20 Hz. Sampling here, before env.step and
         # recording, makes stride-two export preserve every executed command.

@@ -114,6 +114,33 @@ def motion_metrics(actions, qpos, names, fps=10):
     }
 
 
+def pause_check(actions, profile=None):
+    """Report literal D6 and the explicitly authorized initial cue exception."""
+    a = np.asarray(actions)
+    def metrics(values):
+        equal = np.all(np.abs(np.diff(values, axis=0)) <= 1e-4, axis=1)
+        fraction = float(equal.mean()) if len(equal) else 0.
+        longest = longest_true(equal) + 1 if len(values) else 0
+        return {"identical_action_fraction": fraction,
+                "longest_constant_action_frames": longest,
+                "passed": bool(len(values) and fraction <= .05 and longest <= 20)}
+    raw = metrics(a)
+    profile = profile or {}
+    exception = profile.get("quality_exceptions", {}).get("D6", {})
+    approved = (profile.get("env_id") == "MikasaSeasonDish-v0"
+                and profile.get("profile_version", 0) >= 4
+                and exception.get("initial_observation_control_steps") == 100
+                and exception.get("phase") == "fridge_cue_observation"
+                and exception.get("preserve_all_frames") is True)
+    frames = 50 if approved else 0
+    valid = len(a) > frames and (not approved or np.all(a[:frames, 11:13] == 0))
+    remaining = metrics(a[frames:])
+    return {"raw": raw, "excluded_initial_frames": frames,
+            "exception": exception if approved else None,
+            "after_observation": remaining,
+            "passed": bool(valid and remaining["passed"])}
+
+
 def audit(dataset, load_samples=False, tokenizer=None):
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -187,6 +214,7 @@ def audit(dataset, load_samples=False, tokenizer=None):
             [values["global_state"][mask], values["observation.state"][mask]], axis=1
         )
         row = motion_metrics(a, q, names, info["fps"])
+        row["D6_pause_check"] = pause_check(a)
         row["episode_index"] = int(eid)
         mapping = mappings.get(int(eid), {})
         row["seed"] = mapping.get("scene_seed")
@@ -195,6 +223,7 @@ def audit(dataset, load_samples=False, tokenizer=None):
         if hp.is_file():
             hmeta = read(hp.with_suffix(".json"))["mikasa_data"]
             profiles.append(hmeta["profile"])
+            row["D6_pause_check"] = pause_check(a, hmeta["profile"])
             source_root = Path(mapping.get("source_root", metadata["source_root"]))
             original = (
                 source_root / "oracle" / str(mapping["scene_seed"]) / "trajectory.h5"
@@ -331,15 +360,12 @@ def audit(dataset, load_samples=False, tokenizer=None):
         and all(e["base_direction_changes"] <= 2 for e in per_episode),
         "Reverse fraction and changes computed literally; task-specific exceptions are not assumed",
     )
-    verdict(
-        "D6",
-        all(
-            e["identical_action_fraction"] <= 0.05
-            and e["longest_constant_action_frames"] <= 20
-            for e in per_episode
-        ),
-        "Literal identical-action criterion; includes constant-speed driving, separately from physical freezing",
-    )
+    d6_ok = all(e["D6_pause_check"]["passed"] for e in per_episode)
+    exception_used = any(e["D6_pause_check"]["exception"]
+                         and not e["D6_pause_check"]["raw"]["passed"] for e in per_episode)
+    setcheck("D6", ("EXCEPTION" if exception_used else "PASS") if d6_ok else "FAIL",
+             "Literal metrics retained; only the owner-approved initial 50 policy frames "
+             "of SeasonDish cue observation may be excluded; all other pauses checked")
     raw_switches = [e for e in raw_checks if "odd_gripper_switches" in e]
     if len(raw_switches) == n:
         verdict(
