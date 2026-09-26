@@ -33,6 +33,7 @@ import my_scenes  # noqa: F401  (registers benchmark environments)
 from mani_skill.utils.wrappers import RecordEpisode
 
 from planners.oracle import oracle_common as common
+from planners.oracle.wrist_pour_prepare import prepare_for_wrist_pour
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
 from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
@@ -846,6 +847,22 @@ def approach_aligned_grasp_info(obb, ee_direction, target_closing) -> dict:
 
 
 
+def drive_to_counter(env, planner, dock, face):
+    """Approach a left-wall dock diagonally with the canonical rest arm clear."""
+    # Facing west at x<1 m sweeps the canonical forearm into the left wall.
+    # Approach those docks from the same open aisle; do not change the arm pose.
+    if float(dock[0]) < 1.0:
+        waypoint = np.asarray(dock) + np.array([0.40, -0.60, 0.0])
+        say(env, "approach left dock from open aisle", waypoint=waypoint.tolist())
+        res = planner.drive_base(target_pos=waypoint,
+                                 target_view_vec=np.asarray(dock) - waypoint,
+                                 freeze_arm=True)
+        if res == -1 or common.stopped_by_horizon(planner):
+            return res
+        planner.planner.update_from_simulation()
+    return planner.drive_base(target_pos=dock, target_view_vec=face, freeze_arm=True)
+
+
 def navigation_posture(env, planner, task):
     """Use the robot's canonical rest targets for loaded floor travel."""
     joints = task.agent.robot.active_joints_map
@@ -1297,6 +1314,11 @@ def _solve(
     planner.navigation_arrival_tolerance = 0.10
     planner.forward_navigation = True
     planner.prefer_low_roll_ik()
+    # Keep canonical rest inside every later roll window, even if the sampled
+    # starting jitter lies on the other side of its exact joint values.
+    reserved = np.asarray(env.unwrapped.agent.keyframes["rest"].qpos)[planner._roll_indices]
+    planner._roll_low = np.minimum(planner._roll_low, reserved)
+    planner._roll_high = np.maximum(planner._roll_high, reserved)
     configure_execution_noise(
         planner, env, int(seed or 0) + 300007 if execution_noise_seed is None else execution_noise_seed,
         action_noise=action_noise, noise_hold=noise_hold)
@@ -1332,7 +1354,7 @@ def _solve(
     face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.0])
     say(env, "travel after cue", goal=dock_xyz.tolist(),
         distance_m=float(np.linalg.norm(dock_xyz[:2] - _np(task.agent.base_link.pose.p)[0, :2])))
-    res = planner.drive_base(target_pos=dock_xyz, target_view_vec=face, freeze_arm=True)
+    res = drive_to_counter(env, planner, dock_xyz, face)
     if res == -1:
         return fail(env, "approach condiment station")
     if common.stopped_by_horizon(planner):
@@ -2080,7 +2102,7 @@ def _solve(
     # was to move the base. The mask's own docstring records the same disease on
     # water-plants seed 11. It was never needed while the drive was a fixed 0.39 m; the
     # drawn layout makes it up to 2.2 m.
-    res = planner.drive_base(target_pos=dock_xyz, target_view_vec=face, freeze_arm=True)
+    res = drive_to_counter(env, planner, dock_xyz, face)
     if res != -1 and common.stopped_by_horizon(planner):
         return res
     if res == -1:
@@ -2111,56 +2133,10 @@ def _solve(
         )
         hover = common.pose_over(aim, HOVER_ABOVE + extra, obj_q_try) * T_tcp_obj.inv()
         hover = noise.pose("hover", hover)
-        if not hovered and (extra, back, spin) == HOVER_RUNGS[0]:
-            # The waypoint exists to break one long RRT motion into two (seed 12 came
-            # back `Approximate solution` / `IK Failed` without it). If the hover itself
-            # plans by a **straight** screw there is nothing to break up, and the
-            # waypoint is a detour the video shows as the arm swinging back before it
-            # goes forward — so probe first and skip it when the direct move is straight
-            # (K61). That measurement was taken from the tucked arm K57 deleted, which is
-            # the other reason not to pay for it unconditionally.
-            if common.screw_plans(planner, hover, disable_lift_joint=False):
-                say(env, "hover plans straight; skipping the pre-hover waypoint")
-            else:
-                # A ladder of waypoints, each asked under the knot cap WITH refusal
-                # (1507 @0.15, 2026-09-06: the RAISED waypoint's best draw was 291
-                # knots; executed under a cap without refusal it swept the bowl off the
-                # counter, on a seed the level waypoint had carried in 80 s). A refused
-                # waypoint falls to the next; the last falls to the hover itself, which
-                # plans from wherever the arm stands.
-                ups = [PRE_HOVER_UP] + ([0.0] if PRE_HOVER_UP > 0.0 else [])
-                res = -1
-                for up in ups:
-                    pre = sapien.Pose(p=np.asarray(hover.p) - PRE_HOVER_BACK * face
-                                      + np.array([0.0, 0.0, up]), q=hover.q)
-                    pre = noise.pose("pre_hover", pre)
-                    say(env, "pre-hover", pre=[round(float(v), 3) for v in pre.p],
-                        up=round(float(up), 3))
-                    # The bowl is guarded for this transit leg only: seed 62's pre-hover RRT
-                    # travelled 0.73 m for a 0.35 m goal and flipped the bowl upside down,
-                    # 0.177 m from home, which alone loses the episode (`over_bowl` is read
-                    # against the *live* bowl). It must NOT be guarded for the hover and pour
-                    # below, which aim at it deliberately.
-                    with common.keepout(planner, [distractor, task.bowl], pad=GRASP_KEEPOUT_PAD):
-                        res = common.arm_move(env, planner, pre, who=WHO, stage="pre-hover",
-                                              disable_lift_joint=False,
-                                              max_knots=HOVER_MAX_KNOTS, knot_draws=HOVER_KNOT_DRAWS,
-                                              knot_refuse=PRE_HOVER_REFUSE)
-                    if res != -1 and common.stopped_by_horizon(planner):
-                        return res
-                    if res != -1:
-                        break
-                    say(env, "pre-hover refused at this height", up=round(float(up), 3))
-                if res == -1:
-                    say(env, "pre-hover refused; asking for the hover directly")
-                say(env, "bowl at", when="after the pre-hover",
-                    p=[round(float(v), 3) for v in _np(task.bowl.pose.p)[0]])
         say(env, "hover over bowl", hover=[round(float(v), 3) for v in hover.p],
             extra=round(float(extra), 3), back=round(float(back), 3), spin_deg=float(spin))
         with transfer_phase(planner, "carry condiment over bowl"), common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-            res = common.arm_move(env, planner, hover, who=WHO, stage="hover over bowl",
-                                  disable_lift_joint=False,
-                                  max_knots=HOVER_MAX_KNOTS, knot_draws=HOVER_KNOT_DRAWS)
+            res = prepare_for_wrist_pour(env, planner, task, target, hover)
         if res != -1 and common.stopped_by_horizon(planner):
             return res
         if res != -1:
@@ -2226,9 +2202,7 @@ def _solve(
             bowl_moved=round(bowl_moved, 3),
             shift=[round(float(v), 3) for v in (np.asarray(hover2.p) - np.asarray(hover.p))])
         with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-            r2 = common.arm_move(env, planner, hover2, who=WHO, stage="hover (corrected)",
-                                 disable_lift_joint=False,
-                                 max_knots=HOVER_MAX_KNOTS, knot_draws=HOVER_KNOT_DRAWS)
+            r2 = prepare_for_wrist_pour(env, planner, task, target, hover2)
         if r2 != -1:
             res = r2
             if common.stopped_by_horizon(planner):

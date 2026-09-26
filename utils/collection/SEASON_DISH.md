@@ -20,7 +20,7 @@ the cue and delay. The unchanged horizon is 1100 steps (55 seconds). The other
 condiment must not be grasped or displaced more than 0.10 m. This is a pose proxy
 for seasoning; no fluid/substance simulation is implied.
 
-Profile v4 restores a horizontal side grasp with the wrist camera above the hand.
+Profile v5 restores a horizontal side grasp with the wrist camera above the hand.
 There is no empty-arm fold before driving or additional arrival preparation pose.
 After grasp/lift the arm folds to the canonical robot rest keyframe. The hover is
 prepared before pouring. Pouring changes only `wrist_roll`: the other arm/torso
@@ -224,7 +224,16 @@ VLA performance or coverage of all kitchens is claimed.
 
 ## Restoration provenance
 
-Profile v4 follows the owner's selected changes 1, 2, 4, 8, 9 and common 43.
+Profile v5 follows the owner's selected changes 1, 2, 4, 8, 9 and common 43.
 The movement reference is published commit `dbb95ed`. Old profile v1/v2/v3
 recordings and their qualification below retain their original provenance.
-New source/native/held-action/RGB runs and human E5 review qualify v4 separately.
+New source/native/held-action/RGB runs and human E5 review qualify v5 separately.
+
+The first restoration pilot (v4, commit `ab956b5`, fixed seeds 7700000–7700039)
+produced 7/40 source successes; all seven passed native and held-action replay.
+It does not meet the planner success-rate requirement. Its records are retained.
+Version 5 reserves canonical rest values inside the planning roll limits, selects
+a hover only after checking its full wrist-only pour, and approaches left-wall
+docks diagonally from the open aisle with the same rest arm. This avoids driving
+a west-facing forearm into the wall without adding a different transport pose.
+These changes require their own fixed-pool qualification and E5 review.

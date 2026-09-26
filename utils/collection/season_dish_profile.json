@@ -1,5 +1,5 @@
 {
-  "profile_version": 4,
+  "profile_version": 5,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -127,10 +127,12 @@
       1
     ],
     "gripper_switch_control_step_parity": 0,
-    "motion_revision": "owner_restoration_2026_09_26",
+    "motion_revision": "owner_restoration_2026_09_26_prechecked_hover",
     "navigation_posture": "canonical_rest",
     "pour_motion": "wrist_roll_only",
-    "cue_observation_steps": 100
+    "cue_observation_steps": 100,
+    "left_wall_dock_approach": "diagonal_from_open_aisle_in_canonical_rest",
+    "pour_hover_prechecked": true
   },
   "quality_exceptions": {
     "D6": {
