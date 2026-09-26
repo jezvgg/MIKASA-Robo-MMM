@@ -116,6 +116,10 @@ def recording_info(path: Path, *, stage: str) -> dict:
             raise ValueError("Episode did not finish successfully")
         if not episode.get("success", False):
             raise ValueError("Success metadata disagrees with H5")
+        if "truncated" not in traj or traj["truncated"].shape != (n,):
+            raise ValueError("Recording needs one truncation flag per control step")
+        if np.asarray(traj["truncated"][:], dtype=bool).any():
+            raise ValueError("Truncated recordings are diagnostic only")
         summary = episode_summary(traj)
         for key in ("success", "success_once"):
             if contract.get(key) != summary[key] or episode.get(key) != summary[key]:

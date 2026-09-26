@@ -87,7 +87,7 @@ def runtime_signature(profile=None):
     files = {}
     for folder in ("my_scenes", "planners", "robots/fetch", "utils"):
         for path in sorted((REPO / folder).rglob("*")):
-            if path.name.startswith("test_") or path.suffix not in {".py", ".urdf", ".srdf", ".json"}:
+            if path.name.startswith("test_") or path.suffix not in {".py", ".urdf", ".srdf", ".json", ".png", ".obj"}:
                 continue
             if "collection" in path.parts and path.name not in {
                 "__init__.py", "pipeline.py", "contract.py", "client.py", "profile.py",

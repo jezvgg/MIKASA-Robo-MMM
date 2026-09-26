@@ -35,6 +35,7 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneBuilder
 from mani_skill.utils.structs import Actor, Pose
 
+from utils.initial_pose import randomize_initial_joints
 from utils.robocasa_utils import (
     parking_pose,
     counter_frame,
@@ -77,9 +78,8 @@ class SameDrawerConfig:
     n_drawers: int = 4
     "Drawers in the column (fixed by the kitchen); the obs one-hot stays this wide."
 
-    drawer_choices: tuple = (1, 2, 3)
-    """Three upper drawers; the bottom handle is below the qualified work envelope.
-    All choices share a column and the same nominal robot dock."""
+    drawer_choices: tuple = (0, 1, 2, 3)
+    """All four drawers, including the bottom drawer, share the same column."""
 
     init_open_range: tuple[float, float] = (0.10, 0.16)
     """Metres the target drawer stands open at reset, drawn per seed from this range.
@@ -123,6 +123,11 @@ class SameDrawerConfig:
     "Along-counter separation between the apple (front band) and the plate (deep row)."
 
     robot_jitter_xy: float = 0.02
+    # Uniform reset offsets around the unchanged DSFetch rest pose (C1).
+    initial_arm_jitter_rad: float = 0.04
+    initial_torso_jitter_m: float = 0.01
+    initial_head_jitter_rad: float = 0.05
+
     robot_jitter_yaw: float = 0.03
 
     spawn_jitter_xy: float = 0.02
@@ -460,6 +465,8 @@ class SameDrawerTask(BaseEnv):
             self.sequence_violated[env_idx] = False
             self.held_count[env_idx] = 0
             self._last_eval_step[env_idx] = -1
+
+            randomize_initial_joints(self, env_idx)
 
     def _restore_robot(self, env_idx: torch.Tensor):
         """Rest keyframe + the column dock, overwriting whatever dock the scene
