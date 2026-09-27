@@ -4,7 +4,7 @@ Read the fixed fridge picture, then travel to the condiment station with the arm
 in the canonical rest pose. The scene hides the picture at control step 100.
 The blind control replaces the remembered answer with a seeded uniform choice.
 Grasp with an upright wrist camera and a consistent elbow/wrist branch, lift
-clear of the neighbouring condiment, and fold to the canonical rest pose.
+clear of the neighbouring condiment, and fold to the compact upright carry pose when the bowl needs a drive.
 Track the condiment before the grasp and the bowl afterwards.
 
 Drive to the bowl with the same compact pose, move to an upright hover, then
@@ -45,6 +45,8 @@ from utils.mikasa.execution_noise import configure_execution_noise, transfer_pha
 from planners.season_dish_paths import CARRY_TARGETS, carry_goal, grasp_with_continuation, initial_support_contacts
 from planners.oracle.path_clearance import path_clear
 from planners.oracle.straight_paths import straight_plan, execute_straight
+from planners.oracle.upright_payload import upright_path, elbow_only, enforce_upright, PayloadTiltError
+from planners.season_dish_transfer import plan_loaded_hover, held_transform
 
 WHO = "season_dish_planner"
 
@@ -867,16 +869,16 @@ def drive_to_counter(env, planner, dock, face):
     return planner.drive_base(target_pos=dock, target_view_vec=face, freeze_arm=True)
 
 
-def navigation_posture(env, planner, task):
-    """The one fixed, compact loaded carry posture from the reviewed earlier version."""
+def navigation_posture(env, planner, task, target):
+    """Preserve the compact shoulder/elbow, compensate the wrist along the fold."""
     planner.planner.update_from_simulation()
     current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
-    path = planner.planner.plan_qpos_line(carry_goal(task, current), current,
-        time_step=task.control_timestep, ref_yaw=float(current[2]), qpos_step=.02)
-    if path.get("status") != "Success" or not path_clear(planner, current, path["position"]):
-        return fail(env, "compact carry path refused")
-    say(env, "compact condiment carry", knots=len(path["position"]))
-    with transfer_phase(planner, "fold for navigation"):
+    path = upright_path(planner, task, current, carry_goal(task, current), held_transform(task, target))
+    if path is None:
+        return fail(env, "upright compact carry path refused")
+    say(env, "compact upright condiment carry", knots=len(path["position"]),
+        predicted_max_tilt_deg=path['predicted_max_tilt_deg'])
+    with elbow_only(planner, task), transfer_phase(planner, "fold for navigation"):
         return planner.follow_forward_path_w_refinement(path, refine=True)
 
 
@@ -1756,159 +1758,57 @@ def _solve(
             object_z=round(float(_np(target.pose.p)[0][2]), 3))
         return res
     planner.planner.update_from_simulation()
-    # Keep the grasp's upright heading relative to the base. The navigation
-    # fold changes the payload orientation but must not redefine the pour frame.
-    obj_rel = common.object_pose_in_base(task, target)
-    res = navigation_posture(env, planner, task)
-    if res == -1:
-        return fail(env, "fold before the bowl drive")
-    if common.stopped_by_horizon(planner):
-        return res
-    if not bool(_np(task.agent.is_grasping(target)).any()):
-        say(env, "missed: dropped while folding for navigation")
-        return res
-    if not _flag(res[-1], "distractor_ok"):
-        say(env, "missed: distractor moved while folding for navigation")
-        return res
-    planner.planner.update_from_simulation()
-
-    # Pour preparation may bend the wrist the other way, but not flip the elbow.
-    elbow_index = int(task.agent.robot.active_joints_map["elbow_flex_joint"].active_index[0])
-    planner._grasp_branch = {elbow_index: 1}
-
-    planner.track_target(lambda: _np(task.bowl.pose.p)[0])
-
-    # -- STAGE 4: drive to the bowl dock -----------------------------------------------------
-    dock = _np(task._bowl_dock_np)[0].astype(np.float64)
-    face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.0])
-    dock_xyz = noise.point("bowl_dock", [dock[0], dock[1], 0.0], axes=(True, True, False))
-    say(env, "drive to bowl dock", dock=[round(float(v), 3) for v in dock_xyz])
-    # `freeze_arm=True` plans the translation with the base's three joints and nothing
-    # else (`BASE_ONLY_PLAN_MASK`). Without it `move_base_forward` asks fifteen joints to
-    # produce a pure base translation and runs one of them into a limit: measured here on
-    # the randomized layout (K74), 12 of 14 failures were `FAILED: drive to bowl dock`
-    # with `joint limit at index [10]` — the forearm_roll, inside a plan whose only job
-    # was to move the base. The mask's own docstring records the same disease on
-    # water-plants seed 11. It was never needed while the drive was a fixed 0.39 m; the
-    # drawn layout makes it up to 2.2 m.
-    res = drive_to_counter(env, planner, dock_xyz, face)
-    if res != -1 and common.stopped_by_horizon(planner):
-        return res
-    if res == -1:
-        return fail(env, "drive to bowl dock in the fixed navigation posture")
-    planner.planner.update_from_simulation()
-    d_dock, dyaw = common.dock_error(task, (dock[0], dock[1], dock[2]))
-    say(env, "parked at the dock", d_dock=round(d_dock, 3), dyaw_deg=round(dyaw, 1))
-    if not _flag(res[-1], "distractor_ok"):
-        say(env, "missed: distractor moved during the drive", distractor_ok=False,
-            distractor_moved=round(float(_np(res[-1]["distractor_moved"]).reshape(-1)[0]), 3))
-        return res
-
-    # Restore the pre-fold upright heading in the parked base frame; read the
-    # physical attachment now, since folding can change its small contact offset.
-    obj_q = common.object_q_from_base(task, obj_rel)
-    T_tcp_obj = (task.agent.tcp.pose[0].inv() * target.pose[0]).sp
-    bowl_p = _np(task.bowl.pose.p)[0].astype(np.float64)
-    say(env, "bowl at", when="after the drive", p=[round(float(v), 3) for v in bowl_p])
-
-    # -- STAGE 5: hover over the bowl, through a waypoint back toward the base ----------------
-    hovered = False
-    obj_q_held = obj_q
-    for extra, back, spin in HOVER_RUNGS:
-        aim = bowl_p - back * face
-        obj_q_try = obj_q if spin == 0.0 else np.asarray(
-            (sapien.Pose(q=quat_about(np.array([0.0, 0.0, 1.0]), math.radians(float(spin))))
-             * sapien.Pose(q=obj_q)).q
-        )
-        hover = common.pose_over(aim, HOVER_ABOVE + extra, obj_q_try) * T_tcp_obj.inv()
-        hover = noise.pose("hover", hover)
-        say(env, "hover over bowl", hover=[round(float(v), 3) for v in hover.p],
-            extra=round(float(extra), 3), back=round(float(back), 3), spin_deg=float(spin))
-        with transfer_phase(planner, "carry condiment over bowl"), common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-            res = prepare_for_wrist_pour(env, planner, task, target, hover)
-        if res != -1 and common.stopped_by_horizon(planner):
-            return res
-        if res != -1:
-            hovered = True
-            obj_q_held = obj_q_try
-            break
-        say(env, "hover refused at this rung", extra=round(float(extra), 3),
-            back=round(float(back), 3), spin_deg=float(spin))
-    if not hovered:
-        return fail(env, "hover over bowl: every rung refused")
-    hinfo = res[-1]
-    say(env, "bowl at", when="after the hover", p=[round(float(v), 3) for v in _np(task.bowl.pose.p)[0]])
-    say(env, "hovering", xy_to_bowl=round(float(_np(hinfo["xy_to_bowl"]).reshape(-1)[0]), 3),
-        clearance=round(float(_np(hinfo["clearance"]).reshape(-1)[0]), 3),
-        height_ok=_flag(hinfo, "height_ok"), over_bowl=_flag(hinfo, "over_bowl"))
-    if HOVER_CORRECT and not _flag(hinfo, "over_bowl"):
-        # The TCP reached its target (tcp_err 1-2 cm) and the object is 12-15 cm from the
-        # bowl (1619, 1867 @0.15; 452 @0.0): the object moved in the fingers on the way
-        # here, so the offset the hover was aimed with — T_tcp_obj, read after the drive
-        # — is stale, and every pour candidate below would be aimed with it too. Read the
-        # object as it sits in the hand NOW, re-aim the hover once with it, and pour with
-        # the live offset. One correction: a second miss says the object is loose.
-        T_live = (task.agent.tcp.pose[0].inv() * target.pose[0]).sp
-        # INSTRUMENT (2026-09-06): which frame is off? The real TCP against the hover
-        # target, the planner's believed TCP (FK of the qpos it plans from) against the
-        # real one, the object against the bowl, and the in-hand offset stale vs live.
-        try:
-            _tcp_real = _np(task.agent.tcp.pose.sp.p).reshape(-1)[:3]
-            _obj_real = _np(target.pose.sp.p).reshape(-1)[:3]
-            _pw = planner.planner
-            _pw.update_from_simulation() if False else None
-            _q = _np(task.agent.robot.get_qpos()).reshape(-1)
-            _pw.pinocchio_model.compute_forward_kinematics(_q)
-            _tcp_model = _pw.pinocchio_model.get_link_pose(_pw.link_name_2_idx[_pw.move_group])
-            _tcp_model_p = np.asarray(_tcp_model.p, dtype=np.float64).reshape(-1)[:3]
-            _base_model = np.asarray(_pw.base_pose.p if hasattr(_pw, "base_pose") else [0, 0, 0], dtype=np.float64)
-            say(env, "hover instrument",
-                tcp_real=[round(float(v), 3) for v in _tcp_real],
-                hover_target=[round(float(v), 3) for v in np.asarray(hover.p)],
-                tcp_minus_target=[round(float(v), 3) for v in (_tcp_real - np.asarray(hover.p))],
-                tcp_model_local=[round(float(v), 3) for v in _tcp_model_p],
-                base_model=[round(float(v), 3) for v in _base_model],
-                base_real=[round(float(v), 3) for v in _np(task.agent.base_link.pose.sp.p).reshape(-1)[:3]],
-                obj_minus_bowl=[round(float(v), 3) for v in (_obj_real - bowl_p)],
-                bowl_stale=[round(float(v), 3) for v in bowl_p],
-                bowl_live=[round(float(v), 3) for v in _np(task.bowl.pose.p)[0].astype(np.float64)],
-                T_stale=[round(float(v), 3) for v in np.asarray(T_tcp_obj.p)],
-                T_live=[round(float(v), 3) for v in np.asarray(T_live.p)])
-        except Exception as exc:  # diagnostic only
-            say(env, "hover instrument failed", why=f"{type(exc).__name__}: {exc}")
-        extra0, back0, _spin0 = HOVER_RUNGS[0]
-        # The BOWL as it stands now, too: measured on 1619 @0.15 (2026-09-06) the object
-        # hovered 8 mm from where the bowl had been read after the drive, and the bowl
-        # itself stood 15 cm away — pushed on the way in. The task judges against the
-        # live bowl; so does this re-aim, and so do the pour candidates after it.
-        bowl_live = _np(task.bowl.pose.p)[0].astype(np.float64)
-        bowl_moved = float(np.linalg.norm(bowl_live[:2] - bowl_p[:2]))
-        aim0 = bowl_live - back0 * face
-        hover2 = common.pose_over(aim0, HOVER_ABOVE + extra0, obj_q_held) * T_live.inv()
-        hover2 = noise.pose("hover_correction", hover2)
-        say(env, "hover corrected for the object as held and the bowl as it stands",
-            xy_before=round(float(_np(hinfo["xy_to_bowl"]).reshape(-1)[0]), 3),
-            bowl_moved=round(bowl_moved, 3),
-            shift=[round(float(v), 3) for v in (np.asarray(hover2.p) - np.asarray(hover.p))])
+    # After the completed lift, check the whole stationary-base continuation
+    # before spending motion on folding or driving. Pure previews issue no actions.
+    with elbow_only(planner, task):
+        current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
         with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-            r2 = prepare_for_wrist_pour(env, planner, task, target, hover2)
-        if r2 != -1:
-            res = r2
-            if common.stopped_by_horizon(planner):
-                return res
-            T_tcp_obj = T_live
-            bowl_p = bowl_live
-            hinfo = res[-1]
-            say(env, "hovering", xy_to_bowl=round(float(_np(hinfo["xy_to_bowl"]).reshape(-1)[0]), 3),
-                clearance=round(float(_np(hinfo["clearance"]).reshape(-1)[0]), 3),
-                height_ok=_flag(hinfo, "height_ok"), over_bowl=_flag(hinfo, "over_bowl"),
-                corrected=True)
-        else:
-            say(env, "the corrected hover refused; pouring as hovered")
-
-    # The final manipulation has exactly one moving arm joint.
-    from planners.oracle.wrist_pour import pour_with_wrist
-    return pour_with_wrist(env, planner, task, target, target_degrees=165.0)
+            direct = plan_loaded_hover(planner, task, current, held_transform(task, target))
+        say(env, "bowl route selected", route="direct_pour" if direct is not None else "upright_carry_and_drive")
+        planner.track_target(lambda: _np(task.bowl.pose.p)[0])
+        try:
+            with enforce_upright(planner, task, target):
+                if direct is None:
+                    res = navigation_posture(env, planner, task, target)
+                    if res == -1 or common.stopped_by_horizon(planner):
+                        return res
+                    dock = _np(task._bowl_dock_np)[0].astype(np.float64)
+                    face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.])
+                    dock_xyz = noise.point("bowl_dock", [dock[0], dock[1], 0.], axes=(True, True, False))
+                    say(env, "drive to bowl dock", dock=dock_xyz.tolist())
+                    # Hold the corrected targets; do not integrate measured PD lag
+                    # into a slowly drifting wrist while the base is driving.
+                    names = task.agent.controller.controllers['arm'].config.joint_names
+                    q = task.agent.robot.get_qpos()[0].cpu().numpy()
+                    fixed = {i: float(q[int(task.agent.robot.active_joints_map[n].active_index[0])]) for i,n in enumerate(names)}
+                    fixed[10] = float(q[int(task.agent.robot.active_joints_map['torso_lift_joint'].active_index[0])])
+                    previous = getattr(planner, 'fixed_action_targets', {})
+                    planner.fixed_action_targets = dict(previous)
+                    planner.fixed_action_targets.update(fixed)
+                    try:
+                        res = drive_to_counter(env, planner, dock_xyz, face)
+                    finally:
+                        planner.fixed_action_targets = previous
+                    if res == -1 or common.stopped_by_horizon(planner):
+                        return res
+                    planner.planner.update_from_simulation()
+                    current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
+                    with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
+                        direct = plan_loaded_hover(planner, task, current, held_transform(task, target))
+                    if direct is None:
+                        return fail(env, "no upright hover with a complete wrist-only pour")
+                say(env, "hover over bowl", route_prechecked=True, extra=direct['hover_extra'],
+                    back=direct['hover_back'], spin_deg=direct['hover_spin'])
+                with transfer_phase(planner, "carry condiment over bowl"):
+                    res = planner.follow_forward_path_w_refinement(direct['approach'], refine=True)
+                if res == -1 or common.stopped_by_horizon(planner):
+                    return res
+        except PayloadTiltError as error:
+            return fail(env, str(error))
+        if not _flag(res[-1], "distractor_ok"):
+            return fail(env, "distractor moved during upright transfer")
+        from planners.oracle.wrist_pour import pour_with_wrist
+        return pour_with_wrist(env, planner, task, target, target_degrees=165.0)
 
 
 def parse_args(argv=None):

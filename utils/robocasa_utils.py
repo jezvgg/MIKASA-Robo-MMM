@@ -277,6 +277,7 @@ def load_objaverse_actor(
     index: int = 0,
     dynamic: bool = True,
     body_type: str | None = None,
+    visual_decorator=None,
 ):
     """Load one RoboCasa object at the scale RoboCasa intends it to have.
 
@@ -336,6 +337,8 @@ def load_objaverse_actor(
 
     builder = loader.parse(path, package_dir=os.path.dirname(path))["actor_builders"][0]
     builder.initial_pose = initial_pose
+    if visual_decorator is not None:
+        visual_decorator(builder)
     # Explicit, the way upstream dispatches the same three (actors/common.py:28-35).
     if body_type == "dynamic":
         return builder.build_dynamic(name=name)
