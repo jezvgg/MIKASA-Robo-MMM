@@ -1,5 +1,5 @@
 {
-  "profile_version": 7,
+  "profile_version": 8,
   "env_id": "MikasaCabinetSearch-v0",
   "task_variant": "four_compartments_cola_random_home_nudge",
   "robot_reference": {
@@ -106,6 +106,6 @@
     "closing_dock_navigation": "published_reverse_capable_within_door_work",
     "empty_inspection_rest": false,
     "opening_speed_m_s": 0.3,
-    "closing_speed_m_s": 0.1
+    "closing_speed_m_s": 0.05
   }
 }
