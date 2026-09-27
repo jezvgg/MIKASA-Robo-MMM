@@ -51,7 +51,8 @@ def test_completed_inspection_cannot_be_repeated(home_between):
     tick, _ = fixture(3)
     tick(home=True)
     tick(0)
-    tick()
+    for _ in range(10):
+        tick()
     if home_between:
         tick(home=True)
     info = tick(0)
@@ -62,7 +63,8 @@ def test_next_inspection_requires_home_even_after_empty_cabinet_closed():
     tick, _ = fixture(3)
     tick(home=True)
     tick(0)
-    tick()
+    for _ in range(10):
+        tick()
     info = tick(1)
     assert info["skipped_home"].item() and info["fail"].item()
 

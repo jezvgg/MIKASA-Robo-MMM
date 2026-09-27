@@ -1,68 +1,17 @@
-"""Cabinet search task.
+"""Physical CabinetSearch: remember inspected compartments and find the cola can.
 
-MikasaCabinetSearch-v0: a red cube is hidden in ONE of N wall-cabinet
-compartments. Find it. Close every cabinet you open, go back to the marked
-home spot before opening another, and never open a compartment twice.
+Visit the sampled floor mark before searching and between empty compartments.
+Close every inspected empty compartment by contact: all actual hinge angles
+must stay within 0.01 rad for ten control steps with the hand away. Hinges are
+initialized closed only at reset. Evaluation never writes qpos/qvel, erases
+small uninspected-door drift, or substitutes virtual angles in observations.
 
-The memory type is the agent's OWN ACTION HISTORY — the set of compartments
-it has already opened (design blank I, docs/task-designs/I-cabinetsearch-v0.md).
-There is no cue phase and no clock: the trace is erased by the agent itself
-(closing the door) and by the env's detent (a closed door snaps to exactly
-0.000 once the hand has left its bar, so a visited compartment and an
-untouched one are identical by construction — the SameDrawer detent, applied
-to hinges). What remains of the history exists only in the policy.
-
-The default terminal is NUDGE: with its compartment open at or past
-`theta_reveal`, push the cube horizontally at least `cube_nudge_m` (0.02 m),
-with no fail latch. The found cabinet is NOT closed. The optional SEEN terminal
-is a separate task configuration and must not be mixed into a NUDGE dataset. Failure is instant (`fail` -> `terminated`,
-sapien_env.py:1055-1056) on any of four sticky latches:
-
-  reopened      a decision on a compartment already opened this episode
-  two_open      a door rising while another compartment still stands open
-  skipped_home  a decision on a DIFFERENT compartment without a home visit
-                in between (the first opening counts: the start is outside
-                the home disk and `passed_home` is False at reset)
-  foreign_moved a non-compartment kitchen joint drifted past
-                `foreign_drift_tol` (enters `fail` only once
-                `foreign_drift_fails` is switched on after the pilot)
-
-A "decision" is the rising edge of a compartment (any of its hinges past
-`theta_count`, and either past `theta_closed` or with the hand at the bar —
-a still, hand-away door inside the closed band is a brush: the eraser zeroes
-it, it is never a decision) while `passed_home` is True. The same compartment
-rising again WITHOUT a home visit is a RETRY (a slipped grasp knocked the door
-shut) — no latch, counted in `retry_count`. Every latch is written by the
-pure function `step_search_latches`, which the offline tests drive on
-synthetic traces.
-
-Memoryless floor (uniform with replacement, a repeat = fail),
-`memoryless_search_floor`: 17/27 of the motor rate at N=3, **71/128 = 0.5547 at
-the shipped N=4**; with memory 1.0 at either. The headline memory endpoint is
-the repeat rate on the SECOND decision (`second_decision_ok` conditional on
-`second_decision_made`): memoryless 1/N (1/4 here), memory 0.
-
-That floor holds only while EVERY compartment is erased behind the agent. The
-optional fifth compartment (`CAB_1`, `COMPARTMENTS_WITH_CAB_1`) is not: the
-owner's rule for it is "drive the door to the wall" (W24 — its closing ladder
-mirrors behind the room's west wall, so the family's fist push has nowhere to
-stand), and a leaf parked at the wall is a MARK THAT SURVIVES THE ROUND. A
-memoryless agent can rule that compartment out on sight, so the floor for a set
-containing it is NOT the plain formula — see `self_marking_search_floor`, which
-derives it (0.5442 for the five-compartment set, against 0.5021 plain). That is
-the price of the fifth door, stated rather than hidden, and it is why cab_1 is
-OFF by default: `MikasaCabinetSearch-v0` ships the four erased compartments.
-
-Motor substrate, all measured on kitchen 102 (K103-K108, W20 dump 2026-09-01):
-`pull_hinge_arc` opens a right door to 1.75 in ~144 steps at v=0.20 (9/10);
-the fist push closes to 0.116-0.120 (9/9). Hinge anchors: cab_2 L/R at x
-0.765/1.735, cab_main L/R at 1.765/2.735 (all y=-0.400, sense +1). Left doors
-open by DECREASING qpos (limits [-3, 0]) — hence `open_dir` per hinge.
-
-Skeleton: cabinet_retrieval_base.py (fixture and articulation resolution,
-reset qpos write after scene_builder.initialize) + depth_recall.py (latches,
-state dict) + same_drawer.py (detent, advance guard) + station_checklist.py
-(home predicate on base_link, state-dict guard).
+Revealing the target and pushing it horizontally at least 0.02 m ends the
+NUDGE episode at the can. A repeat inspection, simultaneous open compartments,
+or a missed required mark visit is a sticky failure. Optional SEEN/wall-park
+configurations remain separate task variants, outside this collection profile.
+The memoryless-search calculation assumes physically closed doors are visually
+indistinguishable; residual gaps therefore require a rendered quality audit.
 """
 
 from __future__ import annotations
@@ -98,13 +47,13 @@ TASK_STATE_KEYS = (
     "opened_count", "is_open", "passed_home", "last_opened",
     "reopened", "two_open", "skipped_home", "foreign_moved",
     "second_decision_made", "second_decision_ok", "retry_count",
-    "succeeded", "articulation_home", "last_eval_step", "seen_count", "cube_spawn", "found", "inspected",
+    "succeeded", "articulation_home", "last_eval_step", "seen_count", "cube_spawn", "found", "inspected", "closed_count",
 )
 #: Keys a recording may lack and still replay: added after the key was frozen, and
 #: restoring them as zero changes nothing but the step the success latches on
 #: (`cube_spawn` at zero makes every cube "nudged" — a recording from before the
 #: touch terminal replays under the seen terminal, MIKASA_SEARCH_TERMINAL=seen).
-TASK_STATE_OPTIONAL = ("seen_count", "cube_spawn")
+TASK_STATE_OPTIONAL = ("seen_count", "cube_spawn", "closed_count")
 
 #: No numerals, no "twice"/"second"/"first": the count of compartments and the
 #: count of allowed openings must not reach a language-conditioned policy
@@ -258,7 +207,7 @@ class Compartment:
     count as dealt with (`step_search_latches`'s falling edge):
 
       "push"       the family's rule: every hinge back under `theta_closed`,
-                   still, hand away; the detent then snaps it to exactly 0.000
+                   still, hand away for the configured physical release dwell
                    and a visited compartment is identical to an untouched one.
       "wall_park"  the W24 rule for cab_1: the open hinge reaches
                    `cfg.wall_park_rad` against the room's west wall. NOT
@@ -500,28 +449,13 @@ class CabinetSearchConfig:
 
     # -- door thresholds (theta = open_dir * qpos, >= 0) -----------------------
     theta_count: float = 0.05
-    """A door counts as OPENED at this angle (with the hand at its bar, or past
-    theta_closed) — the peek floor, measured by W22 (2026-09-02, cube-present vs
-    cube-hidden pixel diffs on the ds_fetch rig over a floor scan of the whole
-    corridor): a leaf cracked to 0.05 rad leaks at most **4 px** of cube from one
-    grazing floor spot, 0.10 leaks 12-14, 0.15 leaks 20-31 and 0.30 leaks 25-51.
-    A closed door leaks 0 px from everywhere (the control). So 0.05 is the
-    largest angle a memoryless agent cannot read the answer through, and the
-    4 px that survive are the recorded residual — closing them further would put
-    the threshold inside the hinge's own numerical noise.
-
-    The ordering against `theta_closed` is deliberately NOT load-bearing: the
-    rules read `theta_count` for what counts as an opening and `theta_closed`
-    for what counts as shut, with the hand-away eraser covering the band between
-    them whichever way round they sit (see `step_search_latches`)."""
-    theta_closed: float = 0.15
-    """A compartment whose hinges all sit at or under this, still, with the
-    hand away, counts as closed and snaps to 0.000 (the detent). 0.15 rad ~
-    8.6 deg — the cabinet family's `door_closed_rad` (W13: a free hinge holds
-    where the fist released it, so exact zero would fail honest closes; K106's
-    push lands at 0.116-0.120, and the search oracle reproduces 0.119 on every
-    round it closes). Inside this band a door with no hand at its bar is never
-    an opening (see theta_count)."""
+    """Actual opening angle at which a compartment counts as inspected/opened.
+    Smaller residual angles remain physical and observable; they are never erased.
+    """
+    theta_closed: float = 0.01
+    """All actual hinge angles must remain within this band after release."""
+    close_dwell_steps: int = 10
+    """Consecutive control steps with every leaf closed, still and hand away."""
     theta_reveal: float = 1.2
     """The cube's open hinge at or past this makes the compartment revealed.
     Success additionally requires the configured nudge/seen terminal. Must be past 0.9 (ARM_PASS, W12) and reachable by the pull
@@ -563,15 +497,7 @@ class CabinetSearchConfig:
     door_still_vel: float = 0.02
     "rad/s under which a hinge is 'still' (same_drawer's 0.02)."
     hand_far_m: float = 0.25
-    """The TCP farther than this from every bar of a compartment = the hand
-    is away. Gates all three things the machine does to a door inside the
-    closed band: the eraser (an untouched door snapped to 0), the detent (a
-    closed door snapped to 0 — a bar held in the fingers must not be
-    teleported into the panel: 0.13 rad x 0.435 m = 5.7 cm, review finding)
-    and the closed-band rising (a door under theta_closed is an opening only
-    while the hand is at its bar). The bar is the CLOSED-door bar
-    (`handle_*`): every gate fires on near-closed doors, where the live bar
-    is within ~6 cm of it."""
+    """TCP distance from every closed-position bar required for release dwell."""
 
     # -- the handle bars (for hand_far_m), by construction ---------------------
     handle_hpad: float = 0.05
@@ -741,15 +667,14 @@ class CabinetSearchConfig:
             f"theta_count={self.theta_count}: must be positive and under the "
             "reveal angle"
         )
-        assert 0 < self.theta_closed <= 0.15, (
-            f"theta_closed={self.theta_closed}: over 0.15 (~8.6 deg) the gap at "
-            "the free edge is no longer closed for any purpose the task has "
-            "(cabinet family's door_closed_rad)"
+        assert 0 < self.theta_closed <= 0.01, (
+            f"theta_closed={self.theta_closed}: physical closure requires at most 0.01 rad"
         )
         assert 0.9 <= self.theta_reveal <= 2.9, (
             f"theta_reveal={self.theta_reveal}: under 0.9 (ARM_PASS, W12) the "
             "panel covers the opening; 3.0 is the hinge stop"
         )
+        assert self.close_dwell_steps >= 10
         assert self.door_still_vel > 0 and self.hand_far_m > 0
         assert self.handle_hpad > 0 and self.home_dock_min_m > 0
 
@@ -1101,6 +1026,7 @@ class SearchLatches:
     cube_spawn: torch.Tensor
     found: torch.Tensor
     inspected: torch.Tensor
+    closed_count: torch.Tensor
 
     @classmethod
     def zeros(cls, n: int, n_compartments: int, n_foreign: int, device="cpu"):
@@ -1124,6 +1050,7 @@ class SearchLatches:
             cube_spawn=torch.zeros((n, 3), dtype=torch.float32, device=device),
             found=b(n),
             inspected=b(n, n_compartments),
+            closed_count=i32(n, n_compartments),
         )
 
 
@@ -1135,44 +1062,11 @@ def step_search_latches(latches, *, step: torch.Tensor, theta: torch.Tensor,
                         moved_m: torch.Tensor = None):
     """One evaluate() tick of the search latches, with no simulator.
 
-    Reads and reassigns the `TASK_STATE_KEYS` attributes of `latches` (the
-    env, or a `SearchLatches`). Every edge event is gated on `advance =
-    step != last_eval_step`, so a second call in the same step changes
-    nothing (evaluate() runs at t=0 inside reset and out of band from three
-    call sites). Returns `(info, snap)`: `info` is the evaluate() dict
-    (`success`, `fail` and the diagnostics), `snap` an `(n, H)` bool mask of
-    hinges the caller must write to qpos = qvel = 0 — the detent. Inside,
-    `theta` is treated as already zeroed on those hinges, so the sim write
-    and the verdict agree by construction.
-
-    The three door rules, the same under either ordering of theta_count and
-    theta_closed (the owner's open decision, see `theta_count`):
-
-      rising   ~is_open & th_max >= theta_count & (th_max > theta_closed
-               | hand at the bar) — a door inside the closed band is an
-               opening only while the hand holds it; a hand-away door
-               there is a brush.
-      eraser   ~is_open & 0 < th_max < theta_count | th_max <= theta_closed,
-               still, hand away — the brush (and any sub-count mark) is
-               zeroed; a moving brush waits until it is still.
-      falling  is_open & th_max <= theta_closed, still, hand away — the
-               detent never teleports a bar out of the fingers.
-
-    A `close_policy="wall_park"` compartment (cab_1, W24) replaces the falling
-    rule and only that one: it falls when its hinge reaches `cfg.wall_park_rad`
-    — still, hand away, so the pull that drove it there has let go — and it is
-    NOT put in the snap mask. Its leaf stays against the wall, which is the
-    rule the owner asked for and the mark the corrected floor is priced on
-    (`self_marking_search_floor`). REPLACES, not adds: a wall-park compartment
-    driven back into the closed band is NOT dealt with — it stays `is_open`,
-    home stays uncredited, and the round has to park it properly. Because that
-    leaf never comes back through
-    `theta_count`, the rising rule would otherwise re-fire on it every tick
-    after the fall (and `reopened` on the next home visit), so a wall-parked
-    compartment that has ALREADY been counted is barred from rising for exactly
-    as long as it stands parked. Pull it back off the wall and it can rise
-    again — and then it is a reopen like any other, which is the honest
-    reading: the mark informs only while it stands.
+    Reads and updates task memory once per control step. The returned snap mask
+    is always false. Actual hinge angles drive every predicate; no simulator state
+    is changed. A push-closed compartment clears is_open only after all its leaves
+    remain within theta_closed for close_dwell_steps with the hand away. Wall-park
+    variants keep their existing physical parked predicate.
 
     Args:
         step: `(n,)` int32 elapsed steps.
@@ -1231,7 +1125,8 @@ def step_search_latches(latches, *, step: torch.Tensor, theta: torch.Tensor,
     opened_count = latches.opened_count
     last_opened = latches.last_opened
 
-    closed_band = th_max <= cfg.theta_closed
+    closed_band = (theta.abs().unsqueeze(-1).masked_fill(~member, 0).amax(dim=1)
+                   <= cfg.theta_closed)
     # cab_1's rule (W24). `parked` is the compartment's own mark: it stands at
     # the wall, and unlike a shut door it stays there.
     wall = layout.wall_park.to(theta.device).unsqueeze(0)                    # (1, N)
@@ -1252,19 +1147,18 @@ def step_search_latches(latches, *, step: torch.Tensor, theta: torch.Tensor,
     spent = parked & (opened_count >= 1)
     rising = (adv & ~is_open & (th_max >= cfg.theta_count)
               & (~closed_band | ~far_c) & ~spent)
-    # The detent waits for the hand: the snap moves the bar ~0.435 m x theta.
-    falling_push = adv & is_open & closed_band & still_c & far_c & ~wall
+    # Read-only physical closure: no detent, drift eraser or virtual zero.
+    stable = closed_band & still_c & far_c
+    closed_count = torch.where(adv, torch.where(stable, latches.closed_count + 1,
+                               torch.zeros_like(latches.closed_count)), latches.closed_count)
+    falling_push = adv & is_open & (closed_count >= cfg.close_dwell_steps) & ~wall
     falling_wall = adv & is_open & parked & still_c & far_c
     falling = falling_push | falling_wall
-    # The eraser's band is the union of the sub-count band and the closed
-    # band, so the brush is erased whichever threshold is the larger.
-    erase_band = (th_max > 0) & ((th_max < cfg.theta_count) | closed_band)
-    eraser = adv & ~is_open & erase_band & still_c & far_c
-    # ... and the wall park is NOT snapped: the leaf stays where it is.
-    snap_c = falling_push | eraser                                           # (n, N)
-    snap = snap_c[:, layout.hinge_cab]                                       # (n, H)
-    theta_after = theta.masked_fill(snap, 0.0)
-    th_max_after = theta_after.unsqueeze(-1).masked_fill(~member, neg_inf).amax(dim=1)
+    # Keep the old diagnostic shape; it is always false in physical-only versions.
+    snap_c = torch.zeros_like(is_open)
+    snap = torch.zeros_like(theta, dtype=torch.bool)
+    theta_after = theta
+    th_max_after = th_max
 
     same_as_last = torch.arange(N, device=dev).unsqueeze(0) == last_opened.unsqueeze(-1)
     decision = rising & passed_home.unsqueeze(-1)
@@ -1327,6 +1221,7 @@ def step_search_latches(latches, *, step: torch.Tensor, theta: torch.Tensor,
     latches.retry_count = retry_count
     latches.opened_count = opened_count
     latches.last_opened = last_opened
+    latches.closed_count = closed_count
     latches.is_open = is_open
     latches.passed_home = passed_home
     latches.succeeded = succeeded
@@ -1866,30 +1761,6 @@ class CabinetSearchTask(BaseEnv):
                 rows.append(torch.zeros((0,), device=self.device))
         return torch.stack(rows).to(torch.float32)
 
-    def _snap_hinges(self, snap: torch.Tensor):
-        """The detent: qpos = qvel = 0 on the masked hinges ONLY (columns of
-        the articulation — a compartment's snap never touches its neighbour
-        door on the same box). Written from evaluate(), the repo's blessed
-        slot for phase side effects."""
-        for i in range(self.num_envs):
-            for h, (art, j) in enumerate(self._hinges[i]):
-                if not bool(snap[i, h]):
-                    continue
-                q = art.get_qpos()
-                q = q.clone() if torch.is_tensor(q) else torch.as_tensor(q).clone()
-                q.reshape(-1)[j] = 0.0
-                art.set_qpos(q)
-                v = art.get_qvel()
-                v = v.clone() if torch.is_tensor(v) else torch.as_tensor(v).clone()
-                v.reshape(-1)[j] = 0.0
-                art.set_qvel(v)
-        if self.gpu_sim_enabled:
-            # UNVERIFIED on GPU (the repo's standing caveat): without the
-            # apply/fetch pair the writes are dead on the GPU tier and the
-            # detent silently does not happen (stack_recall's note).
-            self.scene._gpu_apply_all()
-            self.scene._gpu_fetch_all()
-
     def _base_state(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # agent.base_link, not agent.robot: Fetch drives through root joints
         # (fetch.urdf:21-35), so the articulation's root pose never moves.
@@ -1980,11 +1851,9 @@ class CabinetSearchTask(BaseEnv):
             moved_m=torch.linalg.norm((self.cube.pose.p - self.cube_spawn)[..., :2], dim=-1),
         )
         self._revealed_now = info["revealed"]  # read by revealed_target()
-        if bool(snap.any()):
-            self._snap_hinges(snap)
         info["foreign_drift_max"] = foreign_drift_max
-        # Mirrors the sim write: the obs sees exactly what the detent left.
-        info["door_qpos"] = qpos.masked_fill(snap, 0.0)
+        # Raw physical angles, including small drift on uninspected doors.
+        info["door_qpos"] = qpos
         # Per-env scalars are the sweep keys (`--info-keys`: revealed,
         # reopened, two_open, skipped_home, foreign_moved, n_decisions,
         # second_decision_*, retry_count, foreign_drift_max); is_open (n, N),
@@ -1998,8 +1867,7 @@ class CabinetSearchTask(BaseEnv):
     def _get_obs_extra(self, info: dict) -> dict:
         """What the policy may see. Fixed key order; NEVER the cube (its pose
         IS the answer), never `cube_cab`, never a counter or a latch. Under
-        use_state only the four hinge angles — after the detent a closed
-        door carries no history."""
+        use_state only the four hinge angles — including residual gaps; no history is erased."""
         qpos = self.agent.robot.get_qpos()
         obs = dict(
             tcp_pose=self.agent.tcp_pose.raw_pose,
