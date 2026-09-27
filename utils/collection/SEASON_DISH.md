@@ -20,9 +20,10 @@ the cue and delay. The unchanged horizon is 1100 steps (55 seconds). The other
 condiment must not be grasped or displaced more than 0.10 m. This is a pose proxy
 for seasoning; no fluid/substance simulation is implied.
 
-Profile v5 restores a horizontal side grasp with the wrist camera above the hand.
+Profile v7 retains a horizontal side grasp with the wrist camera above the hand.
 There is no empty-arm fold before driving or additional arrival preparation pose.
-After grasp/lift the arm folds to the canonical robot rest keyframe. The hover is
+After grasp/lift the arm folds to the earlier fixed compact condiment carry pose.
+The original canonical keyframe itself is unchanged. The hover is
 prepared before pouring. Pouring changes only `wrist_roll`: the other arm/torso
 commands stay constant and both base commands remain zero. The complete wrist arc
 is checked for collisions, available roll range and a reachable 165-degree target
@@ -37,7 +38,10 @@ pause is not covered by this exception.
 ## Motion and noise
 
 The existing expert uses geometric grasps, IK/screw paths, collision-checked
-joint lines and RRT recovery. RL is not used. The scene adds RoboCasa's kitchen
+joint lines and bounded monotone joint curves. Grasp selection prechecks the
+whole approach, horizontal contact, vertical lift and fixed carry continuation.
+The same positive elbow branch is kept through those stages. There is no RRT
+lift, top-down rescue or simultaneous base/arm grasp fallback. RL is not used. The scene adds RoboCasa's kitchen
 exclusions only to wheels/base; arm and fingers retain physical kitchen contacts.
 DSFetch class, URDF/SRDF, controllers, cameras and meshes are unchanged.
 
@@ -48,7 +52,7 @@ to 5 mm per enabled world axis to these goals:
 |---|---|
 | Initial station dock after the cue | x, y |
 | Free approach before grasp | x, y, z |
-| Lift above the neighbouring object | z |
+| Connected vertical lift | Chosen from collision-checked heights; no independent noise |
 | Base stop at the bowl dock | x, y |
 | Feasible hover and hover correction | x, y, z |
 
@@ -251,3 +255,25 @@ five-second cue exception is evaluated separately; post-cue failures remain fail
 Every successful pour has constant commands for all non-wrist arm joints/torso
 and zero base commands. Segmentation visibility exceeds 95% overall in every
 episode, but brief manipulation occlusions remain for E1 review.
+
+## Follow-up motion guards (2026-09-27)
+
+The compact carry targets are torso .38 m; shoulder pan -.37, shoulder lift -.8,
+upper-arm roll 1.7, elbow flex 2.1, forearm roll -.6, wrist flex .5 and wrist roll
+-.4 rad. They are assigned by joint name and reserved in the roll budget before
+grasp selection. The published planner normally drove from its lifted pose and
+used a Cartesian carry only as recovery; it did not define one fixed carry target.
+
+The entire timed approach/lift/carry path is checked between knots against all
+fixtures. At lift start only, an explicitly named payload/counter contact may
+remain from the object's support; every subsequent sample must be collision free.
+Robot/upper-handle contacts never receive that allowance. Failed continuations
+are rejected before grasp; the physical lift is checked again with the actual
+attachment. Pouring still changes only wrist_roll, with a 165-degree goal and
+155-degree checker threshold. The gaze remains on the condiment until the lift
+and carry fold finish, then switches to the bowl.
+
+The 100-step cue pause is the sole approved D6 exception. Source 20 Hz recordings,
+native replay and true held-action 10 Hz replay are unchanged. Earlier rollout
+success rates do not qualify profile v7; full checklist and human review remain
+separate from task success.

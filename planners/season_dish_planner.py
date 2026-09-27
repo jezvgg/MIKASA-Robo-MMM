@@ -42,6 +42,10 @@ from utils.mikasa.execution_noise import configure_execution_noise, transfer_pha
 # imports on a Mac and tests/test_season_dish_oracle.py runs the *real* solve()
 # against tools/stub_planner.py (K38).
 
+from planners.season_dish_paths import CARRY_TARGETS, carry_goal, grasp_with_continuation, initial_support_contacts
+from planners.oracle.path_clearance import path_clear
+from planners.oracle.straight_paths import straight_plan, execute_straight
+
 WHO = "season_dish_planner"
 
 # Distance the fingers close over, used to sink the grasp into the object.
@@ -864,16 +868,16 @@ def drive_to_counter(env, planner, dock, face):
 
 
 def navigation_posture(env, planner, task):
-    """Use the robot's canonical rest targets for loaded floor travel."""
-    joints = task.agent.robot.active_joints_map
-    rest = np.asarray(task.agent.keyframes["rest"].qpos)
-    names = [*task.agent.controller.controllers["arm"].config.joint_names,
-             "torso_lift_joint"]
-    targets = {name: float(rest[int(joints[name].active_index[0])]) for name in names}
+    """The one fixed, compact loaded carry posture from the reviewed earlier version."""
     planner.planner.update_from_simulation()
+    current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
+    path = planner.planner.plan_qpos_line(carry_goal(task, current), current,
+        time_step=task.control_timestep, ref_yaw=float(current[2]), qpos_step=.02)
+    if path.get("status") != "Success" or not path_clear(planner, current, path["position"]):
+        return fail(env, "compact carry path refused")
+    say(env, "compact condiment carry", knots=len(path["position"]))
     with transfer_phase(planner, "fold for navigation"):
-        return common.plan_joints(env, planner, task, targets,
-            label="canonical rest for navigation", tries=1, who=WHO, line_only=True)
+        return planner.follow_forward_path_w_refinement(path, refine=True)
 
 
 def cue_head_target(task):
@@ -1082,26 +1086,7 @@ def try_grasp(env, planner, task, obj, grasp, reach, target_pad: float | None = 
     # (`no pour pose reached`, `distractor moved during the drive`). Withdrawn.
     # Keep looking at the condiment until the grasp is complete.
     planner.track_target(lambda: _np(obj.pose.p)[0])
-    res, grasped = common.try_grasp(
-        env, planner, task, obj, grasp, reach,
-        keepout_actors=[task.shaker, task.condiment_bottle],
-        # Per-actor since K79c; the target keeps the pad an approach leg can live with,
-        # the other condiment may take a wider one (it is never approached).
-        keepout_pad=[(APPROACH_TARGET_PAD if target_pad is None else float(target_pad))
-                     if a is obj else DISTRACTOR_KEEPOUT_PAD
-                     for a in (task.shaker, task.condiment_bottle)],
-        resync_before_grasp=RESYNC_BEFORE_GRASP, n_init_qpos=GRASP_N_INIT_QPOS,
-        close_on_contact=CLOSE_ON_CONTACT, approach_draws=APPROACH_DRAWS,
-        grasp_max_knots=GRASP_LEG_MAX_KNOTS, grasp_knot_draws=GRASP_LEG_KNOT_DRAWS,
-        approach_max_knots=APPROACH_MAX_KNOTS, approach_clearance_pad=APPROACH_CLEARANCE_PAD,
-        grasp_stop_on_touch=GRASP_STOP_ON_TOUCH, grasp_stretch=GRASP_LEG_STRETCH,
-        approach_by_line=(APPROACH_BY_LINE if by_line is None else bool(by_line)),
-        freeze_torso=GRASP_TORSO_RESERVE > 0.0,
-        approach_stretch=stretch_for(obj, grasp), approach_stretch_tail=APPROACH_STRETCH_TAIL,
-        narrow_approach=NARROW_APPROACH, abort_on_touch=ABORT_ON_TOUCH,
-        approach_aperture=APPROACH_APERTURE, approach_skim_cap=APPROACH_SKIM_CAP,
-        full_dof_reach=FULL_DOF_REACH,
-    )
+    res, grasped = grasp_with_continuation(env, planner, task, obj, grasp, reach)
     if res != -1 and not grasped and not common.stopped_by_horizon(planner):
         _say_close_miss(env, task, obj)
     return res, grasped
@@ -1316,7 +1301,8 @@ def _solve(
     planner.prefer_low_roll_ik()
     # Keep canonical rest inside every later roll window, even if the sampled
     # starting jitter lies on the other side of its exact joint values.
-    reserved = np.asarray(env.unwrapped.agent.keyframes["rest"].qpos)[planner._roll_indices]
+    reserved = np.asarray([CARRY_TARGETS[name] for name in
+                           ("upperarm_roll_joint", "forearm_roll_joint", "wrist_roll_joint")])
     planner._roll_low = np.minimum(planner._roll_low, reserved)
     planner._roll_high = np.maximum(planner._roll_high, reserved)
     configure_execution_noise(
@@ -1430,7 +1416,8 @@ def _solve(
         hand = grasp_ * tcp_to_hand
         camera = next(c for c in task_.agent._sensor_configs if c.uid == "fetch_hand")
         camera_pose = hand * camera.pose[0].sp
-        if (camera_pose.p[2] - hand.p[2] < 0.02
+        if (abs(grasp_.to_transformation_matrix()[2, 2]) > math.sin(math.radians(2))
+                or camera_pose.p[2] - hand.p[2] < 0.02
                 or camera_pose.to_transformation_matrix()[2, 2] < 0.2):
             say(env_, "reject inverted hand-camera grasp")
             return -1, False
@@ -1526,7 +1513,7 @@ def _solve(
         # shoulder_lift limit) and RRTConnect is randomized: on seed 12 it returned
         # `Approximate solution` twice at the same reachable pose (IK found it). One
         # more draw of the same grasp before flipping the closing.
-        say(env, "grasp retry, same closing (a refused plan; RRT is randomized)")
+        say(env, "retry connected grasp with additional IK candidates")
         planner.planner.update_from_simulation()
         if REREAD_BEFORE_RETRY:
             aimed = reaim_from_live(1.0)
@@ -1712,197 +1699,8 @@ def _solve(
                 if climbed or out_of_budget:
                     break
             if not climbed:
-                # Last resort, and the only stage here that moves the base and the arm
-                # in one plan: `move_base_x_and_manipulation` frees root_x and every arm
-                # joint at once, so the base slides while the hand reaches instead of
-                # parking first and reaching after. Its mask is world-x, which the
-                # inherited comment calls "the robot's lateral axis" at yaw pi/2 — true,
-                # and on kitchen 102 the counter runs along world x, so lateral *is* the
-                # useful direction. Worth one plan: every refusal above was found with
-                # the base pinned, and freeing it is a degree of freedom the whole ladder
-                # never had.
-                # Before the arc: come at the object from above instead of level with
-                # it. Every refusal so far is the hand working in the plane of the
-                # counter — `wrist_flex_link <-> counter_main` — and a vertical approach
-                # puts the wrist above the worktop rather than through it. Tried as a
-                # global setting earlier and it was no better across the eval set, which
-                # is why it is a rung and not the default.
-                # Running this rescue EARLY — at the top of the ladder, while the object is
-                # still standing rather than ninth after it is flat — was built and withdrawn
-                # (K79k). The gap was real: on seed 71 the three top-down rungs aim at z 0.942,
-                # 2.2 cm over the worktop, because the object is already toppled by then, and
-                # top-down at its *standing* pose (z 0.984, 6.4 cm clearance) had never been
-                # tried. It fires (the trace shows `from above (early)`) and **both persistent
-                # failures still fail**, so no sweep was spent on it: a rescue that does not
-                # convert the two seeds it was built for has no mechanism left to help a
-                # population. **And tried again, conditionally,
-                # in K79j** — top-down first only when the grip sits under 9 cm over the
-                # worktop, which selects the shaker (6.45 cm) and not the bottle (12.67 cm).
-                # The motivation was sound: both persistent failures target the shaker, 0 of
-                # 12 bottle-target episodes fail, and five `wrist_flex_link<->counter_main`
-                # refusals say the level approach drags the wrist through the counter. Seed
-                # 71 — which had resisted every other intervention that day — passed with it.
-                # The population did not: dev 78->67/80, held 95->89/100, **173 -> 156/180**,
-                # 24 failures against 7. One seed passing is not evidence. This stays a rung,
-                # and the sentence above was already warning about it.
-                # Deliberately the *lowest* height, not the highest: the +2.5 cm rung
-                # exists to lift the wrist out of the counter, and a hand coming straight
-                # down is already clear of it. Higher here only moves the fingers toward
-                # the rim, and seed 16 showed what that costs — all three top-down poses
-                # were reached to within 5 mm (`reached=True`) and the gripper still
-                # closed on nothing. Grip the body, not the lip.
-                # K76: read the object HERE, not from the `obb`/`mesh` captured before the
-                # first attempt. K63 put the live re-read at the top of each `dz` rung and
-                # this block was missed, so the top-down rescue — the last thing tried
-                # before the arc — aimed wherever the object used to be. Three independent
-                # per-seed post-mortems measured the same signature: seed 66 planned 10.3 cm
-                # from the bottle, seed 54's three rungs missed by 10.1-12.7 cm, and both
-                # reported `reached=True` while closing on bare counter. That is also the
-                # real mechanism behind the seed-16 note below, which blamed the grip height.
-                live_top = target.get_first_collision_mesh(to_world_frame=True)
-                obb_top = live_top.bounding_box_oriented if live_top is not None else obb
-                mesh_top = live_top if live_top is not None else mesh
-                centre_top = np.asarray(obb_top.center_mass, dtype=np.float64)[:2]
-                # K81: the note above is right, and the rung it defends has still never
-                # worked — 0 rescues in 60 attempts over three 180-seed sweeps, against
-                # 231 grasps the side ladder wins. Probed at the recorded toppled poses of
-                # seeds 129/136/177 with this same geometry: **0 of 12 poses have IK at
-                # every height from 2 to 16 cm over the worktop**, so there is no height
-                # to move it to and nothing here to tune. `MIKASA_SKIP_TOPDOWN=1` drops it.
-                top_grasp, top_reach = raise_grasp_to(
-                    *grasp_geometry(task, obb_top, np.array([0.0, 0.0, -1.0]), target_closing, grasp_info),
-                    max(float(obb_top.center_mass[2]), float(mesh_top.bounds[1][2]) - 2 * FINGER_LENGTH),
-                )
-                yaws = () if SKIP_TOPDOWN_RESCUE else GRASP_YAWS_DEG[:3]
-                if SKIP_TOPDOWN_RESCUE:
-                    say(env, "skipping the from-above rescue (0 of 60 historic successes)")
-                # The flipped closing direction was tried here too and withdrawn (K55):
-                # `target_closing` is seeded from the gripper's level-approach axis, so a
-                # vertical approach wanting it turned was the obvious next suspect after
-                # the grip height. All five top-down attempts on seed 16 — three at the
-                # seeded closing, two flipped — reached and closed on nothing. Whatever
-                # that grip misses, it is not the closing axis.
-                for yaw_deg, g_try, r_try in grasp_yaw_candidates(
-                        top_grasp, top_reach, centre_top, angles_deg=yaws):
-                    say(env, "grasp retry, from above", yaw_deg=yaw_deg,
-                        grasp=[round(float(v), 3) for v in g_try.p])
-                    if RUNG_BACK_OFF and hand_at_object:
-                        r_back = back_off_from_the_object(env, planner, task, why="the last close missed")
-                        if r_back != -1 and common.stopped_by_horizon(planner):
-                            return r_back
-                        hand_at_object = False
-                    planner.open_gripper()
-                    planner.planner.update_from_simulation()
-                    res, grasped = try_grasp(env, planner, task, target, g_try, r_try)
-                    hand_at_object = res != -1
-                    if res != -1 and common.stopped_by_horizon(planner):
-                        return res
-                    if res != -1 and grasped:
-                        grasp, reach = g_try, r_try
-                        climbed = True
-                        say(env, "grasped from above", yaw_deg=yaw_deg)
-                        break
-            if not climbed:
-                say(env, "grasp ladder exhausted; one plan for base and arm together",
-                    out_of_budget=out_of_budget)
-                # The ladder leaves the hand wherever its last attempt stopped, which is
-                # against the object: the arc's first refusal was
-                # `l_gripper_finger_link <-> shaker` on the *start* state, and mplib will
-                # not plan out of a start it considers in collision. Open and back off
-                # first — MIKASA-Robo-VLA's oracle does the same thing before its retry.
-                planner.open_gripper()
-                # K79: the retreat's result is *checked*. `lift_hand` plans with
-                # `plan_screw` alone — no RRT fallback — so a saturated torso is an
-                # outright -1 that executes zero steps. Measured on a failing seed-80
-                # capture: `joint limit at index [3] after 1 step(s), 0.000 of the twist
-                # left`, the hand never backed off, and the 26-step sweep below then drove
-                # through the distractor at counter height and moved it 0.1227 m — 23%
-                # past `distractor_move_tol`. It cost nothing there only because that
-                # episode was already -1; on an episode whose grasp succeeds it voids the
-                # run on `distractor_ok`.
-                retreat = planner.lift_hand(delta_h=ARC_RETREAT_M)
-                if retreat == -1:
-                    # Up is blocked by the torso, which says nothing about the arm's
-                    # reach: back off along the hand's own approach axis instead, through
-                    # `static_manipulation`, which does have the RRT fallback `lift_hand`
-                    # lacks.
-                    tcp_now = task.agent.tcp.pose[0].sp
-                    back = sapien.Pose(p=tcp_now.p, q=tcp_now.q) * sapien.Pose([0, 0, -ARC_RETREAT_M])
-                    say(env, "arc retreat refused upward; backing off along the approach")
-                    retreat = planner.static_manipulation(back, disable_lift_joint=False)
-                if retreat == -1:
-                    # Both retreats refused. Do NOT skip the arc: that was tried and
-                    # measured worse (dev 77->76, held 96->95, and seed 80 came back).
-                    # The arc from a colliding start is usually refused too, but not
-                    # always, and refusing it outright converts a chance into a certain
-                    # failure. Widen the keep-out for that leg instead — the hand is
-                    # against the object and this leg's tracking error is 7-9 cm against
-                    # a 3 cm pad — so the attempt survives and the damage does not.
-                    say(env, "arc retreat refused both ways; widening the keep-out")
-                    arc_pad = ARC_KEEPOUT_PAD
-                else:
-                    arc_pad = GRASP_KEEPOUT_PAD
-                if common.stopped_by_horizon(planner):
-                    say(env, "stopped by the horizon during the arc retreat")
-                    return retreat
-                planner.planner.update_from_simulation()
-                # K77: the arc frees root_x *and* every arm joint at once, so it sweeps
-                # the longest path across the counter — and it was the last unguarded
-                # caller. On seed 71 it swung the gripper body and wrist through the
-                # distractor at counter height, moving it 0.131 m (31% past tolerance)
-                # while the episode was booked as a plain `no plan`.
-                #
-                # Its poses were stale too: `grasp`/`reach` are only reassigned on a
-                # *successful* rung, so after a ladder that changed nothing they still
-                # aim where the object was before the first attempt — 0.228 m away on
-                # this seed. K76 fixed exactly this for the top-down rung and stopped one
-                # block short.
-                live_arc = target.get_first_collision_mesh(to_world_frame=True)
-                if live_arc is not None:
-                    obb_arc = live_arc.bounding_box_oriented
-                    grasp, reach = raise_grasp_to(
-                        *grasp_geometry(task, obb_arc, ee_direction, target_closing, grasp_info),
-                        max(float(obb_arc.center_mass[2]),
-                            float(live_arc.bounds[1][2]) - GRASP_BELOW_TOP),
-                    )
-                with common.keepout(planner, [task.shaker, task.condiment_bottle],
-                                    pad=arc_pad):
-                    arc = planner.move_base_x_and_manipulation(reach)
-                if arc != -1 and common.stopped_by_horizon(planner):
-                    return arc
-                if arc != -1:
-                    planner.planner.update_from_simulation()
-                    with common.keepout(planner, [task.shaker, task.condiment_bottle],
-                                        pad=arc_pad):
-                        arc = planner.static_manipulation(grasp, disable_lift_joint=False)
-                    if arc != -1 and common.stopped_by_horizon(planner):
-                        return arc
-                    if arc != -1:
-                        arc = planner.close_gripper()
-                        grasped = bool(_np(task.agent.is_grasping(target)).any())
-                        if arc != -1 and grasped:
-                            res = arc
-                            climbed = True
-                            say(env, "grasped after moving the base and the arm together")
-            # A re-dock rung — drive the base to the target's own station after the arc
-            # fails, then retry the grasp — was built and withdrawn (K79b). K55 withdrew
-            # the same idea for two reasons and BOTH are now measurably gone: `drive_base`
-            # refused because it planned a pure base translation with fifteen joints
-            # (`freeze_arm=True`, K74, fixes exactly that), and turn-drive-turn "spent what
-            # was left of the horizon" when episodes used ~382 of 1100 — these end at 387
-            # with 713 unused. So it was rebuilt on a genuinely changed premise, and it
-            # still does not pay: it fired on **all five** remaining grasp failures and
-            # converted **none**. The drive itself is not the problem — `rotate_base_z`
-            # reports `achieved=-1.5731 residual=-0.0001 jammed=False` out and back, so the
-            # base goes where it is sent, and `out_of_budget=False` throughout. The grasp
-            # is refused from the new stance too. Whatever these seeds need, it is not a
-            # base pose the arm can be driven to. Cost if kept: two ~56-knot rotations on
-            # a path that already failed.
-            if not climbed:
-                why = ("ran out of step budget" if out_of_budget
-                       else "every wrist yaw and grip height refused, the arc failed, "
-                            "and so did the re-dock")
-                return fail(env, f"grasp the target (retry): {why}", out_of_budget=out_of_budget)
+                return fail(env, "no horizontal grasp with a checked vertical lift and carry",
+                            out_of_budget=out_of_budget)
         if not grasped:
             return fail(env, "grasp the target: fingers closed but agent.is_grasping(target) is False "
                              "after both closing directions")
@@ -1912,8 +1710,8 @@ def _solve(
             distractor_moved=round(float(_np(res[-1]["distractor_moved"]).reshape(-1)[0]), 3))
         return res
     say(env, "grasped", distractor_ok=True)
-    planner.track_target(lambda: _np(task.bowl.pose.p)[0])
-    planner._grasp_branch = {}
+    # Keep observing the condiment until its lift is complete.
+    # Keep the selected elbow/wrist branch through lift and carry.
     planner.planner.update_from_simulation()
     hold_object_in_planner(env, planner, task, target, held=True)
 
@@ -1921,136 +1719,21 @@ def _solve(
     # that runs after the grasp (K77) — but never the target, which is held.
     distractor = task.condiment_bottle if target is task.shaker else task.shaker
 
-    # -- STAGE 3: lift, torso frozen, over the neighbour (K40) --------------------------
-    # The held object HANGS below the TCP — grasped GRASP_BELOW_TOP under its top, its
-    # bottom is (height - GRASP_BELOW_TOP) lower: 6 cm on the 9 cm shaker, 13 cm on the 16 cm
-    # bottle. K40's margin over the neighbour was taken from the TCP, so the object's bottom
-    # sat AT the neighbour's top through the base's 180-degree turn to the bowl dock and
-    # swept it (1847 @0.15, 2026-09-06: distractor moved 0.18 m during the drive). Measure
-    # the hang from the object's own mesh and lift the BOTTOM over the neighbour.
-    hang = 0.0
-    if LIFT_HANG_AWARE:
-        hang = max(0.0, float(grasp.p[2]) - float(mesh.bounds[0][2]))
-    lift_z = max(float(grasp.p[2]) + LIFT_ABOVE_GRASP, tallest_top + LIFT_OVER_NEIGHBOUR,
-                 tallest_top + hang + LIFT_BOTTOM_CLEAR)
-    lift_z = float(noise.point("lift_height", [grasp.p[0], grasp.p[1], lift_z],
-                               axes=(False, False, True))[2])
-    say(env, "lift", lift_z=round(lift_z, 3), tallest_top=round(tallest_top, 3), hang=round(hang, 3))
-    # Planned with the same keep-out as the approach (K77). It was missing here, and the
-    # lift is where an unguarded RRT does the most damage: the payload hangs up to
-    # 12.8 cm below the TCP, so a lateral excursion drags a lever of glass across the
-    # counter. Measured on seed 63 — the *guarded* approach RRT left the distractor at
-    # 0.0001 m, the *unguarded* lift RRT moved it 0.158 m against a 0.10 m tolerance,
-    # after flying a 1.5 m loop for a 15 cm vertical move. The object is already attached
-    # in the planning world here, so mplib checks the payload, not merely the links.
-    # Prefer a height the screw can actually reach (K77). The lift is a pure vertical
-    # translation, and handing it to RRTConnect is where the worst damage in this oracle
-    # happens: measured, the screw was discarded with 0.026 of the twist left (5 mm of a
-    # 193 mm lift) and the fallback drove the TCP to 0.21 m *below* the counter, raking
-    # the object out of the fingers (seed 30); on another it flew a 1.78 m path for a
-    # 0.19 m move and knocked the distractor onto the floor (seed 8). Shaving a couple of
-    # centimetres off the target is free — the height only has to clear the neighbour —
-    # so probe downwards and take the first height that plans straight. A probe executes
-    # nothing, so a rejected rung costs no episode steps.
-    lift_floor = max(float(grasp.p[2]) + 0.02, tallest_top + LIFT_OVER_NEIGHBOUR * 0.5,
-                     tallest_top + hang + 0.02)
-    lift_rungs = [lift_z] + [z for z in (lift_z - 0.02, lift_z - 0.04, lift_z - 0.06)
-                             if z >= lift_floor]
-    lift_target = sapien.Pose(np.array([grasp.p[0], grasp.p[1], lift_z]), grasp.q)
-    lift_freeze = True
-    found = False
-    # Two passes: torso frozen first, then torso free. K40 freezes it so the lift cannot
-    # spend the torso, and that stands as the default — but the reason is keeping the
-    # object clear of its neighbour during the *base turn*, not the lift itself, and the
-    # torso is exactly the joint that makes vertical motion cheap. Measured: with it
-    # frozen the refusal moves from `forearm_roll` to `joint limit at index [7]`
-    # (`shoulder_lift`) at every height offered — the arm alone cannot span the rise from
-    # those configurations, so the choice is a torso-driven lift or an RRT that rakes the
-    # counter. A probe executes nothing, so the whole search is free in episode steps.
-    for freeze in (True, False):
-        for z_try in lift_rungs:
-            cand = sapien.Pose(np.array([grasp.p[0], grasp.p[1], z_try]), grasp.q)
-            if common.screw_plans(planner, cand, disable_lift_joint=freeze):
-                lift_target, lift_freeze, found = cand, freeze, True
-                if z_try != lift_z or not freeze:
-                    say(env, "lift takes a screw-reachable rung",
-                        asked=round(float(lift_z), 3), taking=round(float(z_try), 3),
-                        torso_frozen=freeze)
-                break
-        if found:
-            break
-    if not found:
-        # K79q: the exhausted probe was silent — its only trace was the *absence* of the
-        # line above, and it is the precise predictor of the RRT dive that follows (the
-        # analyst on seed 171: eight rungs tried, none screw-reachable, no event emitted).
-        # Refusing the RRT lift here was built and withdrawn (K79q). The mechanism is real
-        # — on seed 171 RRTConnect answered a *pure vertical* lift with a 142-knot path
-        # that descends 13.6 cm, puts the gripper ~7 cm below the counter surface and
-        # back-drives the frozen torso to a 72 N tracking error, raking the object out of
-        # the fingers. But it is the exception: this probe exhausts on **10 of 180**
-        # episodes and the RRT lift usually works, so refusing it measured **166/180
-        # against 173/180**, seven seeds worse, with nine new `FAILED: lift`. Same shape as
-        # the arc-refusal mistake — removing a path that mostly works costs more than the
-        # harm it prevents. The diagnostic below stays, because the silence was the only
-        # predictor of the dive.
-        say(env, "no screw-reachable lift rung; the lift falls to RRT",
-            asked=round(float(lift_z), 3), rungs=len(lift_rungs) * 2,
-            floor=round(float(lift_floor), 3))
-    # **Only the distractor.** The target is attached to the gripper by now, and padding
-    # it too gives the held object a free-standing proxy to collide with — its own. That
-    # mistake cost 34 of 80 seeds a `FAILED: lift` in one measured sweep (39/80 against a
-    # 75/80 baseline); the approach in `try_grasp` pads both only because nothing is held
-    # there yet.
-    res = -1
-    if not found and LIFT_BY_TORSO:
-        # The torso is the one joint that moves the hand straight up with the arm as it
-        # stands — no swing, no dive. Between the exhausted screw probe and the RRT
-        # (which on 377 @0.15 answered a 0.19 m rise with a path that flung the
-        # condiment to the floor — the owner's "rotates the arm a lot lifting"): raise
-        # the torso by the rise, as a joint LINE, highest rung first; only what fits
-        # under the torso's stop. Line only — a blocked line falls to the RRT as before.
-        jm = getattr(task.agent.robot, "active_joints_map", None)
-        if jm is None or "torso_lift_joint" not in jm:
-            lift_rungs_torso: list = []     # a robot without the joint map: the RRT as before
-            say(env, "no torso joint map; the RRT")
-        else:
-            lift_rungs_torso = list(lift_rungs)
-            t_idx = int(jm["torso_lift_joint"].active_index[0])
-            t_now = float(_np(task.agent.robot.get_qpos()).reshape(-1)[t_idx])
-            t_max = float(_np(jm["torso_lift_joint"].limits).reshape(-1)[-1])
-        for z_try in lift_rungs_torso:
-            dz = float(z_try) - float(grasp.p[2])
-            if dz < 0.05 or t_now + dz > t_max + 1e-6:
-                continue
-            with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-                r = common.plan_joints(env, planner, task, {"torso_lift_joint": t_now + dz},
-                                       label="lift by the torso", tries=1, who=WHO,
-                                       line_only=True)
-            if r != -1:
-                say(env, "lift by the torso", rise=round(dz, 3), to_z=round(float(z_try), 3),
-                    torso=round(t_now + dz, 3))
-                res = r
-                break
-        if res == -1:
-            say(env, "no torso line fits the lift; the RRT")
-    if res == -1:
-        with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-            if not found and LIFT_MAX_KNOTS is not None:
-                # No screw rung and no torso room (377 @0.15: torso 0.368 of 0.386 at
-                # the grasp): the RRT lift, drawn up to LIFT_KNOT_DRAWS times and the
-                # shortest taken, a draw under LIFT_MAX_KNOTS accepted at once — K59's
-                # cap: every drop it measured rode a path of >= 173 knots, none under.
-                say(env, "lift by RRT under a knot cap", max_knots=LIFT_MAX_KNOTS,
-                    draws=LIFT_KNOT_DRAWS)
-                res = common.arm_move(env, planner, lift_target, who=WHO, stage="lift",
-                                      disable_lift_joint=lift_freeze, tries=1,
-                                      max_knots=LIFT_MAX_KNOTS, knot_draws=LIFT_KNOT_DRAWS)
-            else:
-                res = planner.static_manipulation(lift_target, disable_lift_joint=lift_freeze)
+    # The grasp was selected only if a vertical lift and carry both planned.
+    # Replan the same straight lift from the physical grasp, with the actual payload.
+    tcp = task.agent.tcp.pose[0].sp
+    lift_z = float(planner._season_lift_z)
+    lift_target = sapien.Pose([tcp.p[0], tcp.p[1], lift_z], tcp.q)
+    say(env, "lift", lift_z=lift_z, motion="straight_vertical_same_elbow")
+    with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
+        current = task.agent.robot.get_qpos()[0].cpu().numpy()
+        support = initial_support_contacts(planner, target, current)
+        path = straight_plan(planner, lift_target, initial_contacts=support)
+        res = execute_straight(planner, path)
     if res != -1 and common.stopped_by_horizon(planner):
         return res
     if res == -1:
-        return fail(env, "lift")
+        return fail(env, "straight lift from physical grasp refused")
 
     # Post-conditions the lift never had (K77). There are `distractor_ok` checkpoints
     # after the grasp and after the drive but none here, and `distractor_moved` is an
@@ -2088,6 +1771,12 @@ def _solve(
         say(env, "missed: distractor moved while folding for navigation")
         return res
     planner.planner.update_from_simulation()
+
+    # Pour preparation may bend the wrist the other way, but not flip the elbow.
+    elbow_index = int(task.agent.robot.active_joints_map["elbow_flex_joint"].active_index[0])
+    planner._grasp_branch = {elbow_index: 1}
+
+    planner.track_target(lambda: _np(task.bowl.pose.p)[0])
 
     # -- STAGE 4: drive to the bowl dock -----------------------------------------------------
     dock = _np(task._bowl_dock_np)[0].astype(np.float64)
