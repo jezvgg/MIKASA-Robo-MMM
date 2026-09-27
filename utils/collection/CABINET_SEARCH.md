@@ -203,3 +203,33 @@ the requirement of no regressions. Faster contact motion is not retained.
 The empty-inspection rest removal remains and shortens the workflow without
 faster door contact. V7 and v8 records remain historical candidates. A fresh
 profile-v9 fixed pool uses the same 40 seeds and both physical replays.
+
+## Final profile v9 fixed-pool result
+
+The development pool `cabinet-final-003`, seeds 7800000–7800039, succeeds
+40/40; every success passes native 20 Hz replay and physical held-action 10 Hz
+replay. It covers all four target compartments. Every empty inspection goes
+to closing without rest, and all episodes finish at the successfully nudged can.
+The inclusive 0.02 m nudge boundary is tested for all four compartments. Sixteen
+additional controlled-state checks on the actual environment confirm that
+discovery, vertical settling and a 0.019 m push fail; a 0.025 m horizontal push
+succeeds without a home return. These state edits are isolated test setup, never
+demonstrations. Repeated inspection and skipped-home counterexamples remain.
+
+All 40 final command traces match the .20/.05 speed calibration at the recorded
+float32 precision, and the robot states match exactly. D6 fails on 7800013 and
+7800017. The .25/.05 candidate newly fails 7800019; .30/.05 fails four episodes,
+and .30/.10 fails 21. No accelerated contact speed is retained.
+
+The all-state three-camera audit finds minimum per-episode visibility 88.38%;
+centered parking occludes the home mark, so E1 remains unqualified. All 111 door
+grasps share the published negative-elbow/positive-wrist branch and keep the
+hand camera above the gripper. Roll limits, individual turns and gripper timing
+pass. Published door work still reverses in 40/40 episodes, with more than two
+base direction changes in 36/40: D5 is not qualified and no waiver is assumed.
+
+Ten complete three-camera episodes and 30 storyboards are ready for owner E5.
+All 20 Hz frames of the ten full episodes are retained in original-resolution
+camera videos; every decoded frame was compared with its clean render. The
+combined viewer is 10 Hz and removes no pauses. This is a development pilot,
+not a qualified mass dataset or a new full LeRobot export.

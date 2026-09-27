@@ -37,10 +37,11 @@ def fixture(target):
 
 
 @pytest.mark.parametrize("target", range(4))
-def test_nudge_ends_at_can_without_final_return(target):
+@pytest.mark.parametrize("moved", [.02, .03])
+def test_nudge_ends_at_can_without_final_return(target, moved):
     tick, state = fixture(target)
     tick(home=True)
-    info = tick(target, moved=.03)
+    info = tick(target, moved=moved)
     assert info["found"].item() and info["success"].item()
     assert not info["at_home"].item()
 
