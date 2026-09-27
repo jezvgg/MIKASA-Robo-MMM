@@ -18,6 +18,7 @@ from my_scenes.same_drawer import DRAWER_ART_SUFFIX, DRAWER_FIXTURES
 from planners.oracle import oracle_common as common
 from planners.oracle.rest_paths import curved_rest
 from planners.oracle.settling import ReleaseSettling
+from planners.oracle.straight_paths import straight_plan, execute_straight
 from planners.same_drawer_paths import DrawerPathPlanner
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
@@ -165,7 +166,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         planner._grasp_branch = {}
         return result
 
-    def stow(*, from_handle=False):
+    def stow(*, from_handle=False, from_apple=False):
         planner._grasp_branch = {}
         rest = np.asarray(task.agent.keyframes["rest"].qpos)
         joints = task.agent.robot.active_joints_map
@@ -176,20 +177,25 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         # The selected hand withdrawal must clear the entire rest trajectory,
         # not just the handle. Extend that same straight retreat in bounded
         # increments if the countertop still obstructs the fold.
-        for attempt in range(4 if from_handle else 1):
+        attempts = 4 if from_handle else 3 if from_apple else 1
+        for attempt in range(attempts):
             result = common.plan_joints(env, planner, task, targets,
                                        label="fold to canonical rest", tries=1,
                                        who=WHO, line_only=True)
             if not stopped(result):
                 return result
             result = curved_rest(env, planner, task, targets, who=WHO)
-            if not stopped(result) or not from_handle or attempt == 3:
+            if not stopped(result) or attempt == attempts - 1:
                 return result
             tcp = task.agent.tcp.pose[0].sp
             clearance = sapien.Pose(
-                tcp.p - 0.04 * tcp.to_transformation_matrix()[:3, 2], tcp.q)
-            result = move("extend handle withdrawal for rest clearance", clearance,
-                          noisy=False, contact=True, contact_stretch=1)
+                tcp.p - (0.08 if from_apple else 0.04) * tcp.to_transformation_matrix()[:3, 2], tcp.q)
+            if from_apple:
+                log("extend open-hand apple clearance before rest", goal=clearance.p.tolist())
+                result = execute_straight(planner, straight_plan(planner, clearance))
+            else:
+                result = move("extend handle withdrawal for rest clearance", clearance,
+                              noisy=False, contact=True, contact_stretch=1)
             if stopped(result):
                 return result
             planner.planner.update_from_simulation()
@@ -221,7 +227,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
             reach = noise.pose("approach drawer", reach)
             log("approach drawer", goal=reach.p.tolist())
             result = approach_for_contact(
-                reach, grasp, 120, torso_height=0.10 if middle_handle else None,
+                reach, grasp, 120, torso_height=(0.10 if middle_handle else
+                                                0.20 if not opening else None),
                 contact_context=lambda: common.contact_stroke(
                     planner, [DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX]))
             if stopped(result):
@@ -334,13 +341,14 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                 finally:
                     planner.max_refine_steps = previous_refine_limit
             else:
-                # Contact compliance makes base displacement differ from slider
-                # travel. Stop on the drawer position at a gentle approach speed;
-                # the extra 4 cm only bounds a refused/incomplete closing stroke.
-                log("close drawer with base", max_travel_m=amount + 0.04, speed_m_s=0.06)
-                result = planner.idle_steps(t=1) if amount <= cfg.closed_tol else planner.drive_straight(
-                    amount + 0.04, v=0.06,
-                    stop_when=lambda: float(array(task.drawer_open_amounts())[0, drawer]) <= cfg.closed_tol)
+                # Extend the hand along the physical slider. The open palm
+                # pushes through contact; the base and finger command stay still.
+                tcp = task.agent.tcp.pose[0].sp
+                goal = sapien.Pose(tcp.p + [0, amount + 0.04, 0], tcp.q)
+                log("close drawer with arm", max_travel_m=amount + 0.04)
+                result = (planner._guard.last_step if amount <= cfg.closed_tol else
+                          execute_straight(planner, straight_plan(planner, goal),
+                            stop_when=lambda: float(array(task.drawer_open_amounts())[0, drawer]) <= cfg.closed_tol))
             if stopped(result):
                 return result, False
             amount = float(array(task.drawer_open_amounts())[0, drawer])
@@ -428,6 +436,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                                        np.array([1., 0., 0.]), centre)
     reach = sapien.Pose(grasp.p + [0, -0.06, 0.06], grasp.q)
     reach = noise.pose("apple approach", reach)
+    planner.set_grasp_branch(elbow=1, wrist=1)
     result, held = common.try_grasp(env, planner, task, task.apple, grasp, reach,
         resync_before_grasp=True, close_on_contact=True, n_init_qpos=REACH_N_INIT,
         approach_by_line=True, approach_max_knots=160, grasp_max_knots=80, grasp_knot_draws=1)
@@ -509,15 +518,31 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     if stopped(result):
         return result
     tcp = task.agent.tcp.pose[0].sp
-    face = task.agent.base_link.pose[0].sp.to_transformation_matrix()[:3, 0]
-    result = move("withdraw from apple", sapien.Pose(tcp.p - 0.18 * face, tcp.q))
+    planner.planner.update_from_simulation()
+    # The former horizontal joint-line retract swept a finger through the
+    # released apple (7900002/7900017). Exit vertically first, with a straight
+    # finger-axis retreat as the only fallback. Keep the apple an obstacle.
+    away = -tcp.to_transformation_matrix()[:3, 2]
+    candidates = [("lift open hand from apple", np.array([0., 0., 0.10])),
+                  ("withdraw open hand along fingers", 0.14 * away),
+                  ("withdraw open hand along fingers", 0.18 * away)]
+    result = -1
+    for label, offset in candidates:
+        clearance = sapien.Pose(tcp.p + offset, tcp.q)
+        path = straight_plan(planner, clearance)
+        if path is not None:
+            log(label, goal=clearance.p.tolist(), knots=len(path["position"]))
+            result = execute_straight(planner, path)
+            break
     if stopped(result):
         return result
     result = wait_for_state("wait for apple to settle",
                             lambda: bool(array(task.apple_done).item()), 35, result)
     if stopped(result) or not bool(array(task.apple_done).item()):
         return result
-    result = stow()
+    if bool(array(task.apple_retention_violated).item()):
+        return common.fail(env, WHO, "apple left the plate after release")
+    result = stow(from_apple=True)
     if stopped(result):
         return result
     # Approach the left-hand dock from the open aisle. A direct westward
