@@ -1,5 +1,5 @@
 {
-  "profile_version": 9,
+  "profile_version": 10,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -163,5 +163,5 @@
     "recipe_seed": 4816,
     "adds_physics_state": false
   },
-  "motion_revision": "upright_payload_complete_roll_history_v2"
+  "motion_revision": "upright_payload_complete_roll_history_v3"
 }

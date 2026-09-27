@@ -121,11 +121,6 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=160):
         contact=straight_plan(planner,grasp,current=q)
         reasons['contact '+str(contact is not None)]+=1
         if contact is None:continue
-        if not line_clear:
-            with common.keepout(planner,[obj,other],pad=[.025,.03]):
-                line=monotone_approach(planner,task,current,q)
-            reasons['curved approach '+str(line is not None)]+=1
-            if line is None:continue
         closed=q.copy();closed[moves]=contact['position'][-1]
         continuation=None
         with preview_payload(planner,task,obj,grasp), common.keepout(planner,[other],pad=.03):
@@ -140,7 +135,10 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=160):
                     for failure in planner._straight_failures:reasons['lift reason '+failure]+=1
                     continue
                 raised=closed.copy();raised[moves]=up['position'][-1]
-                prefix_knots=np.vstack([line['position'],contact['position'],up['position']])
+                # Both approach families move each joint monotonically. Their
+                # endpoint extrema suffice here; build an expensive curved
+                # approach only after this grasp has a usable continuation.
+                prefix_knots=np.vstack([current[moves],q[moves],contact['position'],up['position']])
                 prefix=np.broadcast_to(current,(len(prefix_knots),len(current))).copy()
                 prefix[:,moves]=prefix_knots
                 # The preview must spend the roll range used by the proposed
@@ -158,6 +156,11 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=160):
                 break
         if continuation is None:continue
         up,fold,z,direct=continuation
+        if not line_clear:
+            with common.keepout(planner,[obj,other],pad=[.025,.03]):
+                line=monotone_approach(planner,task,current,q)
+            reasons['curved approach '+str(line is not None)]+=1
+            if line is None:continue
         all_knots=np.vstack([line['position'],contact['position'],up['position'],fold['position']])
         if direct is not None:all_knots=np.vstack([all_knots,direct['pour']['position']])
         with elbow_only(planner,task):
