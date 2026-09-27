@@ -256,3 +256,8 @@ visibility is 89.54%, below E1; the inherited door motions still violate D5.
 These remain open requirements, not owner-approved exceptions. Ten complete
 three-camera reviews plus 30 storyboards are prepared; owner E5 is pending.
 This development pilot does not authorize mass collection or dataset publication.
+
+D3 is also open: 105 of 111 door grasps share the dominant elbow/wrist sign
+combination (94.59%, below the 95% criterion). This is measured at the actual
+finger-closing frames; canonical transport rest does not by itself constrain
+the IK branch used for a door grasp.
