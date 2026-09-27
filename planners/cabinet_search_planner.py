@@ -140,7 +140,7 @@ leg from it (4/4 home); the pure-rest drive posture was never run. Re-applied
 at the start of EVERY round, because `fold_via_tcp` un-ducks the torso to
 REST_TORSO in the tail and the measured dock approach starts ducked."""
 
-CLOSE_SPEED_M_S = 0.10
+CLOSE_SPEED_M_S = 0.05
 CLOSE_ARRIVE_TOL = 0.15
 """The K109 ARRIVED-despite-refusal tolerance handed to `close_the_door` for the
 search round. W20a run 6, seeds 11-14: from the search's entry state the shipped

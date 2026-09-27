@@ -177,8 +177,18 @@ the successful can nudge without subsequent travel.
 
 On the same four target compartments, all 20 calibration trials passed: opening
 .20/.25/.30 m/s with closing .05 m/s, then .30 opening with .075/.10 closing.
-The selected opening speed is .30 m/s and closing speed .10 m/s. The full fixed
+Profile v7 initially selected opening .30 m/s and closing .10 m/s based on
+physical success; the additional pause audit below supersedes that choice. The full fixed
 40-attempt pilot, both physical replays, current-phase camera visibility, raw
 D5/D6 and new human E5 review are evaluated separately. No D5 waiver is assumed.
 Canonical robot, controller, cameras, action format and recording clock are
 unchanged. Old profile reports and recordings remain historical.
+
+## Profile v8 speed correction (2026-09-27)
+
+Opening remains .30 m/s; closing returns to .05 m/s. Faster closing succeeded
+physically but failed D6 in 21/40 v7 episodes. In the four-compartment calibration,
+.075 closing failed one episode and .10 failed two; .05 passed all four at each
+opening speed. Speed selection therefore includes pause quality, not only task
+success. A fresh, unchanged 40-seed pool and both physical replays are required
+for v8. V7 recordings retain their original code signature and remain historical.
