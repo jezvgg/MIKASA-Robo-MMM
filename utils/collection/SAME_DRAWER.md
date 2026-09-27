@@ -166,3 +166,9 @@ A separate prospective bank fixes 750 candidates per drawer, classified from
 not collected training data. Training quotas remain 250 externally accepted
 records per drawer; zero are accepted from this pilot pending the quality gate
 and owner review. Rejections do not get silently retried or removed from SR.
+
+Including the required adversarial repeats, this exact code snapshot has
+25 successes in 48 physical oracle attempts (52.08%). Top-to-bottom totals are
+7/12, 8/10, 5/13 and 5/13. Both denominators are retained: the balanced pilot is
+60%, while H2 is not closed over all attempts of this snapshot. No failed seed
+or targeted repeat is removed to authorize collection.
