@@ -84,6 +84,14 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     task = env.unwrapped
     assert task.control_mode == "pd_joint_pos", task.control_mode
     cfg = task.cfg
+    # Paired pose/distance screening rejected every experimental replacement.
+    # Fail explicitly if a stale experiment requests a withdrawn option.
+    selected = dict(closing_approach="control", drawer_backoff_m=0.,
+                    apple_backoff_m=0., plate_backoff_m=0.,
+                    skip_plate_step_if_reachable=False)
+    for name, value in getattr(task, "motion_parameters", {}).items():
+        if name not in selected or value != selected[name]:
+            raise ValueError(f"SameDrawer motion option was not selected: {name}={value}")
     planner = planner_factory(env, debug, vis)
     planner.prefer_low_roll_ik()
     reserved = np.asarray(task.agent.keyframes["rest"].qpos)[planner._roll_indices]
