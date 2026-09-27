@@ -94,3 +94,29 @@ the apple on the plate, push with open fingers and a stopped base, and reopen
 with a stopped base. Failed attempts remain in the denominator. D6 pause
 qualification and the new human E5 review remain required; no new exception is
 assumed. This pilot does not authorize mass collection.
+
+## Follow-up profile v7 fixed-pool result
+
+The development pool `drawer-final-001`, seeds 7900000–7900039, contains 40
+attempts: 32 successes, seven planning refusals and one missed placement.
+Failed seeds: 7900001, 7900004, 7900022, 7900025, 7900029, 7900035, 7900036,
+7900037. Every success passed native 20 Hz and physical held-action 10 Hz replay.
+Every successful first push keeps fingers open and base stopped; reopening uses
+a confirmed grip and a stopped base. All 32 apples remain on the plate after
+placement until episode end. Four consecutive physical settling checks pass
+before release. D6 still fails on 7900000, 7900018, 7900021; no waiver is assumed.
+
+All three cameras were audited at every 10 Hz state: minimum per-episode target
+visibility is 99.24%; apple and reopening grasps consistently use positive
+elbow/wrist branches with the camera above the hand. A full-fixture collision
+audit over 39,735 recorded 20 Hz states in all 40 attempts found no robot
+intersection with upper cabinets or microwave meshes, including cabinet
+handles. This does not claim inspection of every 100 Hz physics substep.
+
+The reported apple-strike seeds 7900002 and 7900017 were inspected at 0.1-second
+spacing across release, clearance and stow (48 and 49 triptychs). Final apple
+distance from plate center is 3.01 and 2.99 mm, versus 29.5 and 44.5 cm in the
+previous recordings. Six of eight prior upper-drawer failures now succeed; the
+remaining two fail at apple grasp or return, not initial upper-handle approach.
+Ten complete three-camera episodes and 22 storyboards are ready for owner E5.
+Mass collection and fresh full LeRobot export remain gated on qualification.
