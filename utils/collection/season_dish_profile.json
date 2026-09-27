@@ -1,5 +1,5 @@
 {
-  "profile_version": 10,
+  "profile_version": 11,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -163,5 +163,15 @@
     "recipe_seed": 4816,
     "adds_physics_state": false
   },
-  "motion_revision": "upright_payload_complete_roll_history_v3"
+  "motion_revision": "upright_payload_checked_loaded_dock_v4",
+  "loaded_bowl_dock": {
+    "left_wall_offset_candidates_m": [
+      0,
+      0.15,
+      0.25,
+      0.35,
+      0.45
+    ],
+    "precheck": "full_robot_turn_drive_turn_then_complete_upright_hover_and_wrist_only_pour"
+  }
 }
