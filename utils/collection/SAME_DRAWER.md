@@ -146,7 +146,7 @@ using seeds from 8000000–8000045. Source successes, from top to bottom, are
 6/10, 8/10, 5/10 and 5/10: 24/40 overall. All 24 successes passed both native
 20 Hz and physically held-action 10 Hz replay. Every refusal remains in SR.
 The old planner on exactly the same scenes also scores 24/40, distributed
-6/10, 7/10, 6/10 and 5/10. The new route succeeds on 8000038 and loses 8000016
+6/10, 7/10, 6/10 and 5/10. The new route succeeds on 8000028 and loses 8000016
 at the final handle grasp; failures before the return remain manipulation issues.
 
 For 23 paired successes, stops between moving return segments fall from 42 to
