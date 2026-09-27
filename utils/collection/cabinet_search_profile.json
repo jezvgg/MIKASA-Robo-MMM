@@ -1,5 +1,5 @@
 {
-  "profile_version": 5,
+  "profile_version": 7,
   "env_id": "MikasaCabinetSearch-v0",
   "task_variant": "four_compartments_cola_random_home_nudge",
   "robot_reference": {
@@ -100,9 +100,12 @@
       1
     ],
     "gripper_switch_control_step_parity": 0,
-    "motion_revision": "owner_restoration_2026_09_26",
+    "motion_revision": "owner_followup_2026_09_27",
     "navigation_posture": "upstream_rest_torso_0.20_wrist_flex_1.7",
     "final_return_required": false,
-    "closing_dock_navigation": "published_reverse_capable_within_door_work"
+    "closing_dock_navigation": "published_reverse_capable_within_door_work",
+    "empty_inspection_rest": false,
+    "opening_speed_m_s": 0.3,
+    "closing_speed_m_s": 0.1
   }
 }

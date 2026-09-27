@@ -165,3 +165,20 @@ The episode still has the published door-work reversals: D5 is not qualified.
 Centered home parking also occludes the mark, so E1 fails; neither a parking
 offset nor an owner exception has been silently introduced. The new E5 review
 and unresolved checklist items must be addressed before mass collection.
+
+## Profile v7 follow-up (2026-09-27)
+
+Empty compartments are inspected with the arm left out. Closing starts from the
+current posture, without an intermediate rest fold or a stowing fallback. The
+short checked hand retreat remains. After the door closes, the published lowered
+rest and direct home return resume. When the can is found, a checked arm tuck
+clears the neighboring open leaf before the can approach; the episode ends at
+the successful can nudge without subsequent travel.
+
+On the same four target compartments, all 20 calibration trials passed: opening
+.20/.25/.30 m/s with closing .05 m/s, then .30 opening with .075/.10 closing.
+The selected opening speed is .30 m/s and closing speed .10 m/s. The full fixed
+40-attempt pilot, both physical replays, current-phase camera visibility, raw
+D5/D6 and new human E5 review are evaluated separately. No D5 waiver is assumed.
+Canonical robot, controller, cameras, action format and recording clock are
+unchanged. Old profile reports and recordings remain historical.

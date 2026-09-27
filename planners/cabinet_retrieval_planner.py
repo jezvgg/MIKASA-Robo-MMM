@@ -93,13 +93,11 @@ grip form was slower still (1.44-1.48 rad at a 700 cap, why=max-steps,
 fingers alive). At PULL_V_HANDLE=0.20 the measured pull is ~144 steps, so
 this cap is now a 7x cushion — kept, because the cap is paid only by
 progress: a true stall ends the pull early via stall_window."""
-PULL_V_HANDLE = 0.20
-"""W16 (K107): the sweep 0.05/0.10/0.15/0.20 all reached 1.75 with the grip
-untouched (26.1->25.5 mm at every rung) in 655/311/194/144 steps — linear in
-1/v, ceiling above the grid — and the settled angle at speed is HIGHER
-(1.700 vs 1.649: less drift-back window). 0.20 is the user's pick of the two
-measured-clean ship values. The CLOSING push keeps its own measured 0.05
-(fist contact, not a grip — the speed transfer is unmeasured there)."""
+PULL_V_HANDLE = 0.30
+"""Owner follow-up: .20/.25/.30 m/s opening and .05/.075/.10 m/s closing
+were compared on the same four compartments. All 20 diagnostic episodes
+passed; CabinetSearch uses .30 opening and .10 closing. The retrieval
+caller's default closing speed remains .05 unless explicitly overridden."""
 
 #: The closing stage (require_door_closed): W15's DOCK_GRID as a LADDER, in the
 #: order the FULL ORACLE measured, not W15's lever order. W15 teleported the
@@ -1831,7 +1829,8 @@ def finish_by_the_handle(env, planner, task, *, door: DoorSpec, anchor=None, res
 
 
 def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=None,
-                   arrive_tol: float | None = None, from_here: bool | None = None):
+                   arrive_tol: float | None = None, from_here: bool | None = None,
+                   allow_stow: bool = True, v_handle: float = 0.05):
     """Close the opened door by pushing a fist along its arc (W15, the probe run).
 
     There is no handle on this side of a door standing at ~1.7 rad, so the fist
@@ -1919,6 +1918,8 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         return None
 
     use_here = PUSH_FROM_HERE if from_here is None else bool(from_here)
+    if not allow_stow and not use_here:
+        return fail(env, "closing from current posture required; stow disabled")
     if not use_here:
         stopped = lift_and_stow()
         if stopped is not None:
@@ -2085,13 +2086,15 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         if push.get("stop") is not None:
             return push["stop"]
         if res == -1:
+            if not allow_stow:
+                return fail(env, "panel unreachable from current posture without stow")
             say(env, "the panel is out of reach from here; the ladder")
             stopped = lift_and_stow()      # the drive's preparation, only now
             if stopped is not None:
                 return stopped
     if res == -1:
         res = _try_ladder(reach)
-    if res == -1 and push.get("stop") is None:
+    if res == -1 and push.get("stop") is None and allow_stow:
         say(env, "ladder exhausted from the parking; back off, fold, retry")
         res_back = planner.move_forward_delta(-0.30)
         if res_back != -1 and common.stopped_by_horizon(planner):
@@ -2147,7 +2150,7 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
     # The closing tangent is the opening one reversed: the opening arc runs
     # `sense * open_dir` (pull_hinge_arc), so the close runs its negative — for the
     # right leaf `-sense`, exactly K106's call. Derivation in `push_frame`.
-    res = planner.follow_arc(anchor_xy, -(sense * door.open_dir), v_handle=0.05,
+    res = planner.follow_arc(anchor_xy, -(sense * door.open_dir), v_handle=v_handle,
                              max_steps=CLOSE_MAX_STEPS, stop_when=stop)
     if res == -1:
         return fail(env, "push the door closed: no step was taken")

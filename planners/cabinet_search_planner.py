@@ -140,6 +140,7 @@ leg from it (4/4 home); the pure-rest drive posture was never run. Re-applied
 at the start of EVERY round, because `fold_via_tcp` un-ducks the torso to
 REST_TORSO in the tail and the measured dock approach starts ducked."""
 
+CLOSE_SPEED_M_S = 0.10
 CLOSE_ARRIVE_TOL = 0.15
 """The K109 ARRIVED-despite-refusal tolerance handed to `close_the_door` for the
 search round. W20a run 6, seeds 11-14: from the search's entry state the shipped
@@ -699,16 +700,7 @@ def close_and_verify(env, planner, task, door: DoorSpec, res):
         >>> res, closed = close_and_verify(env, planner, task, door, res)  # doctest: +SKIP
     """
     thr = float(task.cfg.theta_closed)
-    from_here = None
     for attempt in range(2):
-        if attempt == 1 and _crp.LAST_PUSH.get("pushed", 9.0) <= thr + SPRANG_BACK_TOL:
-            # The first push reached the closed band and the leaf reads open again: it
-            # sprang back off the forearm that had wrapped round it (cab_2, 1177/1485/
-            # 1681). A second push from the same place wraps it the same way; the
-            # ladder's rung stands on the hinge side, where the fist never wraps.
-            say(env, "the leaf sprang back after a closed push; the re-push from the ladder's rung",
-                pushed_to=round(float(_crp.LAST_PUSH["pushed"]), 3))
-            from_here = False
         _crp.LAST_PUSH.clear()
         # The published closer may back onto a nearby hinge-side dock. Forcing
         # a forward-only approach there changed a short adjustment into a long
@@ -719,7 +711,8 @@ def close_and_verify(env, planner, task, door: DoorSpec, res):
         planner.forward_navigation = False
         try:
             r = close_the_door(env, planner, task, door=door,
-                              arrive_tol=CLOSE_ARRIVE_TOL, from_here=from_here)
+                              arrive_tol=CLOSE_ARRIVE_TOL, from_here=True,
+                              allow_stow=False, v_handle=CLOSE_SPEED_M_S)
         finally:
             planner.forward_navigation = forward_navigation
         if r == -1:
@@ -1185,7 +1178,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 return bool(np.any(np.abs(now[:n] - leaf0[:n]) > LOOK_TOUCH_RAD))
 
             tucked = False
-            if FOLD_ONE_LINE and not RETRACE_ARC:
+            if FOLD_ONE_LINE and not RETRACE_ARC and not LOOK_BY_HEAD:
                 # No reversal is coming, so there is no tape to keep: tuck the arm —
                 # the rest arm with the wrist ducked, torso as it stands — in one joint
                 # line right after the retreat, and look with it tucked. The owner's
@@ -1208,7 +1201,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                         return res
                     planner.planner.update_from_simulation()
                     tucked = True
-            if LOOK_BACK_M > 0 and not tucked:
+            if LOOK_BACK_M > 0 and not tucked and not LOOK_BY_HEAD:
                 # The back-off exists for a hand left out at the bar (the reversal's
                 # tape). Tucked, the arm stands below the leaf and the turn clears it —
                 # the owner's call on the clips (2026-09-05): no drive away and back.
@@ -1297,6 +1290,20 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
             # The cube's compartment is open and (with the head look) seen; the touch
             # terminal wants it pushed before the episode counts.
             say(env, "FOUND, not yet touched", compartment=comp.name, k=k, **_latches(info))
+            # Empty inspections go straight to closing. Only a found object
+            # needs the published tucked approach to clear the door on its way in.
+            tuck = drive_posture_targets(task)
+            tuck.pop("torso_lift_joint", None)
+            planner.planner.update_from_simulation()
+            r = plan_joints(env, planner, task, tuck,
+                            label="tuck after finding the can", tries=1, line_only=True)
+            if r == -1:
+                say(env, "MISSED: cannot clear the door for the can approach")
+                return res
+            res = r
+            if common.stopped_by_horizon(planner):
+                return res
+            planner.planner.update_from_simulation()
             planner.track_target(lambda: task.cube.pose[0].sp.p)
             r = nudge_the_cube(env, planner, task, res, cab=cab)
             if r != -1:
