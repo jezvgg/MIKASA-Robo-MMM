@@ -138,3 +138,31 @@ accepted quality-gated data has a quota of 250 per drawer (0 bottom, 3 top);
 quotas with successes that failed replay/quality. Equal successful quotas do
 not imply equal SR. Mass collection still requires the existing quality gates
 and owner E5 acceptance; this profile alone does not open that gate.
+
+## Profile v8 balanced pilot
+
+A prospective reset-only manifest selected exactly 10 attempts for each drawer,
+using seeds from 8000000–8000045. Source successes, from top to bottom, are
+6/10, 8/10, 5/10 and 5/10: 24/40 overall. All 24 successes passed both native
+20 Hz and physically held-action 10 Hz replay. Every refusal remains in SR.
+The old planner on exactly the same scenes also scores 24/40, distributed
+6/10, 7/10, 6/10 and 5/10. The new route succeeds on 8000038 and loses 8000016
+at the final handle grasp; failures before the return remain manipulation issues.
+
+For 23 paired successes, stops between moving return segments fall from 42 to
+zero. Mean return duration, including final alignment, is 16.030 s versus
+15.874 s previously: smoother travel is verified; faster overall return is not.
+All executed rounded sections meet the 0.35 m/s² and 1.5 rad/s² command limits.
+No upper-cabinet/handle model intersections occur in 35,283 recorded 20 Hz
+states across all 40 attempts. The eight prior failures were repeated separately;
+7900035 now succeeds in both replays, and seven still fail.
+
+All 24 successes pass D6, and minimum target visibility is 99.25%. The E5 package
+contains three full bottom-drawer, three third-drawer, two second-drawer and two
+top-drawer episodes, plus 14 storyboards. Owner review is pending.
+
+A separate prospective bank fixes 750 candidates per drawer, classified from
+9000000–9003100 with prior run/validation seeds excluded. It is a seed bank,
+not collected training data. Training quotas remain 250 externally accepted
+records per drawer; zero are accepted from this pilot pending the quality gate
+and owner review. Rejections do not get silently retried or removed from SR.
