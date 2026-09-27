@@ -46,7 +46,7 @@ from planners.season_dish_paths import CARRY_TARGETS, carry_goal, grasp_with_con
 from planners.oracle.path_clearance import path_clear
 from planners.oracle.straight_paths import straight_plan, execute_straight
 from planners.oracle.upright_payload import upright_path, elbow_only, enforce_upright, PayloadTiltError
-from planners.season_dish_transfer import plan_loaded_hover, held_transform
+from planners.season_dish_transfer import plan_loaded_hover, held_transform, plan_bowl_drive
 
 WHO = "season_dish_planner"
 
@@ -1775,6 +1775,14 @@ def _solve(
                     dock = _np(task._bowl_dock_np)[0].astype(np.float64)
                     face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.])
                     dock_xyz = noise.point("bowl_dock", [dock[0], dock[1], 0.], axes=(True, True, False))
+                    planner.planner.update_from_simulation()
+                    current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
+                    route = plan_bowl_drive(planner, task, current, held_transform(task, target), dock_xyz, face)
+                    if route is None:
+                        return fail(env, "no checked loaded route with a complete bowl pour")
+                    dock_xyz = route['dock']
+                    say(env, "loaded bowl route prechecked", offset_x_m=route['offset_x_m'],
+                        dock=dock_xyz.tolist(), complete_wrist_pour=True)
                     say(env, "drive to bowl dock", dock=dock_xyz.tolist())
                     # Hold the corrected targets; do not integrate measured PD lag
                     # into a slowly drifting wrist while the base is driving.

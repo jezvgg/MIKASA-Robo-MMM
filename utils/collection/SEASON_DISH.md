@@ -318,3 +318,18 @@ these add no physical actors or state fields and consume no episode RNG.
 
 Two development smoke attempts exercised both routes successfully. These are
 not the final profile-v8 pilot; fresh 40 attempts and both replays are required.
+
+## Profiles v9–v11: complete lookahead and loaded dock clearance
+
+The grasp preview includes roll extrema of the proposed approach, grasp and lift
+before reserving the complete wrist-only pour. A carry continuation may establish
+grasp feasibility; the actual post-lift decision still prioritizes direct pouring.
+Expensive curved approaches are planned only after continuation feasibility.
+
+Before any loaded base motion, check every turn and straight segment against the
+complete robot/payload geometry and check a full pour at the proposed arrival.
+At the left wall, try the original dock followed by deterministic offsets of
+0.15, 0.25, 0.35 and 0.45 m to the right. Execute only a checked route, then replan
+from the physical arrival. The gaze switches to the bowl after the lift.
+Earlier profile-v8/v9 development attempts retain their original code binding;
+they do not qualify v11. No extra D6 or collision exception is introduced.
