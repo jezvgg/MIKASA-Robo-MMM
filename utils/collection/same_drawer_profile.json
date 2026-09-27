@@ -1,5 +1,5 @@
 {
-  "profile_version": 10,
+  "profile_version": 14,
   "env_id": "MikasaSameDrawer-v0",
   "task_variant": "four_drawers_apple_interlude",
   "robot_reference": {
@@ -123,7 +123,7 @@
     "low_handle_contact_lookahead": true,
     "low_handle_opening_torso_m": 0.1,
     "apple_grasp_stop_on_touch": false,
-    "motion_revision": "control_retained_after_paired_pose_distance_screen_2026_09_27",
+    "motion_revision": "continuous_bottom_cubic_no_standoff_2026_09_27",
     "navigation_posture": "canonical_rest",
     "initial_push_gripper": "open",
     "pre_release_settling": {
@@ -155,7 +155,7 @@
       "full_body_collision_checks": true
     },
     "motion_parameters": {
-      "closing_approach": "control",
+      "closing_approach": "bottom_continuous",
       "drawer_backoff_m": 0.0,
       "apple_backoff_m": 0.0,
       "plate_backoff_m": 0.0,
@@ -170,6 +170,30 @@
       },
       "plate_extra_step": "control retained: nominal 8 cm lies inside 10 cm arrival tolerance; no measured benefit from removal",
       "full_attempt_ledger": "private pose-distance-closing-2026-09-27 audit; failed prototypes and old profiles retained"
+    },
+    "bottom_closing_approach": "actual_contact_ik_monotone_arm_torso_no_standoff",
+    "bottom_contact_path": {
+      "family": "lower_handle_cubic_v1",
+      "basis": "fixed named normalized progress fitted to control free-space approach; current state and fresh handle IK at runtime",
+      "monotone": [
+        "torso_lift_joint",
+        "shoulder_lift_joint",
+        "elbow_flex_joint"
+      ],
+      "torso_speed_m_s": 0.06,
+      "torso_acceleration_m_s2": 0.12,
+      "contact_allowance": "selected drawer wall or handle, gripper only, at least 4cm below upper edge and overlap <2.5cm while approaching handle",
+      "joint_limits": "full URDF and collection roll windows; before and after TOPP",
+      "closing_target": "actual remaining travel to zero, no overtravel",
+      "closure_settle_max_steps": 6,
+      "fallback": null,
+      "endpoint_backoff_along_push_m": 0.0,
+      "rejected_backoff_experiment": {
+        "backoff_m": 0.015,
+        "source_successes": 0,
+        "attempts": 10,
+        "reason": "no improvement over unshifted continuous endpoint, 5/10; no runtime fallback"
+      }
     }
   },
   "collection_balance": {
