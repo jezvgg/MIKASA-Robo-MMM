@@ -1,5 +1,5 @@
 {
-  "profile_version": 7,
+  "profile_version": 8,
   "env_id": "MikasaSameDrawer-v0",
   "task_variant": "four_drawers_apple_interlude",
   "robot_reference": {
@@ -123,7 +123,7 @@
     "low_handle_contact_lookahead": true,
     "low_handle_opening_torso_m": 0.1,
     "apple_grasp_stop_on_touch": false,
-    "motion_revision": "owner_followup_2026_09_27",
+    "motion_revision": "upright_smooth_2026_09_27",
     "navigation_posture": "canonical_rest",
     "initial_push_gripper": "open",
     "pre_release_settling": {
@@ -143,6 +143,28 @@
       "wrist_flex": 1
     },
     "post_release_clearance": "straight_up_0.10_or_negative_finger_axis_0.14_0.18_before_rest",
-    "full_path_fixture_checks": true
+    "full_path_fixture_checks": true,
+    "return_route": {
+      "geometry": "quintic_rounded_aisle",
+      "intermediate_stop": false,
+      "fallback": "refuse",
+      "max_speed_m_s": 0.42,
+      "max_yaw_rate_rad_s": 0.85,
+      "max_acceleration_m_s2": 0.35,
+      "max_yaw_acceleration_rad_s2": 1.5,
+      "full_body_collision_checks": true
+    }
+  },
+  "collection_balance": {
+    "stratum": "target_drawer",
+    "drawers_bottom_to_top": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "training_successes_per_drawer": 250,
+    "pilot_attempts_per_drawer": 10,
+    "count_all_attempts_for_sr": true
   }
 }

@@ -552,16 +552,13 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     aisle = np.array([home[0] + 0.30, home[1] - 0.70])
     dock_offset = 0.10 if array(task.handle_home)[0, reopen, 2] < 0.5 else -0.10
     dock = np.array([home[0], home[1] + dock_offset])
-    # Leave the intermediate corner facing the next leg, avoiding a redundant
-    # turn toward the counter followed immediately by a turn back into the aisle.
-    course = math.atan2(float(dock[1] - aisle[1]), float(dock[0] - aisle[0]))
     # Observe the whole column; head aiming does not encode the remembered drawer.
     planner.track_target(lambda: array(task.handle_home)[0].mean(0))
-    result = drive("return via open aisle", aisle, course)
-    if stopped(result):
-        return result
+    aisle = noise.point("return via open aisle", [*aisle, 0.], (True, True, False))
+    dock = noise.point("return to drawer column", [*dock, 0.], (True, True, False))
     yaw = 2 * math.atan2(float(home[6]), float(home[3]))
-    result = drive("return to drawer column", dock, yaw)
+    from planners.oracle.smooth_base import drive_rounded_route
+    result = drive_rounded_route(env, planner, task, aisle, dock, yaw)
     if stopped(result):
         return result
     result = gaze(lambda: array(task.handle_home)[0].mean(0))
