@@ -332,8 +332,6 @@ def keepout(planner, actors, pad=0.03, prefix: str = "keepout"):
                 shape, mplib.Pose(p=centre, q=[1.0, 0.0, 0.0, 0.0])))
             added.append(name)
         yield
-    except Exception:
-        yield
     finally:
         for name in added:
             try:

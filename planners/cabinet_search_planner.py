@@ -140,7 +140,7 @@ and changed its orientation. The owner selected the canonical arm with the
 same 0.20 m torso, not a new centred joint configuration.
 """
 
-CLOSE_SPEED_M_S = 0.05
+CLOSE_SPEED_M_S = 0.20
 CLOSE_ARRIVE_TOL = 0.15
 """The K109 ARRIVED-despite-refusal tolerance handed to `close_the_door` for the
 search round. W20a run 6, seeds 11-14: from the search's entry state the shipped
@@ -683,59 +683,45 @@ def drive_home(env, planner, task):
 
 
 def close_and_verify(env, planner, task, door: DoorSpec, res):
-    """S3: `close_the_door`, verdict by state, ONE re-push. Post-commit by
-    construction (a door is only closed after it was pulled), so a refused
-    stage is said, never -1.
-
-    Args:
-        env, planner: as everywhere.
-        task: `env.unwrapped`.
-        door: the leaf.
-        res: the last 5-tuple held by the caller (returned when nothing steps).
-
-    Returns:
-        `(res, closed)`: the last 5-tuple and whether `door_rad_now <= theta_closed`.
-
-    Example:
-        >>> res, closed = close_and_verify(env, planner, task, door, res)  # doctest: +SKIP
-    """
-    thr = float(task.cfg.theta_closed)
-    for attempt in range(2):
-        _crp.LAST_PUSH.clear()
-        # The published closer may back onto a nearby hinge-side dock. Forcing
-        # a forward-only approach there changed a short adjustment into a long
-        # turn around the open leaf (measured > pi on the restored 40-seed pool).
-        # Keep the published choice inside door work; free-floor/home drives
-        # retain their separate navigation policy.
-        forward_navigation = getattr(planner, "forward_navigation", False)
-        planner.forward_navigation = False
-        try:
-            r = close_the_door(env, planner, task, door=door,
-                              arrive_tol=CLOSE_ARRIVE_TOL, from_here=True,
-                              allow_stow=False, v_handle=CLOSE_SPEED_M_S)
-        finally:
-            planner.forward_navigation = forward_navigation
-        if r == -1:
-            # NOT -1 (D6): physics has committed; sweep 5 of the cabinet line
-            # measured closing refusals as downstream symptoms of physics.
-            say(env, "the closing stage refused; verdict by state", attempt=attempt)
-        else:
-            res = r
+    """Physical panel push, at most two handle corrections, then release dwell."""
+    def verify(result):
+        # The environment independently checks all leaves and the hand distance.
+        for _ in range(int(task.cfg.close_dwell_steps)):
+            result = planner.idle_steps(t=1)
             if common.stopped_by_horizon(planner):
-                return res, False
-        planner.planner.update_from_simulation()
-        rad = door_rad_now(task, door)
-        if rad <= thr:
-            say(env, "door closed", door_rad=round(rad, 3), attempt=attempt)
-            return res, True
-        say(env, "door not closed" + ("; one re-push" if attempt == 0 else ""),
-            door_rad=round(rad, 3), theta_closed=thr)
-    # The fist has run out. On a nearly shut leaf that is not bad luck — the push point
-    # rides onto the cabinet face where the arm cannot stand — while the HANDLE is as
-    # reachable as it ever gets. Both losses on the second verdict sample end here, at
-    # 0.155 and 0.233 against a band of 0.150.
-    if FINISH_BY_HANDLE:
-        res, closed = finish_by_the_handle(env, planner, task, door=door, res=res)
+                return result, False
+        idx = int(_np(task.last_opened).reshape(-1)[0])
+        closed = idx >= 0 and not bool(_np(task.is_open)[0, idx])
+        if closed:
+            say(env, "physical compartment closed after release",
+                door_rad=door_rad_now(task, door), dwell_steps=task.cfg.close_dwell_steps)
+        return result, closed
+
+    _crp.LAST_PUSH.clear()
+    previous = getattr(planner, "forward_navigation", False)
+    planner.forward_navigation = False
+    try:
+        r = close_the_door(env, planner, task, door=door,
+                          arrive_tol=CLOSE_ARRIVE_TOL, from_here=True,
+                          allow_stow=False, physical_close=True,
+                          v_handle=getattr(planner, "closing_speed_m_s", CLOSE_SPEED_M_S))
+    finally:
+        planner.forward_navigation = previous
+    if r != -1:
+        res = r
+    if common.stopped_by_horizon(planner):
+        return res, False
+    res, closed = verify(res)
+    if closed:
+        return res, True
+    for attempt in range(2):
+        say(env, "physical closing correction", attempt=attempt + 1,
+            door_rad=door_rad_now(task, door), target_rad=0.0)
+        res, _ = finish_by_the_handle(env, planner, task, door=door, res=res,
+                                     physical_close=True)
+        if common.stopped_by_horizon(planner):
+            return res, False
+        res, closed = verify(res)
         if closed:
             return res, True
     return res, False
@@ -1024,6 +1010,9 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
     task = env.unwrapped
     planner = planner_factory(env, debug, vis)
     planner.forward_navigation = True
+    planner.closing_speed_m_s = getattr(task, "motion_parameters", {}).get("closing_speed_m_s", CLOSE_SPEED_M_S)
+    if planner.closing_speed_m_s not in (.05, .10, .15, .20):
+        raise ValueError("Unsupported closing speed")
     if callable(getattr(planner, "prefer_low_roll_ik", None)):
         planner.prefer_low_roll_ik()
     configure_execution_noise(

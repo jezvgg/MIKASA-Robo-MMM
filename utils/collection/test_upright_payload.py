@@ -43,3 +43,28 @@ def test_future_pour_accounts_for_grasp_excursion_and_restores_preview():
         pass
     assert planner.accepts([[1.]])
     np.testing.assert_array_equal(owner._roll_low, [0.])
+
+
+def test_transfer_guard_checks_initial_grasp_every_step_and_restores_callback():
+    import pytest
+    from planners.oracle.upright_payload import enforce_upright, PayloadTiltError
+    angle=[14.9];held=[True];steps=[]
+    def matrix():
+        result=np.eye(4);result[:3,:3]=rotation([1,0,0],np.deg2rad(angle[0]));return result
+    target=SimpleNamespace(pose=[SimpleNamespace(sp=SimpleNamespace(to_transformation_matrix=matrix))])
+    task=SimpleNamespace(cfg=SimpleNamespace(pour_axis_body=[0,0,1]),
+                         agent=SimpleNamespace(is_grasping=lambda _:np.array(held)))
+    original=lambda action:steps.append(action)
+    planner=SimpleNamespace(_step=original)
+    with pytest.raises(PayloadTiltError):
+        with enforce_upright(planner,task,target):
+            planner._step('upright')
+            angle[0]=15.1
+            planner._step('excessive tilt')
+    assert planner._step is original and len(steps)==2
+    with pytest.raises(PayloadTiltError):
+        with enforce_upright(planner,task,target):pytest.fail('must reject at entry')
+    angle[0]=0.;held[0]=False
+    with pytest.raises(PayloadTiltError):
+        with enforce_upright(planner,task,target):pytest.fail('lost grasp')
+    assert planner._step is original

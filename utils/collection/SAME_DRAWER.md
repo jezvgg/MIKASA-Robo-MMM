@@ -172,3 +172,30 @@ Including the required adversarial repeats, this exact code snapshot has
 7/12, 8/10, 5/13 and 5/13. Both denominators are retained: the balanced pilot is
 60%, while H2 is not closed over all attempts of this snapshot. No failed seed
 or targeted repeat is removed to authorize collection.
+
+## Profile v10: retain control motions after paired experiments
+
+Separate 5/10/15 cm offsets at the drawer, apple and plate were tested. On the
+fixed eight-scene screen, control passed 5/8; drawer offsets passed 4/8, 3/8 and
+0/8, and apple offsets 3/8, 2/8 and 1/8. Plate offsets and omission of the nominal
+8 cm adjustment gave no measured gain: those goals fall inside the existing
+10 cm arrival tolerance. All selected offsets remain zero.
+
+Two continuous low-handle approaches were also constructed and checked against
+the whole robot and open drawer: a direct path and reversed withdrawal/rest
+geometry with new timing. The final reversed variant removed a stop on the
+successful example but passed only 1/6 versus control's 2/6 and required more
+joint travel. Both alternatives were rejected. Their source snapshots, failed
+attempts and paired frames remain in the private experiment audit; stale
+motion-parameter requests for these withdrawn options fail explicitly.
+
+The repeated 40-scene pilot is bitwise identical to control in recorded actions
+and robot states for all 40 scenes. Results remain 24/40: top-to-bottom 6/10,
+8/10, 5/10 and 5/10. Every success passed native 20 Hz and true held-action 10 Hz
+replay. The separate eight prior failures reproduce 1/8, for 25/48 over both
+prospective invocations. This still fails the aggregate collection SR gate.
+
+Canonical rest, the smooth aisle route, open fingers at the initial push,
+confirmed grip for reopening, post-release hand clearance and irreversible
+apple-on-plate retention remain unchanged. The target training quota is still
+250 accepted records per drawer; no mass collection is authorized by this pilot.

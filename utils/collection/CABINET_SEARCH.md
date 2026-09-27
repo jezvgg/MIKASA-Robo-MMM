@@ -1,4 +1,21 @@
-# CabinetSearch collection profile
+# Physical closing revision (profile 12)
+
+The environment initializes closed hinges at reset and never changes their positions
+or velocities afterward. Observations and the checker use actual angles, including
+small drift on uninspected leaves. Empty compartments count as closed only after all
+leaves remain within 0.01 rad, still and at least 0.25 m from the TCP for ten control steps.
+
+The oracle pushes at 0.20 m/s, slowing to 0.05 m/s for the last 0.10 rad. The target is
+zero; it never commands a negative opening angle. After the panel push it withdraws
+0.30 m so the release check can run. At most two handle corrections are allowed.
+There is no rest between empty inspection and closing; the robot returns directly
+to the sampled mark, and a successful can push ends the episode at the can.
+
+Development motion variants are explicit in each run and recording's
+`motion_parameters`; old recordings retain their original source snapshots and
+profiles. The 40-scene comparison and both physical replays must pass before release.
+
+# Existing collection contract
 
 `cabinet_search_profile.json` specifies the four-compartment NUDGE task.
 The terminal is a horizontal cola-can displacement of at least 0.02 m with the
@@ -22,7 +39,7 @@ the existing explicit rule, not an unreported new failure condition.
 The robot is the existing DSFetch from `jezvgg/MIKASA-Robo-MMM` at commit
 `4c5c8b3de941565ee2d57b153a10254fe64c2849`. Its source, joint limits,
 controllers, URDF/SRDF and meshes are preserved byte-for-byte; see
-`robots/fetch/reference.json`. The collection profile is version 5.
+`robots/fetch/reference.json`. Current profile version is specified in the JSON; earlier qualification below is historical.
 The scene adds RoboCasa's usual wheel exclusions (bits 25-30)
 and base exclusion (bit 31), with no kitchen exclusions on the arm,
 head or fingers. Solver/head/noise fixes are separate from the robot model.
@@ -261,3 +278,20 @@ D3 is also open: 105 of 111 door grasps share the dominant elbow/wrist sign
 combination (94.59%, below the 95% criterion). This is measured at the actual
 finger-closing frames; canonical transport rest does not by itself constrain
 the IK branch used for a door grasp.
+
+## Profile v12: physical closure without environment assistance
+
+The environment no longer writes hinge positions or velocities after reset and
+observations retain actual angles, including small drift. Every leaf must remain
+within 0.01 rad for ten released control steps. The panel push targets zero:
+0.20 m/s through the main stroke, 0.05 m/s over the final 0.10 rad, followed by
+30 cm hand withdrawal. At most two handle corrections are permitted.
+
+The fixed 40-scene comparison passed 40/40 with the selected speed versus 37/40
+at 0.05 m/s under the same physical-only checker. All successful records passed
+native 20 Hz and true held-action 10 Hz replay. All recorded closing states were
+checked for unexpected robot/furniture contacts; none were found. Full rest and
+transit clearance, camera audits, ten complete three-camera episodes and the
+remaining storyboards accompany this new profile. Earlier profiles retain their
+original code bindings. Owner E5 and the remaining dataset requirements still
+gate mass collection; this is a development result.

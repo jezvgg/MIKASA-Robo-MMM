@@ -368,3 +368,35 @@ Ten complete three-camera episodes and 20 storyboards are ready for owner E5.
 grasp/lift/fold in 7700000 and 7700001; no elbow inversion was observed there.
 Assistant inspection does not substitute for owner review. This is a development
 pilot, not an accepted training dataset, and mass collection remains closed.
+
+## Profile v13: bounded search and station distance experiment
+
+The selected station target is 0.10 m farther from the counter, opposite the
+base-facing direction. The photographed initial/travel pose was fitted once,
+recorded by joint name, rendered from front and side, and rejected in paired
+screening (0/4 versus 1/4 with canonical initial rest). It remains an explicit
+development option only; the selected profile keeps canonical empty rest and
+the existing compact loaded shoulder/elbow configuration.
+
+Search is limited to eight distinct grasp endpoints, two lift heights, two
+curved transition schedules and at most 32 initial IK guesses per call. The
+cumulative planning budget is 120 seconds, excluding environment loading and
+physical execution. The repeated recovery ladder is removed. Payload previews
+use the achieved FK grasp endpoint, and the tilt/grasp guard checks entry and
+every physical control step from confirmed grasp to pour. Tilt >=15 degrees
+or a lost grasp refuses the episode. Pour remains wrist-roll-only at 165 degrees
+with the unchanged 155-degree checker, fixed other arm/torso commands and base.
+
+On the same 40 scenes, the bounded planner passed 9/40 at the control distance
+and 21/40 at +0.10 m, gaining twelve successes without losing any of those nine.
+All 21 final successes and all nine control successes passed native 20 Hz and
+true held-action 10 Hz replay. Planning time was at most 35.38 seconds, with no
+budget exhaustion. The selected grasp/approach segment had slightly fewer joint
+direction changes; whole-episode stops increased because route choices changed.
+Both segment and complete-episode metrics are retained in the private audit.
+
+This is below the preceding expensive-search profile's 30/40 and does not meet
+the collection SR requirement. Most failures reject a continuous upright fold;
+the planner does not replace it with an arm flip or relax collision checking.
+The prior left-wall collision scene 7700039 is refused before committing the
+new grasp. Mass collection remains gated on the full checklist and owner E5.

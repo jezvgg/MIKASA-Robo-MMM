@@ -1764,7 +1764,8 @@ three known losses it was probed directly and took all three, the leaf reaching
 on is the paired run."""
 
 
-def finish_by_the_handle(env, planner, task, *, door: DoorSpec, anchor=None, res=None):
+def finish_by_the_handle(env, planner, task, *, door: DoorSpec, anchor=None, res=None,
+                         physical_close=False):
     """Take the bar of a nearly-shut leaf and ride the arc the rest of the way. `(res, closed)`.
 
     Post-commit like every closing stage: a refusal is said and the last tuple kept, never
@@ -1808,10 +1809,10 @@ def finish_by_the_handle(env, planner, task, *, door: DoorSpec, anchor=None, res
     # The arc, in the CLOSING sense: `pull_hinge_arc` rides `sense * open_dir`, so the
     # close runs its negative, and the target is signed by the leaf the same way the
     # opening's is.
-    stop_at = float(door.closed_rad) - CLOSE_MARGIN_RAD
+    stop_at = 0.0 if physical_close else float(door.closed_rad) - CLOSE_MARGIN_RAD
     r = common.pull_hinge_arc(env, planner, task, _art_key(task, door), door.hinge,
                               target_rad=door.open_dir * stop_at, who=WHO,
-                              v_handle=PULL_V_HANDLE, max_steps=PULL_MAX_STEPS,
+                              v_handle=.05 if physical_close else PULL_V_HANDLE, max_steps=PULL_MAX_STEPS,
                               anchor=anchor, open_dir=-door.open_dir)
     if r != -1:
         res = r
@@ -1830,7 +1831,8 @@ def finish_by_the_handle(env, planner, task, *, door: DoorSpec, anchor=None, res
 
 def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=None,
                    arrive_tol: float | None = None, from_here: bool | None = None,
-                   allow_stow: bool = True, v_handle: float = 0.05):
+                   allow_stow: bool = True, v_handle: float = 0.05,
+                   physical_close: bool = False):
     """Close the opened door by pushing a fist along its arc (W15, the probe run).
 
     There is no handle on this side of a door standing at ~1.7 rad, so the fist
@@ -2136,7 +2138,7 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
     if res == -1:
         return fail(env, "stroke to the panel")
 
-    stop_at = float(door.closed_rad) - CLOSE_MARGIN_RAD
+    stop_at = 0.0 if physical_close else float(door.closed_rad) - CLOSE_MARGIN_RAD
     say(env, "push the door closed", target_rad=round(stop_at, 3),
         start_rad=round(door_rad_now(task, door), 3))
     hist: list = []
@@ -2150,8 +2152,17 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
     # The closing tangent is the opening one reversed: the opening arc runs
     # `sense * open_dir` (pull_hinge_arc), so the close runs its negative — for the
     # right leaf `-sense`, exactly K106's call. Derivation in `push_frame`.
-    res = planner.follow_arc(anchor_xy, -(sense * door.open_dir), v_handle=v_handle,
-                             max_steps=CLOSE_MAX_STEPS, stop_when=stop)
+    if physical_close and door_rad_now(task, door) > .10:
+        res = planner.follow_arc(anchor_xy, -(sense * door.open_dir), v_handle=v_handle,
+                                 max_steps=CLOSE_MAX_STEPS,
+                                 stop_when=lambda: door_rad_now(task, door) <= .10 or stop())
+        if common.stopped_by_horizon(planner):
+            return res
+    if not physical_close or door_rad_now(task, door) > 0.0:
+        hist.clear()
+        res = planner.follow_arc(anchor_xy, -(sense * door.open_dir),
+                                 v_handle=.05 if physical_close else v_handle,
+                                 max_steps=CLOSE_MAX_STEPS, stop_when=stop)
     if res == -1:
         return fail(env, "push the door closed: no step was taken")
     if common.stopped_by_horizon(planner):
@@ -2162,7 +2173,7 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
     # Retreat the fist off the panel so the settle reads a free door.
     tcp = task.agent.tcp.pose.sp
     back = common.arm_move(env, planner,
-                           sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -0.15]),
+                           sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -.30 if physical_close else -.15]),
                            who=WHO, stage="retreat off the panel", tries=2)
     if back != -1:
         res = back

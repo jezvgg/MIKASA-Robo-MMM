@@ -1,5 +1,5 @@
 {
-  "profile_version": 8,
+  "profile_version": 10,
   "env_id": "MikasaSameDrawer-v0",
   "task_variant": "four_drawers_apple_interlude",
   "robot_reference": {
@@ -123,7 +123,7 @@
     "low_handle_contact_lookahead": true,
     "low_handle_opening_torso_m": 0.1,
     "apple_grasp_stop_on_touch": false,
-    "motion_revision": "upright_smooth_2026_09_27",
+    "motion_revision": "control_retained_after_paired_pose_distance_screen_2026_09_27",
     "navigation_posture": "canonical_rest",
     "initial_push_gripper": "open",
     "pre_release_settling": {
@@ -153,6 +153,23 @@
       "max_acceleration_m_s2": 0.35,
       "max_yaw_acceleration_rad_s2": 1.5,
       "full_body_collision_checks": true
+    },
+    "motion_parameters": {
+      "closing_approach": "control",
+      "drawer_backoff_m": 0.0,
+      "apple_backoff_m": 0.0,
+      "plate_backoff_m": 0.0,
+      "skip_plate_step_if_reachable": false
+    },
+    "experiment_selection": {
+      "closing_approach": "control retained: direct and reversed-withdrawal variants lost paired successes",
+      "station_offsets_m": {
+        "drawer": 0.0,
+        "apple": 0.0,
+        "plate": 0.0
+      },
+      "plate_extra_step": "control retained: nominal 8 cm lies inside 10 cm arrival tolerance; no measured benefit from removal",
+      "full_attempt_ledger": "private pose-distance-closing-2026-09-27 audit; failed prototypes and old profiles retained"
     }
   },
   "collection_balance": {

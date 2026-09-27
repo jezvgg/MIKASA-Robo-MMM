@@ -1,5 +1,5 @@
 {
-  "profile_version": 10,
+  "profile_version": 12,
   "env_id": "MikasaCabinetSearch-v0",
   "task_variant": "four_compartments_cola_random_home_nudge",
   "robot_reference": {
@@ -40,7 +40,9 @@
     "home_jitter_xy": [
       0.25,
       0.08
-    ]
+    ],
+    "theta_closed": 0.01,
+    "close_dwell_steps": 10
   },
   "data": {
     "control_hz": 20,
@@ -100,13 +102,22 @@
       1
     ],
     "gripper_switch_control_step_parity": 0,
-    "motion_revision": "upright_smooth_2026_09_27",
+    "motion_revision": "pose_distance_physical_close_2026_09_27",
     "navigation_posture": "canonical_rest_arm_torso_0.20",
     "final_return_required": false,
     "closing_dock_navigation": "published_reverse_capable_within_door_work",
     "empty_inspection_rest": false,
     "opening_speed_m_s": 0.2,
-    "closing_speed_m_s": 0.05,
-    "rest_reference": "pa40l/ManiSkill:dair@616833324e135a9c28cdd707b7cadd77d7ebcdf8"
+    "closing_speed_m_s": 0.2,
+    "rest_reference": "pa40l/ManiSkill:dair@616833324e135a9c28cdd707b7cadd77d7ebcdf8",
+    "motion_parameters": {
+      "closing_speed_m_s": 0.2
+    },
+    "environment_hinge_assistance": false,
+    "closing_target_rad": 0.0,
+    "closing_final_band_rad": 0.1,
+    "closing_final_speed_m_s": 0.05,
+    "maximum_closing_corrections": 2,
+    "closing_release_retreat_m": 0.3
   }
 }
