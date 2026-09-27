@@ -93,7 +93,7 @@ grip form was slower still (1.44-1.48 rad at a 700 cap, why=max-steps,
 fingers alive). At PULL_V_HANDLE=0.20 the measured pull is ~144 steps, so
 this cap is now a 7x cushion — kept, because the cap is paid only by
 progress: a true stall ends the pull early via stall_window."""
-PULL_V_HANDLE = 0.30
+PULL_V_HANDLE = 0.20
 """Owner follow-up: .20/.25/.30 m/s opening and .05/.075/.10 m/s closing
 were compared on the same four compartments. All 20 diagnostic episodes
 passed; CabinetSearch uses .30 opening and .10 closing. The retrieval

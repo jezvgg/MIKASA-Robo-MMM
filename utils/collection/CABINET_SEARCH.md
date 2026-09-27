@@ -192,3 +192,14 @@ physically but failed D6 in 21/40 v7 episodes. In the four-compartment calibrati
 opening speed. Speed selection therefore includes pause quality, not only task
 success. A fresh, unchanged 40-seed pool and both physical replays are required
 for v8. V7 recordings retain their original code signature and remain historical.
+
+## Profile v9 final speed selection (2026-09-27)
+
+Opening returns to .20 m/s; closing remains .05 m/s. The same-scene 40-attempt
+baseline at these speeds succeeds 40/40 and fails D6 on 7800013 and 7800017.
+Opening .30 m/s adds pause failures, including 7800019 and 7800024. The
+intermediate .25 m/s also newly fails 7800019, so neither acceleration meets
+the requirement of no regressions. Faster contact motion is not retained.
+The empty-inspection rest removal remains and shortens the workflow without
+faster door contact. V7 and v8 records remain historical candidates. A fresh
+profile-v9 fixed pool uses the same 40 seeds and both physical replays.
