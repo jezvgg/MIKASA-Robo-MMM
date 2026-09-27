@@ -277,3 +277,25 @@ The 100-step cue pause is the sole approved D6 exception. Source 20 Hz recording
 native replay and true held-action 10 Hz replay are unchanged. Earlier rollout
 success rates do not qualify profile v7; full checklist and human review remain
 separate from task success.
+
+## Follow-up profile v7 fixed-pool result
+
+The development pool `season-final-001`, seeds 7700000–7700039, contains 40
+attempts: 39 successes and one planning refusal (7700036). All 39 successes
+passed native 20 Hz replay and physical 10 Hz replay with each action held for
+two control steps. All 39 have wrist-roll-only pouring, stationary base and
+constant other arm/torso commands, a positive elbow through grasp/lift/carry,
+and the complete initial 100-step cue observation. At grasp the hand camera is
+above the hand; measured horizontal approach pitch is within 0.287 degrees.
+
+A three-camera segmentation audit of every 10 Hz state gives minimum per-episode
+target visibility 97.08%. Roll/turn limits and even gripper switching pass.
+D6 still fails after the authorized cue exception on 7700017, 7700029, 7700035;
+the raw and post-cue metrics are retained. No further waiver is assumed.
+
+For the reported elbow inversion on 7700000, 118 triptychs at 0.1-second spacing
+were inspected. Grasp-to-drive elbow inversion disappears; arm joint travel
+falls from 30.032 to 16.870 radians and duration from 312 to 224 control steps.
+Ten complete episodes retain all three original-resolution 20 Hz camera streams;
+29 remaining successes have storyboards. Owner E5 approval is pending.
+This is a development pilot, not a qualified 1000-episode dataset.
