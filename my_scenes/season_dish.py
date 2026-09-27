@@ -50,6 +50,7 @@ from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneB
 from mani_skill.utils.structs import Actor, Pose
 
 from utils.initial_pose import randomize_initial_joints
+from my_scenes.season_salad import decorate_bowl
 from utils.fridge_picture import FridgePictures
 from pathlib import Path
 from utils.robocasa_utils import (
@@ -629,7 +630,8 @@ class SeasonDishTask(BaseEnv):
         # Objects come from the registry, at the scale RoboCasa declares — see
         # robocasa_utils.load_objaverse_actor for why both of those matter.
         self.bowl = load_objaverse_actor(
-            self, "bowl", "bowl", sapien.Pose(p=bowl_home[0]), index=0
+            self, "bowl", "bowl", sapien.Pose(p=bowl_home[0]), index=0,
+            visual_decorator=decorate_bowl
         )
         self.shaker = load_objaverse_actor(
             self, "shaker", "shaker", sapien.Pose(p=station_left[0]), index=1

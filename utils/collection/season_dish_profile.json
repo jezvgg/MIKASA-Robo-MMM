@@ -1,5 +1,5 @@
 {
-  "profile_version": 7,
+  "profile_version": 9,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -127,8 +127,8 @@
       1
     ],
     "gripper_switch_control_step_parity": 0,
-    "motion_revision": "owner_followup_2026_09_27",
-    "navigation_posture": "compact_condiment_carry",
+    "motion_revision": "upright_smooth_2026_09_27",
+    "navigation_posture": "compact_condiment_carry_upright_wrist",
     "pour_motion": "wrist_roll_only",
     "cue_observation_steps": 100,
     "left_wall_dock_approach": "diagonal_from_open_aisle_in_canonical_rest",
@@ -139,14 +139,16 @@
       "shoulder_lift_joint": -0.8,
       "upperarm_roll_joint": 1.7,
       "elbow_flex_joint": 2.1,
-      "forearm_roll_joint": -0.6,
-      "wrist_flex_joint": 0.5,
-      "wrist_roll_joint": -0.4
+      "forearm_roll_joint": -0.6
     },
-    "grasp_lookahead": "approach_horizontal_contact_vertical_lift_compact_carry",
+    "grasp_lookahead": "horizontal_grasp_vertical_lift_then_fixed_base_pour_or_upright_carry",
     "lift_fallback": "refuse_no_RRT",
     "grasp_fallback": "horizontal_checked_chain_only",
-    "initial_payload_support_contact": "only_initial_sample_exact_payload_counter_pair"
+    "initial_payload_support_contact": "only_initial_sample_exact_payload_counter_pair",
+    "loaded_wrist": "solve_from_physical_grasp_each_fold_knot",
+    "planned_transfer_max_tilt_deg": 5,
+    "executed_transfer_max_tilt_deg": 10,
+    "direct_pour_priority": true
   },
   "quality_exceptions": {
     "D6": {
@@ -155,5 +157,11 @@
       "phase": "fridge_cue_observation",
       "preserve_all_frames": true
     }
-  }
+  },
+  "scene_visuals": {
+    "salad": "fixed_local_bowl_leaf_tomato_cucumber",
+    "recipe_seed": 4816,
+    "adds_physics_state": false
+  },
+  "motion_revision": "upright_payload_complete_roll_history_v2"
 }

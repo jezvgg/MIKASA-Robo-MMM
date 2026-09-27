@@ -9,6 +9,8 @@ from planners.oracle import oracle_common as common
 from planners.oracle.straight_paths import straight_plan, execute_straight
 from planners.oracle.path_clearance import path_clear
 from robots.fetch.utils import attach_object, convert_object_name, unwrap_toward
+from planners.oracle.upright_payload import upright_path, elbow_only, preview_roll_history
+from planners.season_dish_transfer import plan_loaded_hover
 
 CARRY_TARGETS = dict(torso_lift_joint=.38, shoulder_pan_joint=-.37,
     shoulder_lift_joint=-.8, upperarm_roll_joint=1.7, elbow_flex_joint=2.1,
@@ -119,9 +121,16 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=160):
         contact=straight_plan(planner,grasp,current=q)
         reasons['contact '+str(contact is not None)]+=1
         if contact is None:continue
+        if not line_clear:
+            with common.keepout(planner,[obj,other],pad=[.025,.03]):
+                line=monotone_approach(planner,task,current,q)
+            reasons['curved approach '+str(line is not None)]+=1
+            if line is None:continue
         closed=q.copy();closed[moves]=contact['position'][-1]
         continuation=None
         with preview_payload(planner,task,obj,grasp), common.keepout(planner,[other],pad=.03):
+            hand_tcp = task.agent.robot.links_map['gripper_link'].pose[0].sp.inv() * task.agent.tcp.pose[0].sp
+            attachment = (hand_tcp * grasp.inv() * obj.pose[0].sp).to_transformation_matrix()
             for z in heights:
                 lift=sapien.Pose([grasp.p[0],grasp.p[1],z],grasp.q)
                 support = initial_support_contacts(planner, obj, closed)
@@ -131,25 +140,30 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=160):
                     for failure in planner._straight_failures:reasons['lift reason '+failure]+=1
                     continue
                 raised=closed.copy();raised[moves]=up['position'][-1]
-                tucked=carry_goal(task,raised)
-                fold=p.plan_qpos_line(tucked,raised,time_step=task.control_timestep,
-                                     ref_yaw=float(current[2]),qpos_step=.02)
-                reasons['carry '+fold.get('status','?')]+=1
-                if (fold.get('status')!='Success'
-                        or not path_clear(planner,raised,fold['position'])):continue
-                continuation=(up,fold,z)
+                prefix_knots=np.vstack([line['position'],contact['position'],up['position']])
+                prefix=np.broadcast_to(current,(len(prefix_knots),len(current))).copy()
+                prefix[:,moves]=prefix_knots
+                # The preview must spend the roll range used by the proposed
+                # grasp/lift, not just the already executed approach to the table.
+                with preview_roll_history(planner,prefix), elbow_only(planner,task):
+                    # Either continuation makes this grasp usable. The physical
+                    # post-lift decision still always checks direct pouring first.
+                    fold=upright_path(planner,task,raised,carry_goal(task,raised),attachment)
+                    direct=None if fold is not None else plan_loaded_hover(planner,task,raised,attachment)
+                    if direct is not None:fold=direct['approach']
+                reasons['direct pour '+str(direct is not None)]+=1
+                reasons['upright continuation '+str(fold is not None)]+=1
+                if fold is None:continue
+                continuation=(up,fold,z,direct)
                 break
         if continuation is None:continue
-        up,fold,z=continuation
-        if not line_clear:
-            with common.keepout(planner,[obj,other],pad=[.025,.03]):
-                line=monotone_approach(planner,task,current,q)
-            reasons['curved approach '+str(line is not None)]+=1
-            if line is None:continue
+        up,fold,z,direct=continuation
         all_knots=np.vstack([line['position'],contact['position'],up['position'],fold['position']])
-        if not p.accepts(all_knots,move_group=True):continue
+        if direct is not None:all_knots=np.vstack([all_knots,direct['pour']['position']])
+        with elbow_only(planner,task):
+            if not p.accepts(all_knots,move_group=True):continue
         return dict(approach=line,contact=contact,lift_z=z,
-                    grasp_qpos=closed,carry=fold,
+                    grasp_qpos=closed,carry=fold,direct_pour=direct is not None,
                     total_joint_travel=float(np.abs(np.diff(all_knots,axis=0)).sum()))
     return None
 
@@ -162,7 +176,7 @@ def grasp_with_continuation(env,planner,task,obj,grasp,reach):
         return -1,False
     common.say(env,'season_dish_planner','connected grasp/lift/carry selected',
                lift_z=chain['lift_z'],joint_travel=chain['total_joint_travel'],
-               grasp_qpos=chain['grasp_qpos'].tolist())
+               grasp_qpos=chain['grasp_qpos'].tolist(),direct_pour=chain['direct_pour'])
     result=planner.follow_forward_path_w_refinement(chain['approach'],refine=True)
     if common.stopped_by_horizon(planner):return result,False
     planner.planner.update_from_simulation()

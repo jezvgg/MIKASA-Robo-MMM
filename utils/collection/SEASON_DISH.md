@@ -299,3 +299,22 @@ falls from 30.032 to 16.870 radians and duration from 312 to 224 control steps.
 Ten complete episodes retain all three original-resolution 20 Hz camera streams;
 29 remaining successes have storyboards. Owner E5 approval is pending.
 This is a development pilot, not a qualified 1000-episode dataset.
+
+## Profile v8: upright compact carry, reachable-bowl shortcut, salad
+
+The compact shoulder/elbow endpoint stays fixed. Wrist flex and roll are solved
+from the held object's measured attachment throughout the fold, with a planned
+5-degree target and a hard physical 10-degree transfer limit. Every executed
+transfer step also checks that the object remains grasped. The final wrist-only
+pour retains 165 degrees target / 155 degrees success and constant other arm,
+torso and stopped-base targets.
+
+Before grasping, the connected path must admit an upright lift followed by a
+complete fixed-base pour or a checked upright carry. After the physical lift,
+the fixed-base pour is tried first; a reachable bowl skips folding and driving.
+Failed previews execute no actions. The bowl contains deterministic visual-only
+lettuce, tomato wedges and cucumber slices attached to the same bowl actor;
+these add no physical actors or state fields and consume no episode RNG.
+
+Two development smoke attempts exercised both routes successfully. These are
+not the final profile-v8 pilot; fresh 40 attempts and both replays are required.

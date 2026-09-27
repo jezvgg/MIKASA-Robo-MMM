@@ -1,6 +1,6 @@
 """Close a cued drawer, put an apple on a distant plate, reopen the same drawer.
 
-Three upper drawers of one kitchen column form the answer space. Closing erases
+All four drawers of one kitchen column form the answer space. Closing erases
 its geometric cue: the task's detent resets each drawer within 5 mm of shut to
 exactly zero. This prevents residual joint position from marking the answer.
 The rule applies identically in collection, replay and policy evaluation.
@@ -10,7 +10,7 @@ closing the drawer invalidates the attempt. After closing, the cued drawer must
 remain within the 5 mm closed tolerance until the apple is placed. Opening another
 drawer beyond 2 cm also permanently invalidates the attempt. Final opening must reach 10 cm and stay settled
 for 10 control steps. A uniform final guess selects the correct drawer with
-probability 1/3 before manipulation errors; an overall blind success rate must be
+probability 1/4 before manipulation errors; an overall blind success rate must be
 measured, not inferred from that probability alone.
 
 RGB/proprio/text policy observations omit task answers and stage latches. State

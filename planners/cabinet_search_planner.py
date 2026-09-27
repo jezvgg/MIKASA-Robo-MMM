@@ -3,7 +3,7 @@ wall-cabinet doors — close behind you, home between openings, never twice.
 
 The route (design blank I, plan step 4), one ROUND per compartment:
 
-  S0  drive posture (the cabinet line's duck: torso 0.20, wrist 1.7) -> home
+  S0  drive posture (canonical rest arm, torso 0.20) -> home
       (1.80, -1.90, facing +y) -> settle. The FIRST decision is made from home
       too — the start stands outside the home disk and `passed_home` is False
       at reset, so an opening without this leg is `skipped_home`.
@@ -132,13 +132,13 @@ DOOR_SPECS = {
     ("cab_main_main_group", "rightdoorhinge"): CAB_MAIN_RIGHT,
 }
 
-DRIVE_POSTURE = {"torso_lift_joint": TORSO_DRIVE, "wrist_flex_joint": 1.7}
-"""The cabinet line's duck (cabinet_retrieval_planner.TORSO_DRIVE: at the rest
-0.386 the upperarm rides an open panel's bottom edge, 3/10 dock refusals; the
-wrist comes off its 2.16 stop for the dock screw). W20a drove every round-trip
-leg from it (4/4 home); the pure-rest drive posture was never run. Re-applied
-at the start of EVERY round, because `fold_via_tcp` un-ducks the torso to
-REST_TORSO in the tail and the measured dock approach starts ducked."""
+DRIVE_POSTURE = {"torso_lift_joint": TORSO_DRIVE}
+"""Lower only the torso for door clearance; retain every named rest arm joint.
+
+The former wrist override (1.7 instead of 2.077 rad) moved the hand forward
+and changed its orientation. The owner selected the canonical arm with the
+same 0.20 m torso, not a new centred joint configuration.
+"""
 
 CLOSE_SPEED_M_S = 0.05
 CLOSE_ARRIVE_TOL = 0.15
@@ -578,7 +578,7 @@ def arm_vs_rest(task) -> float:
 
 def drive_posture_targets(task) -> dict:
     """The rest arm, ducked: every arm joint at the rest keyframe, then the duck's
-    torso and wrist on top (`DRIVE_POSTURE`). The configuration every measured
+    torso override on top (`DRIVE_POSTURE`). The configuration every measured
     dock approach starts from, as one target for a single joint line.
 
     Args:
@@ -590,7 +590,7 @@ def drive_posture_targets(task) -> dict:
     Example:
         >>> t = drive_posture_targets(task)                        # doctest: +SKIP
         >>> t["torso_lift_joint"], t["wrist_flex_joint"]           # doctest: +SKIP
-        (0.2, 1.7)
+        (0.2, 2.077)
     """
     rest_q = np.asarray(task.agent.keyframes["rest"].qpos, dtype=np.float64).reshape(-1)
     jm = task.agent.robot.active_joints_map

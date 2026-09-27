@@ -120,3 +120,21 @@ previous recordings. Six of eight prior upper-drawer failures now succeed; the
 remaining two fail at apple grasp or return, not initial upper-handle approach.
 Ten complete three-camera episodes and 22 storyboards are ready for owner E5.
 Mass collection and fresh full LeRobot export remain gated on qualification.
+
+## Profile v8: continuous aisle return and drawer balance
+
+The arm retains canonical named rest. The return uses a quintic rounded corner
+through the existing aisle, with forward/yaw commands on the 10 Hz action clock,
+bounded acceleration and full-robot collision checks. The intermediate corner
+is not a stopping goal. No stop-go fallback is used when the route is refused.
+Apple withdrawal and irreversible retention checking remain active.
+
+Use `python -m utils.collection.drawer_balance plan --output seeds.json
+--start-seed N --per-drawer 10` to preselect 40 attempts solely by reset drawer.
+Pass `--seed-manifest seeds.json` to campaign instead of a contiguous range.
+The all-attempt report groups failures by drawer and last stage. For training,
+accepted quality-gated data has a quota of 250 per drawer (0 bottom, 3 top);
+`next_seeds` resumes chronological banks without retrying failures or filling
+quotas with successes that failed replay/quality. Equal successful quotas do
+not imply equal SR. Mass collection still requires the existing quality gates
+and owner E5 acceptance; this profile alone does not open that gate.

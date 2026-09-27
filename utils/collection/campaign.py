@@ -13,14 +13,25 @@ from .profile import TASKS, load_profile, runtime_signature, validate_instructio
 
 
 def campaign(root, *, start_seed, num_seeds, purpose, jobs, through, timeout,
-             skip_native_rgb=False, profile=None, tokenizer=None):
-    if not 1 <= jobs <= 8 or num_seeds < 1 or start_seed < 0:
-        raise ValueError("Use 1–8 workers, a positive candidate count and nonnegative seeds")
-    seeds = list(range(start_seed, start_seed + num_seeds))
+             skip_native_rgb=False, profile=None, tokenizer=None, seed_manifest=None):
+    if not 1 <= jobs <= 8:
+        raise ValueError("Use 1–8 workers")
+    if seed_manifest is None:
+        if start_seed is None or num_seeds is None or num_seeds < 1 or start_seed < 0:
+            raise ValueError("Positive candidate count and nonnegative start seed required")
+        seeds = list(range(start_seed, start_seed + num_seeds))
+    else:
+        if start_seed is not None or num_seeds is not None:
+            raise ValueError("Choose a seed manifest or a contiguous range, not both")
+        seeds = seed_manifest['seeds']
+        if not seeds or len(set(seeds)) != len(seeds) or any(type(s) is not int or s<0 for s in seeds):
+            raise ValueError("Manifest requires unique nonnegative integer seeds")
     if (root / "run.json").exists():
         run = read_json(root / "run.json")
         if run["seeds"] != seeds or run["purpose"] != purpose:
             raise ValueError("Cannot change the candidate pool or purpose on resume")
+        if run.get('seed_selection') != seed_manifest:
+            raise ValueError("Cannot change seed selection provenance on resume")
         if run.get("skip_native_rgb", False) != skip_native_rgb:
             raise ValueError("Cannot change native RGB retention on resume")
         if profile and run["scene"] != load_profile(profile)["env_id"]:
@@ -34,6 +45,8 @@ def campaign(root, *, start_seed, num_seeds, purpose, jobs, through, timeout,
                    skip_native_rgb=skip_native_rgb, language_validation=language,
                    scene=signature["profile"]["env_id"], env_kwargs=signature["profile"]["env_kwargs"],
                    created_utc=datetime.now(timezone.utc).isoformat())
+        if seed_manifest is not None:
+            run['seed_selection'] = seed_manifest
         write_json(root / "run.json", run)
     phases = PHASES[:PHASES.index(through) + 1]
     if skip_native_rgb:
@@ -79,8 +92,9 @@ def main():
     parser.add_argument("--profile", choices=TASKS, default=None)
     parser.add_argument("--tokenizer", type=Path)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--start-seed", type=int, required=True)
-    parser.add_argument("--num-seeds", type=int, required=True)
+    parser.add_argument("--start-seed", type=int)
+    parser.add_argument("--num-seeds", type=int)
+    parser.add_argument("--seed-manifest", type=Path)
     parser.add_argument("--purpose", choices=("development", "train", "validation"), required=True)
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--through", choices=PHASES, default="validated")
@@ -90,7 +104,8 @@ def main():
     args = parser.parse_args()
     campaign(args.output.resolve(), start_seed=args.start_seed, num_seeds=args.num_seeds,
              purpose=args.purpose, jobs=args.jobs, through=args.through, timeout=args.timeout,
-             skip_native_rgb=args.skip_native_rgb, profile=args.profile, tokenizer=args.tokenizer)
+             skip_native_rgb=args.skip_native_rgb, profile=args.profile, tokenizer=args.tokenizer,
+             seed_manifest=read_json(args.seed_manifest) if args.seed_manifest else None)
 
 
 if __name__ == "__main__":

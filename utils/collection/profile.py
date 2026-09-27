@@ -90,7 +90,7 @@ def runtime_signature(profile=None):
             if path.name.startswith("test_") or path.suffix not in {".py", ".urdf", ".srdf", ".json", ".png", ".obj"}:
                 continue
             if "collection" in path.parts and path.name not in {
-                "__init__.py", "pipeline.py", "contract.py", "client.py", "profile.py",
+                "__init__.py", "pipeline.py", "contract.py", "client.py", "profile.py", "campaign.py", "drawer_balance.py",
                 "cabinet_search_profile.json", "season_dish_profile.json", "same_drawer_profile.json",
             }:
                 continue
