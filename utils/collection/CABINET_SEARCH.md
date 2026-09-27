@@ -233,3 +233,10 @@ All 20 Hz frames of the ten full episodes are retained in original-resolution
 camera videos; every decoded frame was compared with its clean render. The
 combined viewer is 10 Hz and removes no pauses. This is a development pilot,
 not a qualified mass dataset or a new full LeRobot export.
+
+## Profile v10: canonical rest arm, lowered torso
+
+All seven arm joints use the named Fetch rest keyframe, including wrist flex
+2.077 rad. Only the torso is lowered to 0.20 m. Door handling and terminal
+nudge rules are unchanged. New fixed-pool and replay results are required;
+profile-v9 results are not evidence for this posture.
