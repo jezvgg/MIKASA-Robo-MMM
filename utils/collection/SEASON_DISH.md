@@ -20,9 +20,11 @@ the cue and delay. The unchanged horizon is 1100 steps (55 seconds). The other
 condiment must not be grasped or displaced more than 0.10 m. This is a pose proxy
 for seasoning; no fluid/substance simulation is implied.
 
-Profile v7 retains a horizontal side grasp with the wrist camera above the hand.
+Current profile v11 retains a horizontal side grasp with the wrist camera above the hand.
 There is no empty-arm fold before driving or additional arrival preparation pose.
-After grasp/lift the arm folds to the earlier fixed compact condiment carry pose.
+After grasp/lift it first checks a complete fixed-base hover and pour. If reachable,
+it pours directly. Otherwise, the compact shoulder/elbow carry pose is retained,
+while the wrists compensate the measured attachment to keep the cap upright.
 The original canonical keyframe itself is unchanged. The hover is
 prepared before pouring. Pouring changes only `wrist_roll`: the other arm/torso
 commands stay constant and both base commands remain zero. The complete wrist arc
@@ -39,7 +41,8 @@ pause is not covered by this exception.
 
 The existing expert uses geometric grasps, IK/screw paths, collision-checked
 joint lines and bounded monotone joint curves. Grasp selection prechecks the
-whole approach, horizontal contact, vertical lift and fixed carry continuation.
+whole approach, horizontal contact, vertical lift and a feasible direct-pour or
+upright-carry continuation.
 The same positive elbow branch is kept through those stages. There is no RRT
 lift, top-down rescue or simultaneous base/arm grasp fallback. RL is not used. The scene adds RoboCasa's kitchen
 exclusions only to wheels/base; arm and fingers retain physical kitchen contacts.
@@ -256,7 +259,7 @@ Every successful pour has constant commands for all non-wrist arm joints/torso
 and zero base commands. Segmentation visibility exceeds 95% overall in every
 episode, but brief manipulation occlusions remain for E1 review.
 
-## Follow-up motion guards (2026-09-27)
+## Historical profile v7 motion guards (2026-09-27)
 
 The compact carry targets are torso .38 m; shoulder pan -.37, shoulder lift -.8,
 upper-arm roll 1.7, elbow flex 2.1, forearm roll -.6, wrist flex .5 and wrist roll
@@ -333,3 +336,35 @@ At the left wall, try the original dock followed by deterministic offsets of
 from the physical arrival. The gaze switches to the bowl after the lift.
 Earlier profile-v8/v9 development attempts retain their original code binding;
 they do not qualify v11. No extra D6 or collision exception is introduced.
+
+## Profile v11 fixed-pool verification
+
+The same 40 seeds, 7700000–7700039, produced 30 task successes; all 30 passed
+native 20 Hz and physically held-action 10 Hz replay. Eleven poured directly
+without a transport fold or base travel; nineteen used upright carry and drive.
+All successful pours changed only wrist_roll, with other arm/torso commands
+constant and base commands zero. All observed the complete 100-step cue.
+The maximum measured transfer tilt across source and both replays was 8.769
+degrees, within the physical 10-degree limit. Planned wrist compensation still
+targets at most 5 degrees. Minimum per-episode target visibility was 98.05%,
+with no missing manipulation frames in the 10 Hz three-camera mask audit.
+
+The earlier v7 planner scored 39/40 on these seeds. The new ten failures consist
+of seven 900-second planning-search timeouts, two post-lift tilts above 10 degrees
+(13.56 and 13.84), and one infeasible actual compact continuation. All remain
+in the denominator; a reachable final wrist pose alone does not establish a
+collision-free, continuous physical transfer.
+
+Quality qualification remains incomplete. Seed 7700039 passes the task and
+replays but is rejected: its right finger intersects the left-wall model at
+control states 619–622 during the compact fold, before driving. These are four
+hits among 10,067 audited post-lift/transfer/pour states over all 30 successes.
+The planned path check did not cover the physical tracking deviation adequately;
+this contact is not an accepted exception. D6 also fails after the cue exception
+on 7700013, 7700017, 7700018, 7700023 and 7700026.
+
+Ten complete three-camera episodes and 20 storyboards are ready for owner E5.
+115 consecutive three-camera samples at 0.1-second spacing were inspected around
+grasp/lift/fold in 7700000 and 7700001; no elbow inversion was observed there.
+Assistant inspection does not substitute for owner review. This is a development
+pilot, not an accepted training dataset, and mass collection remains closed.
