@@ -1,5 +1,6 @@
 """Keep a held condiment upright without changing the robot or its controller."""
 from contextlib import contextmanager
+from planners.oracle.search_budget import measured
 import math
 import xml.etree.ElementTree as ET
 
@@ -106,6 +107,7 @@ def upright_wrist_candidates(axis_in_wrist, up_in_parent, previous, limits):
     return sorted(candidates, key=lambda x: float(np.linalg.norm(x - previous)))
 
 
+@measured
 def upright_path(planner, task, current, goal, hand_object, *, max_tilt_degrees=5.):
     """Compensate the wrist throughout a monotone fold, then collision-check TOPP."""
     p = planner.planner
@@ -116,12 +118,12 @@ def upright_path(planner, task, current, goal, hand_object, *, max_tilt_degrees=
     limits[1] = [max(limits[1, 0], -math.pi + .05), min(limits[1, 1], math.pi - .05)]
     moves = list(p.move_group_joint_indices)
     start_axis = fk.matrix(current)[:3, :3] @ local_axis
-    if start_axis[2] < math.cos(math.radians(10.)):
+    if start_axis[2] <= math.cos(math.radians(15.)):
         return None
     count = max(81, int(np.ceil(np.linalg.norm(goal - current) / .02)) + 1)
     # Time progress can curve around fixtures without introducing another pose
     # or reversing the elbow. All candidates preserve the same compact endpoint.
-    for shoulder_power, elbow_power in ((1., 1.), (2., 1.), (.5, 1.), (1., 2.), (2., 2.), (.5, 2.)):
+    for shoulder_power, elbow_power in ((1., 1.), (2., 1.)):
         full = [current.copy()]
         for alpha in np.linspace(0., 1., count)[1:]:
             progress = np.full(len(current), alpha)
@@ -157,7 +159,7 @@ def upright_path(planner, task, current, goal, hand_object, *, max_tilt_degrees=
             q = current.copy(); q[moves] = knot
             axis = fk.matrix(q)[:3, :3] @ local_axis
             max_tilt = max(max_tilt, math.degrees(math.acos(float(np.clip(axis[2], -1, 1)))))
-        if max_tilt > max(max_tilt_degrees, math.degrees(math.acos(float(np.clip(start_axis[2], -1, 1)))) + .1):
+        if max_tilt >= 15. or max_tilt > max(max_tilt_degrees, math.degrees(math.acos(float(np.clip(start_axis[2], -1, 1)))) + .1):
             continue
         return dict(status='Success', time=times, position=pos, velocity=vel,
                     acceleration=acc, duration=duration, predicted_max_tilt_deg=max_tilt)
@@ -165,16 +167,19 @@ def upright_path(planner, task, current, goal, hand_object, *, max_tilt_degrees=
 
 
 @contextmanager
-def enforce_upright(planner, task, target, maximum_degrees=10.):
+def enforce_upright(planner, task, target, maximum_degrees=15.):
     """Observe every executed control step; do not alter any recorded action."""
     original = planner._step
-    def checked(action):
-        result = original(action)
+    def check():
         axis = target.pose[0].sp.to_transformation_matrix()[:3, :3] @ np.asarray(task.cfg.pour_axis_body)
         tilt = math.degrees(math.acos(float(np.clip(axis[2], -1., 1.))))
-        if tilt > maximum_degrees or not bool(task.agent.is_grasping(target).any()):
+        if tilt >= maximum_degrees or not bool(task.agent.is_grasping(target).any()):
             raise PayloadTiltError(f'payload transfer refused: tilt={tilt:.3f} degrees or lost grasp')
+    def checked(action):
+        result = original(action)
+        check()
         return result
+    check()
     planner._step = checked
     try:
         yield

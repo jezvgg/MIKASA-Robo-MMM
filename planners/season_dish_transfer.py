@@ -1,4 +1,5 @@
 """Plan the complete fixed-base upright transfer and wrist-only pour."""
+from planners.oracle.search_budget import measured
 import math
 import mplib
 import numpy as np
@@ -15,6 +16,7 @@ def held_transform(task, target):
             * target.pose[0].sp).to_transformation_matrix().astype(float)
 
 
+@measured
 def preview_pour(planner, task, q, hand_object):
     p = planner.planner
     fk = kinematics(planner, task)
@@ -39,7 +41,8 @@ def preview_pour(planner, task, q, hand_object):
     return None
 
 
-def plan_loaded_hover(planner, task, current, hand_object, *, n_init=80):
+@measured
+def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferred=None):
     """Preview only: neither unsuccessful candidates nor lookahead execute steps."""
     p = planner.planner
     fk = kinematics(planner, task)
@@ -56,23 +59,30 @@ def plan_loaded_hover(planner, task, current, hand_object, *, n_init=80):
     obj_inverse = np.linalg.inv(hand_object)
     moves = list(p.move_group_joint_indices)
     away = bowl - base; away[2] = 0.; away /= max(np.linalg.norm(away), 1e-9)
+    options=[(0.,0.,0.),(.06,0.,0.),(0.,.06,0.),(-.05,0.,0.),
+             (0.,0.,30.),(0.,0.,-30.),(.06,0.,30.),(.06,0.,-30.)]
+    if preferred is not None:
+        chosen=tuple(preferred[k] for k in ('hover_extra','hover_back','hover_spin'))
+        options=[chosen]+[v for v in options if v!=chosen]
     with elbow_only(planner, task):
-        for extra, back, spin in ((0., 0., 0.), (.06, 0., 0.), (0., .06, 0.),
-                                  (-.05, 0., 0.), (0., 0., 30.), (0., 0., -30.),
-                                  (.06, 0., 30.), (.06, 0., -30.)):
+        for extra, back, spin in options:
             desired = obj.copy()
             desired[:3, 3] = bowl - back * away + np.array([0., 0., .20 + extra])
             desired[:3, :3] = rotation([0., 0., 1.], math.radians(spin)) @ obj[:3, :3]
             tcp = sapien.Pose(desired @ obj_inverse @ local_tcp)
+            initial=current.copy()
+            if preferred is not None:
+                initial[moves]=preferred['approach']['position'][-1]
+                initial[:3]=current[:3]
             status, goals = p.IK(p._transform_goal_to_wrt_base(mplib.Pose(tcp.p, tcp.q)),
-                                 p.fold_qpos(current), [True] * 3 + [False] * 12,
+                                 p.fold_qpos(initial), [True] * 3 + [False] * 12,
                                  n_init_qpos=n_init)
             if status != 'Success':
                 continue
             goals = [unwrap_toward(g, p.fold_qpos(current), p.joint_limits) for g in np.atleast_2d(goals)]
             goals = [p.unfold_qpos(g, ref_yaw=float(current[2])) for g in goals]
             goals.sort(key=lambda g: float(np.linalg.norm(g[3:13] - current[3:13])))
-            for goal in goals:
+            for goal in goals[:2]:
                 goal[:3] = current[:3]
                 path = upright_path(planner, task, current, goal, hand_object)
                 if path is None:
@@ -84,6 +94,7 @@ def plan_loaded_hover(planner, task, current, hand_object, *, n_init=80):
     return None
 
 
+@measured
 def preview_base_legs(planner, current, destinations, final_yaw):
     """Sweep the complete held robot through turn/drive/turn legs, model only."""
     p = planner.planner
@@ -110,6 +121,7 @@ def preview_base_legs(planner, current, destinations, final_yaw):
     return full[-1]
 
 
+@measured
 def plan_bowl_drive(planner, task, current, hand_object, dock, face):
     """Keep upright fingers clear of the left wall and preview the final pour."""
     offsets = (0., .15, .25, .35, .45) if float(dock[0]) < 1. else (0.,)
@@ -122,5 +134,5 @@ def plan_bowl_drive(planner, task, current, hand_object, dock, face):
             continue
         hover = plan_loaded_hover(planner, task, arrival, hand_object)
         if hover is not None:
-            return dict(dock=candidate, offset_x_m=offset)
+            return dict(dock=candidate, offset_x_m=offset, hover=hover)
     return None

@@ -1044,7 +1044,12 @@ class SeasonDishTask(BaseEnv):
         """
         if self.agent is None:
             return
-        self.agent.robot.set_qpos(self.agent.keyframes["rest"].qpos)
+        q = self.agent.keyframes["rest"].qpos.copy()
+        if getattr(self, "motion_parameters", {}).get("compact_initial_and_travel", False):
+            from my_scenes.season_postures import REFERENCE_COMPACT
+            for name, value in REFERENCE_COMPACT.items():
+                q[int(self.agent.robot.active_joints_map[name].active_index[0])] = value
+        self.agent.robot.set_qpos(q)
         self.agent.robot.set_pose(Pose.create(self._robot_start[env_idx]))
 
     # --------------------------------------------------------------- evaluate --

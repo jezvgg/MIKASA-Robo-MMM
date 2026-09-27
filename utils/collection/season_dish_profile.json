@@ -1,5 +1,5 @@
 {
-  "profile_version": 11,
+  "profile_version": 13,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -127,7 +127,7 @@
       1
     ],
     "gripper_switch_control_step_parity": 0,
-    "motion_revision": "upright_smooth_2026_09_27",
+    "motion_revision": "bounded_search_and_10cm_station_candidate_2026_09_27",
     "navigation_posture": "compact_condiment_carry_upright_wrist",
     "pour_motion": "wrist_roll_only",
     "cue_observation_steps": 100,
@@ -147,8 +147,37 @@
     "initial_payload_support_contact": "only_initial_sample_exact_payload_counter_pair",
     "loaded_wrist": "solve_from_physical_grasp_each_fold_knot",
     "planned_transfer_max_tilt_deg": 5,
-    "executed_transfer_max_tilt_deg": 10,
-    "direct_pour_priority": true
+    "executed_transfer_max_tilt_deg": 15,
+    "direct_pour_priority": true,
+    "motion_parameters": {
+      "station_backoff_m": 0.1,
+      "compact_initial_and_travel": false
+    },
+    "max_transfer_tilt_degrees_exclusive": 15.0,
+    "search_limits": {
+      "distinct_grasp_configurations": 8,
+      "lift_heights": 2,
+      "smooth_transitions_per_candidate": 2,
+      "ik_initial_guesses_per_call": 32,
+      "planning_seconds": 120.0,
+      "excludes": "environment_loading_and_physical_execution"
+    },
+    "experimental_named_poses": {
+      "reference_compact": {
+        "torso_lift_joint": 0.3,
+        "shoulder_pan_joint": -0.233678,
+        "shoulder_lift_joint": 1.338583,
+        "upperarm_roll_joint": 2.997733,
+        "elbow_flex_joint": 2.2,
+        "forearm_roll_joint": -3.0,
+        "wrist_flex_joint": 0.842681,
+        "wrist_roll_joint": -0.059605
+      }
+    },
+    "reference_pose_experiment": {
+      "selected": false,
+      "reason": "0/4 paired priority scenes versus 1/4 canonical initial pose with bounded planner; full pose data kept in private audit"
+    }
   },
   "quality_exceptions": {
     "D6": {

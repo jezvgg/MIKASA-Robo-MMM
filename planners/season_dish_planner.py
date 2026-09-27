@@ -42,7 +42,8 @@ from utils.mikasa.execution_noise import configure_execution_noise, transfer_pha
 # imports on a Mac and tests/test_season_dish_oracle.py runs the *real* solve()
 # against tools/stub_planner.py (K38).
 
-from planners.season_dish_paths import CARRY_TARGETS, carry_goal, grasp_with_continuation, initial_support_contacts
+from planners.oracle.search_budget import install as install_search_budget, PlanningBudgetExceeded
+from planners.season_dish_paths import CARRY_TARGETS, carry_targets, carry_goal, grasp_with_continuation, initial_support_contacts
 from planners.oracle.path_clearance import path_clear
 from planners.oracle.straight_paths import straight_plan, execute_straight
 from planners.oracle.upright_payload import upright_path, elbow_only, enforce_upright, PayloadTiltError
@@ -1257,13 +1258,20 @@ def solve(
     A thin wrapper rather than a `with` inside `_solve`, because `_solve` returns from
     two dozen places and the budget must be restored on every one of them.
     """
-    with common.planning_budget(PLANNING_TIME_S):
-        return _solve(
-            env, seed=seed, debug=debug, vis=vis, blind=blind,
-            planner_factory=planner_factory, grasp_info=grasp_info,
-            waypoint_noise_seed=waypoint_noise_seed, waypoint_noise_m=waypoint_noise_m,
-            execution_noise_seed=execution_noise_seed, action_noise=action_noise, noise_hold=noise_hold,
-        )
+    try:
+        with common.planning_budget(PLANNING_TIME_S):
+            return _solve(
+                env, seed=seed, debug=debug, vis=vis, blind=blind,
+                planner_factory=planner_factory, grasp_info=grasp_info,
+                waypoint_noise_seed=waypoint_noise_seed, waypoint_noise_m=waypoint_noise_m,
+                execution_noise_seed=execution_noise_seed, action_noise=action_noise, noise_hold=noise_hold)
+    except (PlanningBudgetExceeded, PayloadTiltError) as error:
+        return fail(env, str(error))
+    finally:
+        budget=getattr(env.unwrapped, 'search_budget', None)
+        if budget is not None:
+            say(env, "planning budget", planning_seconds=budget.used,
+                planning_limit_seconds=budget.limit, exhausted=budget.exhausted, calls=budget.calls)
 
 
 def _solve(
@@ -1298,12 +1306,13 @@ def _solve(
     ), env.unwrapped.control_mode
 
     planner = planner_factory(env, debug, vis)
+    install_search_budget(planner, env.unwrapped, 120.)
     planner.navigation_arrival_tolerance = 0.10
     planner.forward_navigation = True
     planner.prefer_low_roll_ik()
     # Keep canonical rest inside every later roll window, even if the sampled
     # starting jitter lies on the other side of its exact joint values.
-    reserved = np.asarray([CARRY_TARGETS[name] for name in
+    reserved = np.asarray([carry_targets(env.unwrapped)[name] for name in
                            ("upperarm_roll_joint", "forearm_roll_joint", "wrist_roll_joint")])
     planner._roll_low = np.minimum(planner._roll_low, reserved)
     planner._roll_high = np.maximum(planner._roll_high, reserved)
@@ -1340,7 +1349,10 @@ def _solve(
     dock = _np(task._station_dock_np)[0].astype(np.float64)
     dock_xyz = noise.point("station_dock", [dock[0], dock[1], 0.0], axes=(True, True, False))
     face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.0])
-    say(env, "travel after cue", goal=dock_xyz.tolist(),
+    offset = float(getattr(task, "motion_parameters", {}).get("station_backoff_m", 0.))
+    if offset not in (0., .05, .10, .15):raise ValueError("Unsupported station offset")
+    dock_xyz -= offset * face
+    say(env, "travel after cue", station_backoff_m=offset, goal=dock_xyz.tolist(),
         distance_m=float(np.linalg.norm(dock_xyz[:2] - _np(task.agent.base_link.pose.p)[0, :2])))
     res = drive_to_counter(env, planner, dock_xyz, face)
     if res == -1:
@@ -1398,314 +1410,23 @@ def _solve(
 
     z_grasp = max(float(obb.center_mass[2]), float(mesh.bounds[1][2]) - GRASP_BELOW_TOP)
     grasp, reach = raise_grasp_to(*grasp_geometry(task, obb, ee_direction, target_closing, grasp_info), z_grasp)
-    stove_backed = False
-    stove_hits: list = []           # refusal texts naming the stove, by attempt
-    attempt_res: list = []          # the first closings' results (-1 = refused, nothing executed)
-    # The target's approach pad for this stage: APPROACH_TARGET_PAD for the first closings
-    # (a wide pad keeps a fingertip off a 16 g shaker — g61: 1679, 1957), the shipped
-    # GRASP_KEEPOUT_PAD once those are refused and for every rung after (1664: the wide pad
-    # refused the one approach that grasps). Refused plans cost no steps.
-    pad_now = [APPROACH_TARGET_PAD]
-    # The joint-line approach for the FIRST closings only (HP7, 1652 @0.15, 2026-09-06: a
-    # stove-side target had the line above the standoff execute 92 knots on rung after
-    # rung, each descent refused at the stove, and the episode ran out of horizon at the
-    # hover). The line's worth is the episode's opening; the rungs keep the old approach.
-    line_now = [APPROACH_BY_LINE]
-
-    def try_grasp(env_, planner_, task_, obj_, grasp_, reach_):     # the stage's pad and line
-        tcp_to_hand = (task_.agent.tcp.pose[0].sp.inv()
-                       * task_.agent.robot.links_map["gripper_link"].pose[0].sp)
-        hand = grasp_ * tcp_to_hand
-        camera = next(c for c in task_.agent._sensor_configs if c.uid == "fetch_hand")
-        camera_pose = hand * camera.pose[0].sp
-        if (abs(grasp_.to_transformation_matrix()[2, 2]) > math.sin(math.radians(2))
-                or camera_pose.p[2] - hand.p[2] < 0.02
-                or camera_pose.to_transformation_matrix()[2, 2] < 0.2):
-            say(env_, "reject inverted hand-camera grasp")
-            return -1, False
-        # Perturb only the free approach; the contact grasp remains geometry-derived.
-        reach_ = noise.pose("grasp_approach", reach_)
-        return _try_grasp_with_pad(env_, planner_, task_, obj_, grasp_, reach_,
-                                   target_pad=pad_now[0], by_line=line_now[0])
-
-    def stove_backdock(res_now, why: str):
-        """Back the base straight off STOVE_BACKDOCK_M and retry both closings; once.
-
-        1916 @0.15 (2026-09-06): the shaker stood against the stove and every level grasp
-        leg was refused `forearm_roll_link <-> stove`; at a dock 0.15 m further back the
-        same seed grasped and poured (g62a). A straight reverse is one motion for the
-        differential base (no turning); the aim is rebuilt from the live object with the
-        base where it now stands. Returns `(res, grasped, ran)`; `ran` False when the
-        rescue did not apply (already used, no `drive_straight`, or off).
-        """
-        nonlocal ee_direction, grasp, reach, stove_backed
-        drive = getattr(planner, "drive_straight", None)
-        if stove_backed or not callable(drive) or STOVE_BACKDOCK_M <= 0.0:
-            return res_now, False, False
-        stove_backed = True
-        say(env, "the stove blocks the reach; backing the base off", m=STOVE_BACKDOCK_M,
-            refusal=str(why)[:70])
-        if res_now != -1:
-            r_back = back_off_from_the_object(env, planner, task, why="re-docking further back")
-            if r_back != -1 and common.stopped_by_horizon(planner):
-                return r_back, False, True
-        planner.open_gripper()
-        r_drv = drive(-STOVE_BACKDOCK_M)
-        if r_drv != -1 and common.stopped_by_horizon(planner):
-            return r_drv, False, True
-        planner.planner.update_from_simulation()
-        base_now = _np(task.agent.base_link.pose.p)[0]
-        live = target.get_first_collision_mesh(to_world_frame=True)
-        obb_live = live.bounding_box_oriented if live is not None else obb
-        d = np.asarray(obb_live.center_mass, dtype=np.float64) - np.asarray(base_now, dtype=np.float64)
-        d[2] = 0.0
-        ee_direction = d / max(float(np.linalg.norm(d)), 1e-9)
-        z_live = (max(float(obb_live.center_mass[2]), float(live.bounds[1][2]) - GRASP_BELOW_TOP)
-                  if live is not None else z_grasp)
-        r_last, g_last = -1, False
-        for sign, name in ((1.0, "as seeded"), (-1.0, "flipped")):
-            g_try, r_try = raise_grasp_to(
-                *grasp_geometry(task, obb_live, ee_direction, sign * target_closing, grasp_info), z_live)
-            say(env, "grasp after backing off", closing=name,
-                grasp=[round(float(v), 3) for v in g_try.p])
-            planner.open_gripper()
-            planner.planner.update_from_simulation()
-            r_last, g_last = try_grasp(env, planner, task, target, g_try, r_try)
-            if r_last != -1 and common.stopped_by_horizon(planner):
-                return r_last, g_last, True
-            if r_last != -1 and g_last:
-                grasp, reach = g_try, r_try
-                break
-            if r_last != -1:
-                rb = back_off_from_the_object(env, planner, task, why="the last close missed")
-                if rb != -1 and common.stopped_by_horizon(planner):
-                    return rb, False, True
-        return r_last, g_last, True
-    say(env, "grasp geometry", extents=[round(float(v), 3) for v in obb.primitive.extents],
-        top=round(float(mesh.bounds[1][2]), 3), grasp=[round(float(v), 3) for v in grasp.p],
-        approach_deg=round(math.degrees(math.atan2(float(ee_direction[1]), float(ee_direction[0]))), 1))
-
-    def reaim_from_live(closing_sign: float):
-        """The yaw ladder's live re-read (K63), one block earlier. None if unreadable."""
-        live = target.get_first_collision_mesh(to_world_frame=True)
-        if live is None:
-            return None
-        obb_now = live.bounding_box_oriented
-        moved = float(np.linalg.norm(
-            np.asarray(obb_now.center_mass, dtype=np.float64)[:2]
-            - np.asarray(obb.center_mass, dtype=np.float64)[:2]))
-        if moved > GRASP_REREAD_REPORT_M:
-            say(env, "the object moved during an earlier attempt; re-aiming the retry",
-                moved_cm=round(moved * 100, 1))
-        z_now = max(float(obb_now.center_mass[2]),
-                    float(live.bounds[1][2]) - GRASP_BELOW_TOP)
-        return raise_grasp_to(
-            *grasp_geometry(task, obb_now, ee_direction, closing_sign * target_closing, grasp_info),
-            z_now)
-
-    with common.capture_refusal("stove") as stove_cap:
-        res, grasped = try_grasp(env, planner, task, target, grasp, reach)
-    stove_hits.append(stove_cap.refusal)
-    attempt_res.append(res)
-    if res != -1 and common.stopped_by_horizon(planner):
-        say(env, "stopped by the horizon during the grasp")
-        return res
-    if res == -1:
-        # The reach from the rest posture is an RRT plan (the screw hits the
-        # shoulder_lift limit) and RRTConnect is randomized: on seed 12 it returned
-        # `Approximate solution` twice at the same reachable pose (IK found it). One
-        # more draw of the same grasp before flipping the closing.
-        say(env, "retry connected grasp with additional IK candidates")
-        planner.planner.update_from_simulation()
-        if REREAD_BEFORE_RETRY:
-            aimed = reaim_from_live(1.0)
-            if aimed is not None:
-                grasp, reach = aimed
-        with common.capture_refusal("stove") as stove_cap:
-            res, grasped = try_grasp(env, planner, task, target, grasp, reach)
-        stove_hits.append(stove_cap.refusal)
-        attempt_res.append(res)
-        if res != -1 and common.stopped_by_horizon(planner):
-            say(env, "stopped by the horizon during the grasp retry")
-            return res
+    # One bounded search, at most eight distinct arm configurations. No nested
+    # yaw/height/re-dock recovery ladder and no physical failed-grasp retries.
+    tcp_to_hand = task.agent.tcp.pose[0].sp.inv() * task.agent.robot.links_map["gripper_link"].pose[0].sp
+    hand = grasp * tcp_to_hand
+    camera = next(c for c in task.agent._sensor_configs if c.uid == "fetch_hand")
+    camera_pose = hand * camera.pose[0].sp
+    if (abs(grasp.to_transformation_matrix()[2, 2]) > math.sin(math.radians(2))
+            or camera_pose.p[2] - hand.p[2] < .02
+            or camera_pose.to_transformation_matrix()[2, 2] < .2):
+        return fail(env, "reject inverted hand-camera grasp")
+    reach = noise.pose("grasp_approach", reach)
+    res, grasped = _try_grasp_with_pad(env, planner, task, target, grasp, reach,
+                                      target_pad=APPROACH_TARGET_PAD, by_line=True)
     if res == -1 or not grasped:
-        say(env, "grasp retry with flipped closing", plan_failed=bool(res == -1), grasped=grasped)
-        planner.open_gripper()
-        planner.planner.update_from_simulation()
-        aimed = reaim_from_live(-1.0) if REREAD_BEFORE_RETRY else None
-        grasp, reach = aimed if aimed is not None else raise_grasp_to(
-            *grasp_geometry(task, obb, ee_direction, -target_closing, grasp_info), z_grasp)
-        with common.capture_refusal("stove") as stove_cap:
-            res, grasped = try_grasp(env, planner, task, target, grasp, reach)
-        stove_hits.append(stove_cap.refusal)
-        attempt_res.append(res)
-        if res != -1 and common.stopped_by_horizon(planner):
-            say(env, "stopped by the horizon during the grasp retry")
-            return res
-        if res == -1 or not grasped:
-            # Both closings are spent. Turn the wrist and ask again rather than give the
-            # episode up: seeds 7 and 8 refuse every approach direction at yaw 0 with the
-            # same `IK Failed`, and the object does not care which way the fingers lie
-            # across it.
-            #
-            # `not grasped` is here since K62. Until then the ladder was entered only on
-            # a refused *plan*, so an episode whose plan succeeded and whose **grip**
-            # failed got exactly two attempts and stopped — `fingers closed but
-            # agent.is_grasping(target) is False after both closing directions`. That is
-            # two of the five remaining held-out failures (seeds 45 and 51), and a failed
-            # close on a body of revolution is exactly the case a different yaw or a
-            # different grip height can answer. The budget (`GRASP_LADDER_STEP_BUDGET`)
-            # still bounds it, and an episode that reaches here was failing anyway.
-            climbed = False
-            if pad_now[0] > GRASP_KEEPOUT_PAD and all(r_ == -1 for r_ in attempt_res):
-                # Every closing was REFUSED under the wide pad (nothing executed): the pad,
-                # not the scene, is what refused. Ask both closings once more under the
-                # shipped pad before the rungs (1664 @0.15: its grasp is the flipped
-                # closing at 0.03; at 0.05 the ladder burned its budget on IK refusals).
-                pad_now[0] = GRASP_KEEPOUT_PAD
-                say(env, "every closing refused under the wide approach pad; the shipped pad",
-                    pad=GRASP_KEEPOUT_PAD)
-                for sign, name in ((1.0, "as seeded"), (-1.0, "flipped")):
-                    aimed = reaim_from_live(sign) if REREAD_BEFORE_RETRY else None
-                    g_try, r_try = aimed if aimed is not None else raise_grasp_to(
-                        *grasp_geometry(task, obb, ee_direction, sign * target_closing, grasp_info), z_grasp)
-                    say(env, "grasp under the shipped pad", closing=name)
-                    planner.open_gripper()
-                    planner.planner.update_from_simulation()
-                    with common.capture_refusal("stove") as stove_cap:
-                        res, grasped = try_grasp(env, planner, task, target, g_try, r_try)
-                    stove_hits.append(stove_cap.refusal)
-                    if res != -1 and common.stopped_by_horizon(planner):
-                        return res
-                    if res != -1 and grasped:
-                        grasp, reach = g_try, r_try
-                        climbed = True
-                        say(env, "grasped under the shipped pad", closing=name)
-                        break
-                    if res != -1:
-                        rb = back_off_from_the_object(env, planner, task, why="the last close missed")
-                        if rb != -1 and common.stopped_by_horizon(planner):
-                            return rb
-            pad_now[0] = GRASP_KEEPOUT_PAD          # the rungs plan under the shipped pad
-            line_now[0] = False                     # and approach as before the line
-            n_stove = sum(1 for h in stove_hits if h)
-            stove_why = (next((h for h in stove_hits if h), None)
-                         if (not climbed and n_stove >= STOVE_BACKDOCK_MIN_HITS) else None)
-            if stove_why is not None:
-                # The stove named in a refusal: back the base off before the rungs spend
-                # the budget on reaches the stove refuses one by one (1916: 232 steps).
-                res, grasped, ran = stove_backdock(res, stove_why)
-                if ran and res != -1 and common.stopped_by_horizon(planner):
-                    return res
-                if ran and res != -1 and grasped:
-                    say(env, "grasped after backing the base off the stove")
-                    climbed = True
-            spent_at_start = int(planner.elapsed_steps)
-            out_of_budget = False
-            ik_fails = 0            # consecutive hard IK refusals at one grip height (K79b)
-            hand_at_object = res != -1      # an executed close that missed leaves it there
-            for dz in (GRASP_LIFT_RUNGS if not climbed else ()):
-                # K63: re-read the object before building this rung's candidates. The
-                # attempts that got us here **touched** it: measured on held-out seeds
-                # 45 and 51, the object had already been pushed 10.4 cm and 17.3 cm from
-                # where the original OBB put it, and every one of the twelve rungs was
-                # reaching for the place it used to be. That is why those seeds exhaust
-                # the ladder rather than recover on some other yaw. Re-reading costs no
-                # episode steps — it is a mesh read, not a motion.
-                live = target.get_first_collision_mesh(to_world_frame=True)
-                obb_now = live.bounding_box_oriented if live is not None else obb
-                centre_xy = np.asarray(obb_now.center_mass, dtype=np.float64)[:2]
-                moved = float(np.linalg.norm(
-                    centre_xy - np.asarray(obb.center_mass, dtype=np.float64)[:2]))
-                if moved > GRASP_REREAD_REPORT_M:
-                    say(env, "the object has moved since the first grasp; re-aiming",
-                        moved_cm=round(moved * 100, 1),
-                        centre=[round(float(v), 3) for v in centre_xy])
-                # The grip height is re-derived from the live mesh too: a knocked object
-                # may also have tipped, and `z_grasp` was measured off the old bounds.
-                z_now = max(float(obb_now.center_mass[2]),
-                            float(live.bounds[1][2]) - GRASP_BELOW_TOP) if live is not None else z_grasp
-                # The raised rung exists to lift the wrist out of the counter (K79c), but
-                # on a 9.4 cm shaker `top - 0.03 + 0.025` is a grip on the cap's last 5 mm:
-                # 1916 @0.15 (2026-09-06) "grasped" there and the shaker slid out of the
-                # pads on a straight 31-knot screw lift. Never raise the grip within
-                # GRIP_MIN_DEPTH of the live top; a rung that would is clamped to it.
-                z_rung = z_now + dz
-                if GRIP_MIN_DEPTH > 0.0 and live is not None:
-                    z_cap = float(live.bounds[1][2]) - GRIP_MIN_DEPTH
-                    if z_rung > z_cap:
-                        say(env, "rung clamped to the grip depth", asked=round(float(z_rung), 3),
-                            clamped=round(float(z_cap), 3), dz=round(float(dz), 3))
-                        z_rung = z_cap
-                base_grasp, base_reach = raise_grasp_to(
-                    *grasp_geometry(task, obb_now, ee_direction, target_closing, grasp_info),
-                    z_rung,
-                )
-                cands = grasp_yaw_candidates(base_grasp, base_reach, centre_xy)
-                # K79c: the IK counter resets per grip height. As first written it was
-                # global, and on seed 61 it abandoned the ladder at rung 3 of 12 with
-                # `out_of_budget=False` — skipping yaw -60, yaw +90 **and the whole
-                # dz = +0.025 rung, which exists precisely to lift the wrist out of the
-                # counter that every one of those refusals named**. A hard IK failure says
-                # this pose family has no solution *at this height*; it says nothing about
-                # the next one.
-                ik_fails = 0
-                # yaw 0 at the first rung is the grasp both closings already refused.
-                for yaw_deg, g_try, r_try in (cands[1:] if dz == 0.0 else cands):
-                    if int(planner.elapsed_steps) - spent_at_start > GRASP_LADDER_STEP_BUDGET:
-                        say(env, "grasp ladder out of step budget",
-                            spent=int(planner.elapsed_steps) - spent_at_start)
-                        out_of_budget = True
-                        break
-                    say(env, "grasp retry, turned and raised", yaw_deg=yaw_deg,
-                        dz=round(float(dz), 3), grasp=[round(float(v), 3) for v in g_try.p])
-                    if RUNG_BACK_OFF and hand_at_object:
-                        r_back = back_off_from_the_object(env, planner, task, why="the last close missed")
-                        if r_back != -1 and common.stopped_by_horizon(planner):
-                            return r_back
-                        hand_at_object = False
-                    planner.open_gripper()
-                    planner.planner.update_from_simulation()
-                    with common.capture_refusal("stove") as stove_cap, \
-                            common.capture_refusal(IK_REFUSAL) as cap:
-                        res, grasped = try_grasp(env, planner, task, target, g_try, r_try)
-                    hand_at_object = res != -1
-                    stove_hits.append(stove_cap.refusal)
-                    if ((res == -1 or not grasped) and stove_cap.refusal is not None and not stove_backed
-                            and sum(1 for h in stove_hits if h) >= STOVE_BACKDOCK_MIN_HITS):
-                        res, grasped, ran = stove_backdock(res, stove_cap.refusal)
-                        if ran and res != -1 and common.stopped_by_horizon(planner):
-                            return res
-                        hand_at_object = ran and res != -1
-                        if ran and res != -1 and grasped:
-                            say(env, "grasped after backing the base off the stove")
-                            climbed = True
-                            break
-                    if res == -1 and cap.refusal is not None:
-                        ik_fails += 1
-                        if ik_fails >= GRASP_IK_GIVE_UP:
-                            say(env, "no IK at this grip height; trying the next rung",
-                                ik_fails=ik_fails, yaw_deg=yaw_deg, dz=round(float(dz), 3))
-                            break   # this height's yaws only — the dz loop continues
-                    else:
-                        ik_fails = 0
-                    if res != -1 and common.stopped_by_horizon(planner):
-                        say(env, "stopped by the horizon during the grasp ladder")
-                        return res
-                    if res != -1 and grasped:
-                        grasp, reach = g_try, r_try
-                        say(env, "grasped after turning the wrist", yaw_deg=yaw_deg,
-                            dz=round(float(dz), 3))
-                        climbed = True
-                        break
-                if climbed or out_of_budget:
-                    break
-            if not climbed:
-                return fail(env, "no horizontal grasp with a checked vertical lift and carry",
-                            out_of_budget=out_of_budget)
-        if not grasped:
-            return fail(env, "grasp the target: fingers closed but agent.is_grasping(target) is False "
-                             "after both closing directions")
+        return fail(env, "bounded horizontal grasp/lift/continuation refused",
+                    reasons=dict(getattr(planner, '_chain_reasons', {})))
+    if common.stopped_by_horizon(planner):return res
     # D6: a nudged distractor voids the episode — a physical miss, not a plan failure.
     if not _flag(res[-1], "distractor_ok"):
         say(env, "missed: distractor moved during the grasp", distractor_ok=False,
@@ -1731,7 +1452,8 @@ def _solve(
         current = task.agent.robot.get_qpos()[0].cpu().numpy()
         support = initial_support_contacts(planner, target, current)
         path = straight_plan(planner, lift_target, initial_contacts=support)
-        res = execute_straight(planner, path)
+        with enforce_upright(planner, task, target):
+            res = execute_straight(planner, path)
     if res != -1 and common.stopped_by_horizon(planner):
         return res
     if res == -1:
@@ -1802,7 +1524,7 @@ def _solve(
                     planner.planner.update_from_simulation()
                     current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
                     with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-                        direct = plan_loaded_hover(planner, task, current, held_transform(task, target))
+                        direct = plan_loaded_hover(planner, task, current, held_transform(task, target), preferred=route['hover'])
                     if direct is None:
                         return fail(env, "no upright hover with a complete wrist-only pour")
                 say(env, "hover over bowl", route_prechecked=True, extra=direct['hover_extra'],

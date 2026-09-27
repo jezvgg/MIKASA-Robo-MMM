@@ -176,6 +176,12 @@ def make_env(run, *, rgb=False, render_backend=None):
     env = gym.make(profile["env_id"], **kwargs)
     try:
         verify_env(env, profile)
+        parameters = dict(profile["planner"].get("motion_parameters", {}))
+        if run.get("motion_parameters"):
+            if run.get("purpose") != "development":
+                raise ValueError("Motion experiments require development purpose")
+            parameters.update(run["motion_parameters"])
+        env.unwrapped.motion_parameters = parameters
     except Exception:
         env.close()
         raise
