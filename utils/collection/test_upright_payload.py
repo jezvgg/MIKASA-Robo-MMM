@@ -1,5 +1,8 @@
 """The wrist compensation must preserve orientation and reject unreachable axes."""
 import numpy as np
+from types import SimpleNamespace
+from planners.oracle.roll_paths import RollPathPlanner
+from planners.oracle.upright_payload import preview_roll_history
 from planners.oracle.upright_payload import upright_wrist_candidates
 from planners.oracle.wrist_pour import rotation
 
@@ -24,3 +27,19 @@ def test_axis_that_two_wrist_joints_cannot_raise_is_refused():
 def test_joint_limits_are_not_relaxed_for_uprightness():
     up = rotation([0,1,0],1.) @ np.array([0.,0.,1.])
     assert not upright_wrist_candidates([0,0,1],up,[0,0],np.array([[-.1,.1],[-.1,.1]]))
+
+
+def test_future_pour_accounts_for_grasp_excursion_and_restores_preview():
+    owner = SimpleNamespace(_roll_indices=[0], _roll_low=np.array([0.]),
+                            _roll_high=np.array([0.]))
+    planner = RollPathPlanner(SimpleNamespace(), owner)
+    assert planner.accepts([[1.]])
+    try:
+        with preview_roll_history(owner, [[0.], [-2.8], [-1.5]]):
+            assert not planner.accepts([[1.]])  # 3.8 radians across the full episode
+            assert planner.accepts([[-.1]])
+            raise RuntimeError('candidate refused')
+    except RuntimeError:
+        pass
+    assert planner.accepts([[1.]])
+    np.testing.assert_array_equal(owner._roll_low, [0.])

@@ -71,6 +71,19 @@ def elbow_only(planner, task):
         planner._grasp_branch = previous
 
 
+@contextmanager
+def preview_roll_history(planner, positions):
+    """Include a hypothetical prefix in the later path's episode roll budget."""
+    low, high = planner._roll_low, planner._roll_high
+    rolls = np.atleast_2d(positions)[:, planner._roll_indices]
+    planner._roll_low = np.minimum(low, rolls.min(axis=0))
+    planner._roll_high = np.maximum(high, rolls.max(axis=0))
+    try:
+        yield
+    finally:
+        planner._roll_low, planner._roll_high = low, high
+
+
 def upright_wrist_candidates(axis_in_wrist, up_in_parent, previous, limits):
     """Solve Ry(flex) Rx(roll) axis = up, choosing continuous nearby angles."""
     a = np.asarray(axis_in_wrist, float)
