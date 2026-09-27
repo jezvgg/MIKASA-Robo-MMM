@@ -1816,7 +1816,10 @@ def finish_by_the_handle(env, planner, task, *, door: DoorSpec, anchor=None, res
                               anchor=anchor, open_dir=-door.open_dir)
     if r != -1:
         res = r
-    planner.open_gripper()
+    r = planner.open_gripper()
+    if r != -1:
+        res = r
+    say(env, "released closing handle before fold", gripper="open")
     if common.stopped_by_horizon(planner):
         return res, False
     r = fold_arm_to_rest(env, planner, task, label="finish by the handle: fold to rest")
@@ -2170,7 +2173,16 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
     say(env, "door pushed", rad=round(door_rad_now(task, door), 3))
     LAST_PUSH["pushed"] = float(door_rad_now(task, door))
 
-    # Retreat the fist off the panel so the settle reads a free door.
+    # Release on the next policy tick, before withdrawing. Returning home with a
+    # fist would disclose which compartments have already been inspected.
+    if physical_close:
+        res = planner.open_gripper()
+        if common.stopped_by_horizon(planner):
+            return res
+        say(env, "released closed panel before retreat", gripper="open")
+        planner.planner.update_from_simulation()
+
+    # Retreat the open hand so the closure dwell reads a free door.
     tcp = task.agent.tcp.pose.sp
     back = common.arm_move(env, planner,
                            sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -.30 if physical_close else -.15]),

@@ -868,46 +868,58 @@ def nudge_the_cube(env, planner, task, res, cab=None):
             return res
     planner.planner.update_from_simulation()
     approach, closing = np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0])
-    # Ready, rise, then reach (NUDGE_TORSO): the arm to the sagittal ready posture (a
-    # joint line, the torso as it stands); the torso up; then the level reach with the
-    # lift frozen. Never a climb under the leaf, never an elbow on the leaf's side.
+    # Check the full simultaneous arm/torso line before execution. If blocked,
+    # retain the measured sequential preparation and record the fallback.
     raised = False
     if NUDGE_TORSO >= 0:
-        r = plan_joints(env, planner, task, dict(NUDGE_READY_POSTURE), label="ready posture for the touch")
-        if r == -1:
-            # The line to the ready posture sweeps the cabinet's bottom edge when the
-            # look left the forearm under it (2110 in pd_joint_delta_pos: `forearm_roll
-            # <-> cab object` at knot 3/12). Room is the cure: back off NUDGE_ROOM_M
-            # with the arm as it stands, take the posture there, come back to the dock.
-            say(env, "the ready posture refused at the dock; backing off for room", m=NUDGE_ROOM_M)
-            r = planner.drive_straight(-NUDGE_ROOM_M, v=0.10)
-            if r != -1 and common.stopped_by_horizon(planner):
-                return r
-            planner.planner.update_from_simulation()
-            r = plan_joints(env, planner, task, dict(NUDGE_READY_POSTURE), label="ready posture for the touch (with room)")
-            if r != -1 and common.stopped_by_horizon(planner):
-                return r
-            planner.planner.update_from_simulation()
-            r2 = planner.drive_base(target_pos=dock, target_view_vec=np.array([0.0, 1.0, 0.0]), freeze_arm=True)
-            if r2 != -1:
-                r = r2
-                if common.stopped_by_horizon(planner):
-                    return r
+        combined = dict(NUDGE_READY_POSTURE, torso_lift_joint=NUDGE_TORSO)
+        r = plan_joints(env, planner, task, combined,
+                        label="ready arm and raise torso together for the touch",
+                        tries=1, line_only=True)
         if r != -1:
             res = r
-        else:
-            say(env, "the ready posture refused; the raise from where the arm stands")
-        planner.planner.update_from_simulation()
-        r = plan_joints(env, planner, task, {"torso_lift_joint": NUDGE_TORSO},
-                        label="raise the torso for the touch")
-        if r != -1:
-            res = r
+            raised = True
             if common.stopped_by_horizon(planner):
                 return res
-            raised = True
+            say(env, "touch preparation", mode="combined_stationary_base")
         else:
-            say(env, "the torso raise refused; reaching from where it stands")
-        planner.planner.update_from_simulation()
+            say(env, "touch preparation", mode="sequential_fallback",
+                reason="combined arm and torso path refused")
+            r = plan_joints(env, planner, task, dict(NUDGE_READY_POSTURE), label="ready posture for the touch")
+            if r == -1:
+                # The line to the ready posture sweeps the cabinet's bottom edge when the
+                # look left the forearm under it (2110 in pd_joint_delta_pos: `forearm_roll
+                # <-> cab object` at knot 3/12). Room is the cure: back off NUDGE_ROOM_M
+                # with the arm as it stands, take the posture there, come back to the dock.
+                say(env, "the ready posture refused at the dock; backing off for room", m=NUDGE_ROOM_M)
+                r = planner.drive_straight(-NUDGE_ROOM_M, v=0.10)
+                if r != -1 and common.stopped_by_horizon(planner):
+                    return r
+                planner.planner.update_from_simulation()
+                r = plan_joints(env, planner, task, dict(NUDGE_READY_POSTURE), label="ready posture for the touch (with room)")
+                if r != -1 and common.stopped_by_horizon(planner):
+                    return r
+                planner.planner.update_from_simulation()
+                r2 = planner.drive_base(target_pos=dock, target_view_vec=np.array([0.0, 1.0, 0.0]), freeze_arm=True)
+                if r2 != -1:
+                    r = r2
+                    if common.stopped_by_horizon(planner):
+                        return r
+            if r != -1:
+                res = r
+            else:
+                say(env, "the ready posture refused; the raise from where the arm stands")
+            planner.planner.update_from_simulation()
+            r = plan_joints(env, planner, task, {"torso_lift_joint": NUDGE_TORSO},
+                            label="raise the torso for the touch")
+            if r != -1:
+                res = r
+                if common.stopped_by_horizon(planner):
+                    return res
+                raised = True
+            else:
+                say(env, "the torso raise refused; reaching from where it stands")
+            planner.planner.update_from_simulation()
         # The level hand (the elbow-down family) as a joint line; a blocked line is
         # left to the screw from the ready posture, never an RRT draw (K111). The cube
         # is out of the planning world for it: the swing's fingertips stay 8 cm short
