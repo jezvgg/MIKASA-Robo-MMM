@@ -240,3 +240,24 @@ All seven arm joints use the named Fetch rest keyframe, including wrist flex
 2.077 rad. Only the torso is lowered to 0.20 m. Door handling and terminal
 nudge rules are unchanged. New fixed-pool and replay results are required;
 profile-v9 results are not evidence for this posture.
+
+## Profile v10 fixed-pool verification
+
+The unchanged 40-seed pool 7800000–7800039 passed source, native 20 Hz and true
+held-action 10 Hz replay: 40/40 at each stage. All four compartments occur.
+Across 151 complete rest transitions, final arm error from canonical Fetch rest
+is below 0.01 rad (wrist flex 2.0716–2.0790 rad around the 2.077 target).
+49,079 recorded control-state checks over complete rest transitions and free
+transit found no robot/model collisions. Deliberate gripper/door contact phases
+are reported separately, not treated as free-transit collisions.
+
+All 40 successful episodes pass the pause check. Minimum per-episode target
+visibility is 89.54%, below E1; the inherited door motions still violate D5.
+These remain open requirements, not owner-approved exceptions. Ten complete
+three-camera reviews plus 30 storyboards are prepared; owner E5 is pending.
+This development pilot does not authorize mass collection or dataset publication.
+
+D3 is also open: 105 of 111 door grasps share the dominant elbow/wrist sign
+combination (94.59%, below the 95% criterion). This is measured at the actual
+finger-closing frames; canonical transport rest does not by itself constrain
+the IK branch used for a door grasp.
