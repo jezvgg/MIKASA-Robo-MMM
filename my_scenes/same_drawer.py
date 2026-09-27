@@ -63,7 +63,7 @@ DRAWER_ART_SUFFIX = "_0"
 INSTRUCTIONS = (
     "Remember which drawer is open and close it. Keep it closed while putting the apple "
     "on the plate at the far counter, then return and open the same drawer. "
-    "Leave every other drawer closed.",
+    "Keep the apple on the plate until the end and leave every other drawer closed.",
 )
 
 
@@ -167,6 +167,8 @@ def score_same_drawer(
     closed_tol: float,
     hold_steps: int,
     sequence_violated: torch.Tensor | None = None,
+    apple_retention_violated: torch.Tensor | None = None,
+    apple_present: torch.Tensor | None = None,
 ) -> dict:
     """The episode verdict as a pure function of the latched quantities.
 
@@ -194,12 +196,17 @@ def score_same_drawer(
     reopened = target_amt >= open_success
     others_closed = others_max_amt <= closed_tol
     sequence_violated = torch.zeros_like(wrong_touched) if sequence_violated is None else sequence_violated
-    clean = ~(wrong_touched | sequence_violated)
+    apple_retention_violated = (torch.zeros_like(wrong_touched)
+        if apple_retention_violated is None else apple_retention_violated)
+    apple_present = apple_done if apple_present is None else apple_present
+    clean = ~(wrong_touched | sequence_violated | apple_retention_violated)
     success = closed_done & apple_done & reopened & others_closed & clean & (
-        held >= hold_steps)
+        held >= hold_steps) & apple_present
     return dict(
         success=success,
-        failed=wrong_touched | sequence_violated,
+        failed=wrong_touched | sequence_violated | apple_retention_violated,
+        apple_retention_violated=apple_retention_violated,
+        apple_present=apple_present,
         sequence_violated=sequence_violated,
         reopened=reopened,
         others_closed=others_closed,
@@ -391,6 +398,9 @@ class SameDrawerTask(BaseEnv):
         self.init_open = torch.zeros(n, dtype=torch.float32, device=dev)
         self.closed_done = torch.zeros(n, dtype=torch.bool, device=dev)
         self.apple_done = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.apple_was_grasped = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.apple_placement_started = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.apple_retention_violated = torch.zeros(n, dtype=torch.bool, device=dev)
         self.wrong_drawer_touched = torch.zeros(n, dtype=torch.bool, device=dev)
         self.sequence_violated = torch.zeros(n, dtype=torch.bool, device=dev)
         self.held_count = torch.zeros(n, dtype=torch.int32, device=dev)
@@ -461,6 +471,9 @@ class SameDrawerTask(BaseEnv):
 
             self.closed_done[env_idx] = False
             self.apple_done[env_idx] = False
+            self.apple_was_grasped[env_idx] = False
+            self.apple_placement_started[env_idx] = False
+            self.apple_retention_violated[env_idx] = False
             self.wrong_drawer_touched[env_idx] = False
             self.sequence_violated[env_idx] = False
             self.held_count[env_idx] = 0
@@ -491,6 +504,14 @@ class SameDrawerTask(BaseEnv):
         amts = self.drawer_open_amounts()
         step = self.elapsed_steps.to(torch.int32)
         advance = step != self._last_eval_step
+        apple_p, plate_p = self.apple.pose.p, self.plate.pose.p
+        flat = torch.linalg.norm(apple_p[:, :2] - plate_p[:, :2], dim=-1)
+        z = apple_p[:, 2] - plate_p[:, 2]
+        on_plate = (flat <= cfg.plate_radius) & (z >= cfg.apple_z_band[0]) & (
+            z <= cfg.apple_z_band[1])
+        settled = self.apple.is_static(lin_thresh=1e-2, ang_thresh=0.5)
+        grasped = self.agent.is_grasping(self.apple) if self.agent is not None else (
+            torch.zeros_like(on_plate))
 
         if bool(advance.any()):
             # Detent: a drawer within closed_tol clicks to exactly zero. Kills the
@@ -521,15 +542,13 @@ class SameDrawerTask(BaseEnv):
             closed_before = self.closed_done.clone()
             self.closed_done |= advance & (target_amt <= cfg.closed_tol)
 
-            apple_p = self.apple.pose.p
-            plate_p = self.plate.pose.p
-            flat = torch.linalg.norm(apple_p[:, :2] - plate_p[:, :2], dim=-1)
-            z = apple_p[:, 2] - plate_p[:, 2]
-            on_plate = (flat <= cfg.plate_radius) & (z >= cfg.apple_z_band[0]) & (
-                z <= cfg.apple_z_band[1])
-            settled = self.apple.is_static(lin_thresh=1e-2, ang_thresh=0.5)
-            grasped = self.agent.is_grasping(self.apple) if self.agent is not None else (
-                torch.zeros_like(on_plate))
+            # Monitor from release in the placement region, before waiting for
+            # settling. A later return to the plate cannot erase a knock-off.
+            released_here = closed_before & self.apple_was_grasped & on_plate & ~grasped
+            self.apple_placement_started |= advance & released_here
+            monitored = self.apple_placement_started | self.apple_done
+            self.apple_retention_violated |= advance & monitored & (~on_plate | grasped)
+            self.apple_was_grasped |= advance & grasped
             # Neither preplacing the apple nor reopening the cued drawer during
             # the interlude may bypass the memory interval. A later close cannot
             # retroactively credit either order. Use the same tolerance as closed.
@@ -538,7 +557,8 @@ class SameDrawerTask(BaseEnv):
             self.sequence_violated |= advance & (early_apple | early_reopen)
             self.apple_done |= (
                 advance & closed_before & on_plate & settled & ~grasped
-                & (target_amt <= cfg.closed_tol) & ~self.sequence_violated)
+                & (target_amt <= cfg.closed_tol) & ~self.sequence_violated
+                & ~self.apple_retention_violated)
 
             # The terminal hold: consecutive steps with the target open, the others
             # closed and the target drawer still. Reset on any break.
@@ -548,7 +568,8 @@ class SameDrawerTask(BaseEnv):
                 drawer_still &= v < 0.02
             terminal = (
                 self.apple_done & (target_amt >= cfg.open_success)
-                & (others_max <= cfg.closed_tol) & drawer_still)
+                & (others_max <= cfg.closed_tol) & drawer_still
+                & on_plate & settled & ~grasped & ~self.apple_retention_violated)
             self.held_count = torch.where(
                 advance & terminal, self.held_count + 1,
                 torch.where(advance & ~terminal, torch.zeros_like(self.held_count),
@@ -564,8 +585,12 @@ class SameDrawerTask(BaseEnv):
             self.wrong_drawer_touched, self.held_count,
             open_success=cfg.open_success, closed_tol=cfg.closed_tol,
             hold_steps=cfg.hold_steps, sequence_violated=self.sequence_violated,
+            apple_retention_violated=self.apple_retention_violated,
+            apple_present=on_plate & settled & ~grasped,
         )
         out["target_open_amt"] = target_amt
+        out["apple_on_plate"] = on_plate
+        out["apple_placement_started"] = self.apple_placement_started
         return out
 
     # -------------------------------------------------------------------- obs --
@@ -602,6 +627,9 @@ class SameDrawerTask(BaseEnv):
         state["init_open"] = self.init_open.clone()
         state["closed_done"] = self.closed_done.clone()
         state["apple_done"] = self.apple_done.clone()
+        state["apple_was_grasped"] = self.apple_was_grasped.clone()
+        state["apple_placement_started"] = self.apple_placement_started.clone()
+        state["apple_retention_violated"] = self.apple_retention_violated.clone()
         state["wrong_drawer_touched"] = self.wrong_drawer_touched.clone()
         state["sequence_violated"] = self.sequence_violated.clone()
         state["held_count"] = self.held_count.clone()
@@ -615,6 +643,7 @@ class SameDrawerTask(BaseEnv):
         scene (same rationale as season_dish)."""
         super().set_state_dict(state, env_idx)
         for key in ("_robot_start", "target_drawer", "init_open", "closed_done", "apple_done",
+                    "apple_was_grasped", "apple_placement_started", "apple_retention_violated",
                     "wrong_drawer_touched", "sequence_violated", "held_count", "_last_eval_step"):
             if key in state:
                 setattr(self, key, restore_task_tensor(

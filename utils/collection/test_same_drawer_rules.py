@@ -35,7 +35,8 @@ def task_at(target):
         _drawer_arts=[Drawer() for _ in range(4)],
         held_count=torch.tensor([0]),
     )
-    for name in ("closed_done", "apple_done", "wrong_drawer_touched", "sequence_violated"):
+    for name in ("closed_done", "apple_done", "wrong_drawer_touched", "sequence_violated",
+                 "apple_was_grasped", "apple_placement_started", "apple_retention_violated"):
         setattr(task, name, torch.tensor([False]))
     task.apple = SimpleNamespace(
         pose=SimpleNamespace(p=torch.tensor([[0.3, 0.0, 0.03]])),
@@ -110,3 +111,54 @@ def test_repeated_evaluate_cannot_advance_terminal_hold():
         assert not tick(advance=False)["success"].item()
     assert torch.equal(task.held_count, held)
     assert finish(task, tick)["success"].item()
+
+
+@pytest.mark.parametrize("violation", ["horizontal", "vertical", "regrasp"])
+@pytest.mark.parametrize("target", range(4))
+def test_apple_must_remain_released_on_plate_until_episode_end(target, violation):
+    task, tick = task_at(target)
+    tick(opened={target: 0.0})
+    task.grasped = True
+    tick(apple_on_plate=True)
+    task.grasped = False
+    tick()
+    assert task.apple_done.item()
+    if violation == "horizontal":
+        task.apple.pose.p[0, 0] = 0.3
+    elif violation == "vertical":
+        task.apple.pose.p[0, 2] = 0.3
+    else:
+        task.grasped = True
+    info = tick()
+    assert info["failed"].item()
+    assert info["apple_retention_violated"].item()
+    # Replacing the apple cannot repair the demonstration.
+    task.apple.pose.p[:] = torch.tensor([[0.0, 0.0, 0.03]])
+    task.grasped = False
+    assert not finish(task, tick)["success"].item()
+
+
+def test_knockoff_before_first_settled_frame_is_not_forgotten():
+    task, tick = task_at(0)
+    tick(opened={0: 0.0})
+    task.grasped = True
+    tick(apple_on_plate=True)
+    task.apple.is_static = lambda **kwargs: torch.tensor([False])
+    task.grasped = False
+    tick()
+    assert task.apple_placement_started.item()
+    assert not task.apple_done.item()
+    tick(apple_on_plate=False)
+    task.apple.is_static = lambda **kwargs: torch.tensor([True])
+    tick(apple_on_plate=True)
+    assert not finish(task, tick)["success"].item()
+
+
+def test_terminal_hold_requires_apple_to_be_still_now():
+    task, tick = task_at(0)
+    tick(opened={0: 0.0})
+    tick(apple_on_plate=True)
+    assert task.apple_done.item()
+    task.apple.is_static = lambda **kwargs: torch.tensor([False])
+    assert not finish(task, tick)["success"].item()
+    assert task.held_count.item() == 0
