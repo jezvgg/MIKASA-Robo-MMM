@@ -18,6 +18,7 @@ def dense_samples(positions, max_joint_step=0.025):
 def path_clear(planner, current, positions, *, initial_contacts=()):
     """Planning-model updates only; preserve all other joints and all fixtures."""
     p = planner.planner
+    planner._last_path_collision = None
     move = list(p.move_group_joint_indices)
     current = np.asarray(current, dtype=float)
     p.robot.set_qpos(p.fold_qpos(current), True)
@@ -35,5 +36,7 @@ def path_clear(planner, current, positions, *, initial_contacts=()):
                          for c in p.planning_world.check_collision()}
                 if pairs and pairs <= allowed:
                     continue
+            planner._last_path_collision = [(c.link_name1,c.link_name2)
+                for c in p.planning_world.check_collision()]
             return False
     return True

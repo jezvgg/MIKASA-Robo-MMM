@@ -1,5 +1,5 @@
 {
-  "profile_version": 13,
+  "profile_version": 18,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -127,21 +127,21 @@
       1
     ],
     "gripper_switch_control_step_parity": 0,
-    "motion_revision": "bounded_search_and_10cm_station_candidate_2026_09_27",
-    "navigation_posture": "compact_condiment_carry_upright_wrist",
+    "motion_revision": "bounded_dual_ik_cone_ablation_2026_09_27",
+    "navigation_posture": "dair_6168333_tcp_25cm_fixed_named_core_actual_grasp_wrists",
     "pour_motion": "wrist_roll_only",
     "cue_observation_steps": 100,
     "left_wall_dock_approach": "diagonal_from_open_aisle_in_canonical_rest",
     "pour_hover_prechecked": true,
     "loaded_navigation_joint_targets": {
-      "torso_lift_joint": 0.38,
-      "shoulder_pan_joint": -0.37,
-      "shoulder_lift_joint": -0.8,
-      "upperarm_roll_joint": 1.7,
-      "elbow_flex_joint": 2.1,
-      "forearm_roll_joint": -0.6
+      "torso_lift_joint": 0.2,
+      "shoulder_pan_joint": -0.6557497327377413,
+      "shoulder_lift_joint": -0.12904068645626654,
+      "upperarm_roll_joint": 1.9212388766147683,
+      "elbow_flex_joint": 1.6507435522454401,
+      "forearm_roll_joint": -2.8097833941893957
     },
-    "grasp_lookahead": "horizontal_grasp_vertical_lift_then_fixed_base_pour_or_upright_carry",
+    "grasp_lookahead": "horizontal_grasp_lift_then_complete_direct_or_loaded_drive_hover_wrist_pour",
     "lift_fallback": "refuse_no_RRT",
     "grasp_fallback": "horizontal_checked_chain_only",
     "initial_payload_support_contact": "only_initial_sample_exact_payload_counter_pair",
@@ -151,7 +151,12 @@
     "direct_pour_priority": true,
     "motion_parameters": {
       "station_backoff_m": 0.1,
-      "compact_initial_and_travel": false
+      "compact_initial_and_travel": false,
+      "grasp_selection": "diverse",
+      "pour_preview_clearance_reserve_m": 0.0,
+      "pour_preview_wrist_reserve_rad": 0.0,
+      "hover_ik_start": "dual",
+      "upright_compensation": "exact"
     },
     "max_transfer_tilt_degrees_exclusive": 15.0,
     "search_limits": {
@@ -160,7 +165,9 @@
       "smooth_transitions_per_candidate": 2,
       "ik_initial_guesses_per_call": 32,
       "planning_seconds": 120.0,
-      "excludes": "environment_loading_and_physical_execution"
+      "excludes": "environment_loading_and_physical_execution",
+      "hover_initial_guesses_per_geometry": 32,
+      "hover_endpoints_per_geometry": 2
     },
     "experimental_named_poses": {
       "reference_compact": {
@@ -177,6 +184,66 @@
     "reference_pose_experiment": {
       "selected": false,
       "reason": "0/4 paired priority scenes versus 1/4 canonical initial pose with bounded planner; full pose data kept in private audit"
+    },
+    "loaded_carry_reference": "pa40l/ManiSkill:dair@616833324e135a9c28cdd707b7cadd77d7ebcdf8 carry_pose TCP25cm",
+    "loaded_drive": "direct_no_intermediate_aisle_point",
+    "candidate_journal": true,
+    "roll_history": "actual_plus_candidate_local_prefix",
+    "hover_orientation": "upright_yaw_anchor_toward_bowl_then_bounded_8_options",
+    "candidate_ablation_parameters": {
+      "grasp_selection": [
+        "legacy",
+        "margin",
+        "diverse"
+      ],
+      "grasp_heights": [
+        "original",
+        "low",
+        "mixed"
+      ],
+      "grasp_archive_warm_starts": [
+        false,
+        true
+      ],
+      "hover_ik_start": [
+        "preferred",
+        "current"
+      ],
+      "grasp_archive_queries": {
+        "1": 0,
+        "3": 3
+      }
+    },
+    "archive_warm_start_provenance": {
+      "source_run": "upright-smooth-2026-09-27/season-final-004",
+      "selection": "four medoids from nine compact-core-compatible successful grasps; initialization only; no seed lookup",
+      "joint_names": [
+        "shoulder_lift_joint",
+        "upperarm_roll_joint",
+        "elbow_flex_joint",
+        "forearm_roll_joint",
+        "wrist_flex_joint",
+        "wrist_roll_joint"
+      ]
+    },
+    "pour_preview_reserve_provenance": {
+      "sample": "108 executed development hover transitions",
+      "observed_max_lost_wrist_span_rad": 0.00792,
+      "observed_max_clearance_drift_m": 0.005304,
+      "scope": "empirical planning reserve, unchanged physical limits and success predicate"
+    },
+    "hover_dual_start": "16 predicted +16 actual only when a predicted continuation exists; otherwise32 actual",
+    "cone_ablation": {
+      "modes": [
+        "exact",
+        "cone_hover12",
+        "cone12"
+      ],
+      "max_tilt_degrees": 12,
+      "directions": 17,
+      "arm_schedules": 2,
+      "fallback": null,
+      "physical_rejection_degrees": 15
     }
   },
   "quality_exceptions": {

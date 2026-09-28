@@ -1,6 +1,8 @@
 """Connected horizontal grasp, vertical lift and one compact carry posture."""
 from contextlib import contextmanager
 from collections import Counter
+import time
+from planners.season_dish_candidates import candidates as grasp_candidates, journal, failure_kind
 from planners.oracle.search_budget import measured
 import mplib
 import numpy as np
@@ -12,17 +14,18 @@ from planners.oracle.straight_paths import straight_plan, execute_straight
 from planners.oracle.path_clearance import path_clear
 from robots.fetch.utils import attach_object, convert_object_name, unwrap_toward
 from planners.oracle.upright_payload import upright_path, elbow_only, preview_roll_history, kinematics
-from planners.season_dish_transfer import plan_loaded_hover
+from planners.season_dish_transfer import plan_loaded_hover, plan_bowl_drive
 
-CARRY_TARGETS = dict(torso_lift_joint=.38, shoulder_pan_joint=-.37,
-    shoulder_lift_joint=-.8, upperarm_roll_joint=1.7, elbow_flex_joint=2.1,
-    forearm_roll_joint=-.6, wrist_flex_joint=.5, wrist_roll_joint=-.4)
+# Fitted once from pa40l/ManiSkill:dair@6168333 carry_pose geometry on the
+# unchanged DSFetch. TCP is 25 cm in front of the base. Wrists are solved from
+# the measured payload transform, not copied from this reference grasp.
+CARRY_TARGETS = dict(torso_lift_joint=.20, shoulder_pan_joint=-.6557497327377413,
+    shoulder_lift_joint=-.12904068645626654, upperarm_roll_joint=1.9212388766147683,
+    elbow_flex_joint=1.6507435522454401, forearm_roll_joint=-2.8097833941893957,
+    wrist_flex_joint=-1.9402379512175012, wrist_roll_joint=1.907999995746957)
 
 
 def carry_targets(task):
-    if getattr(task, "motion_parameters", {}).get("compact_initial_and_travel", False):
-        from my_scenes.season_postures import REFERENCE_COMPACT
-        return REFERENCE_COMPACT
     return CARRY_TARGETS
 
 
@@ -31,6 +34,30 @@ def carry_goal(task, current):
     for name, value in carry_targets(task).items():
         goal[int(task.agent.robot.active_joints_map[name].active_index[0])] = value
     return goal
+
+
+@measured
+def carry_path(planner, task, current, attachment):
+    path = upright_path(planner, task, current, carry_goal(task,current), attachment, terminal="carry")
+    if path is None:
+        return None
+    reached = current.copy()
+    reached[planner.planner.move_group_joint_indices] = path['position'][-1]
+    hand_tcp = (task.agent.robot.links_map['gripper_link'].pose[0].sp.inv()
+                * task.agent.tcp.pose[0].sp).to_transformation_matrix()
+    base = task.agent.base_link.pose[0].sp.to_transformation_matrix()
+    hand = kinematics(planner,task).matrix(reached)
+    tcp = (np.linalg.inv(base) @ hand @ hand_tcp)[:3,3]
+    payload = (np.linalg.inv(base) @ hand @ attachment)[:3,3]
+    # A second exact-upright wrist branch can put the TCP 85 cm ahead even at
+    # identical shoulder/elbow angles. Reject that branch as noncompact.
+    if not (.10 <= tcp[0] <= .40 and abs(tcp[1]) <= .20
+            and np.linalg.norm(payload[:2]) <= .40):
+        planner._upright_failures.append(dict(reason='noncompact_wrist_branch',
+                                              tcp_in_base=tcp.tolist()))
+        return None
+    path['tcp_in_base'] = tcp.tolist()
+    return path
 
 
 def initial_support_contacts(planner, obj, current):
@@ -102,34 +129,9 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
     current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
     folded = p.fold_qpos(current)
     reasons=Counter(); planner._chain_reasons=reasons
-    # Eight geometric candidates total, each with one IK endpoint. Vary the
-    # horizontal approach around the upright bottle, never pitch the camera down.
-    templates = ((.5, 2.1, 1.8, -2.3, .75, .1),
-                 (-.6, .9, 1.8, -3.0, 1.05, 2.4))
-    names = ('shoulder_lift_joint', 'upperarm_roll_joint', 'elbow_flex_joint',
-             'forearm_roll_joint', 'wrist_flex_joint', 'wrist_roll_joint')
-    indices = [int(task.agent.robot.active_joints_map[n].active_index[0]) for n in names]
-    specifications=((0.,0.,.20,1),(30.,0.,.20,0),(30.,0.,.10,0),
-                    (30.,.01,None,0),(0.,0.,.20,0),(0.,0.,None,0),
-                    (-30.,0.,.20,0),(0.,0.,None,1))
-    candidates=[]
-    for yaw,dz,torso,template in specifications:
-        rot=rotation([0,0,1],np.deg2rad(yaw))
-        orientation=mat2quat(rot@grasp.to_transformation_matrix()[:3,:3])
-        g=sapien.Pose(grasp.p+[0,0,dz],orientation)
-        r=sapien.Pose(g.p+rot@(reach.p-grasp.p),orientation)
-        initial=folded.copy();initial[indices]=templates[template]
-        if torso is not None:initial[3]=torso
-        status,found=p.IK(p._transform_goal_to_wrt_base(mplib.Pose(r.p,r.q)),
-                          initial,[True]*3+[torso is not None]+[False]*11,n_init_qpos=n_init)
-        reasons['ik '+str((yaw,dz,torso,template))+' '+status]+=1
-        if status!='Success':continue
-        goals=[unwrap_toward(q,initial,p.joint_limits) for q in np.atleast_2d(found)]
-        q=min(goals,key=lambda q:float(np.linalg.norm(q[3:13]-initial[3:13])))
-        for idx in p._root_cols():q[idx]=current[idx]
-        candidates.append((q,g,r))
-    reasons['bounded candidates']=len(candidates)
-    if not candidates:return None
+    candidates = grasp_candidates(planner,task,grasp,reach,reasons,n_init=n_init)
+    if not candidates:
+        return None
     mesh = obj.get_first_collision_mesh(to_world_frame=True)
     tallest = max(float(a.get_first_collision_mesh(to_world_frame=True).bounds[1,2])
                   for a in (task.shaker,task.condiment_bottle))
@@ -139,10 +141,16 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
     heights = list(dict.fromkeys((height, max(floor, height-.04))))
     moves = list(p.move_group_joint_indices)
     other=task.condiment_bottle if obj is task.shaker else task.shaker
-    for q,grasp,reach in candidates:
+    for q,grasp,reach,record in candidates:
+        candidate_start = time.perf_counter()
         contact=straight_plan(planner,grasp,current=q)
         reasons['contact '+str(contact is not None)]+=1
-        if contact is None:continue
+        if contact is None:
+            journal(planner,record,'contact',failure_kind(planner._straight_failures,
+                    getattr(planner,'_last_path_collision',None)),
+                    statuses=planner._straight_failures,
+                    collision=getattr(planner,'_last_path_collision',None))
+            continue
         with common.keepout(planner,[obj,other],pad=[.025,.03]):
             line=p.plan_qpos_line(q,current,time_step=task.control_timestep,
                                  ref_yaw=float(current[2]),qpos_step=.02)
@@ -152,7 +160,10 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
         if not line_clear:
             with common.keepout(planner,[obj,other],pad=[.025,.03]):
                 line=monotone_approach(planner,task,current,q)
-            if line is None:continue
+            if line is None:
+                journal(planner,record,'approach',failure_kind([],getattr(planner,'_last_path_collision',None)),
+                        collision=getattr(planner,'_last_path_collision',None))
+                continue
         closed=q.copy();closed[moves]=contact['position'][-1]
         continuation=None
         with preview_payload(planner,task,obj,grasp,closed) as attachment, common.keepout(planner,[other],pad=.03):
@@ -165,6 +176,7 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
                 reasons['lift '+str(up is not None)]+=1
                 if up is None:
                     for failure in planner._straight_failures:reasons['lift reason '+failure]+=1
+                    journal(planner,record,'lift',failure_kind(planner._straight_failures,getattr(planner,'_last_path_collision',None)), height_m=z,statuses=planner._straight_failures)
                     continue
                 raised=closed.copy();raised[moves]=up['position'][-1]
                 # Both approach families move each joint monotonically. Their
@@ -176,22 +188,48 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
                 # The preview must spend the roll range used by the proposed
                 # grasp/lift, not just the already executed approach to the table.
                 with preview_roll_history(planner,prefix), elbow_only(planner,task):
-                    # Either continuation makes this grasp usable. The physical
-                    # post-lift decision still always checks direct pouring first.
-                    fold=upright_path(planner,task,raised,carry_goal(task,raised),attachment)
-                    direct=None if fold is not None else plan_loaded_hover(planner,task,raised,attachment)
-                    if direct is not None:fold=direct['approach']
+                    # A reachable carry endpoint is not a usable continuation
+                    # unless its loaded drive, hover and wrist-only pour also
+                    # pass. These are model previews, never physical retries.
+                    # The physical post-lift choice still checks direct first.
+                    fold=carry_path(planner,task,raised,attachment)
+                    route=None
+                    if fold is not None:
+                        carried=raised.copy();carried[moves]=fold['position'][-1]
+                        fold_prefix=np.broadcast_to(raised,(len(fold['position']),len(raised))).copy()
+                        fold_prefix[:,moves]=fold['position']
+                        dock=np.asarray(task._bowl_dock_np)[0]
+                        face=np.array([np.cos(dock[2]),np.sin(dock[2]),0.])
+                        with preview_roll_history(planner,fold_prefix):
+                            route=plan_bowl_drive(planner,task,carried,attachment,
+                                                  np.r_[dock[:2],0.],face)
+                        if route is None:
+                            journal(planner,record,'loaded_continuation','pour_or_loaded_route_unavailable',
+                                    height_m=z,details=getattr(planner,'_hover_failures',[]))
+                    direct=None if route is not None else plan_loaded_hover(planner,task,raised,attachment)
+                    if route is None:fold=None if direct is None else direct['approach']
                 reasons['direct pour '+str(direct is not None)]+=1
                 reasons['upright continuation '+str(fold is not None)]+=1
-                if fold is None:continue
-                continuation=(up,fold,z,direct)
+                if fold is None:
+                    journal(planner,record,'continuation','carry_and_direct_pour_unavailable',
+                            height_m=z, upright_reasons=getattr(planner,'_upright_failures',[]))
+                    continue
+                continuation=(up,fold,z,direct,route)
                 break
-        if continuation is None:continue
-        up,fold,z,direct=continuation
+        if continuation is None:
+            journal(planner,record,'rejected','no_continuation',seconds=time.perf_counter()-candidate_start)
+            continue
+        up,fold,z,direct,route=continuation
         all_knots=np.vstack([line['position'],contact['position'],up['position'],fold['position']])
         if direct is not None:all_knots=np.vstack([all_knots,direct['pour']['position']])
+        if route is not None:
+            all_knots=np.vstack([all_knots,route['hover']['approach']['position'],route['hover']['pour']['position']])
         with elbow_only(planner,task):
-            if not p.accepts(all_knots,move_group=True):continue
+            if not p.accepts(all_knots,move_group=True):
+                journal(planner,record,'complete_path','joint_limit',seconds=time.perf_counter()-candidate_start)
+                continue
+        journal(planner,record,'accepted',seconds=time.perf_counter()-candidate_start,
+                direct_pour=direct is not None,complete_wrist_pour=True)
         return dict(approach=line,contact=contact,lift_z=z,grasp_pose=grasp,
                     grasp_qpos=closed,carry=fold,direct_pour=direct is not None,
                     progress_powers=line.get('progress_powers'),

@@ -43,7 +43,7 @@ from utils.mikasa.execution_noise import configure_execution_noise, transfer_pha
 # against tools/stub_planner.py (K38).
 
 from planners.oracle.search_budget import install as install_search_budget, PlanningBudgetExceeded
-from planners.season_dish_paths import CARRY_TARGETS, carry_targets, carry_goal, grasp_with_continuation, initial_support_contacts
+from planners.season_dish_paths import CARRY_TARGETS, carry_targets, carry_goal, carry_path, grasp_with_continuation, initial_support_contacts
 from planners.oracle.path_clearance import path_clear
 from planners.oracle.straight_paths import straight_plan, execute_straight
 from planners.oracle.upright_payload import upright_path, elbow_only, enforce_upright, PayloadTiltError
@@ -854,11 +854,11 @@ def approach_aligned_grasp_info(obb, ee_direction, target_closing) -> dict:
 
 
 
-def drive_to_counter(env, planner, dock, face):
+def drive_to_counter(env, planner, dock, face, *, loaded=False):
     """Approach a left-wall dock diagonally with the canonical rest arm clear."""
     # Facing west at x<1 m sweeps the canonical forearm into the left wall.
     # Approach those docks from the same open aisle; do not change the arm pose.
-    if float(dock[0]) < 1.0:
+    if not loaded and float(dock[0]) < 1.0:
         waypoint = np.asarray(dock) + np.array([0.40, -0.60, 0.0])
         say(env, "approach left dock from open aisle", waypoint=waypoint.tolist())
         res = planner.drive_base(target_pos=waypoint,
@@ -874,11 +874,11 @@ def navigation_posture(env, planner, task, target):
     """Preserve the compact shoulder/elbow, compensate the wrist along the fold."""
     planner.planner.update_from_simulation()
     current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
-    path = upright_path(planner, task, current, carry_goal(task, current), held_transform(task, target))
+    path = carry_path(planner, task, current, held_transform(task, target))
     if path is None:
         return fail(env, "upright compact carry path refused")
     say(env, "compact upright condiment carry", knots=len(path["position"]),
-        predicted_max_tilt_deg=path['predicted_max_tilt_deg'])
+        predicted_max_tilt_deg=path['predicted_max_tilt_deg'], tcp_in_base=path['tcp_in_base'])
     with elbow_only(planner, task), transfer_phase(planner, "fold for navigation"):
         return planner.follow_forward_path_w_refinement(path, refine=True)
 
@@ -1310,12 +1310,8 @@ def _solve(
     planner.navigation_arrival_tolerance = 0.10
     planner.forward_navigation = True
     planner.prefer_low_roll_ik()
-    # Keep canonical rest inside every later roll window, even if the sampled
-    # starting jitter lies on the other side of its exact joint values.
-    reserved = np.asarray([carry_targets(env.unwrapped)[name] for name in
-                           ("upperarm_roll_joint", "forearm_roll_joint", "wrist_roll_joint")])
-    planner._roll_low = np.minimum(planner._roll_low, reserved)
-    planner._roll_high = np.maximum(planner._roll_high, reserved)
+    # Roll limits include only measured history. Candidate continuations add
+    # their own hypothetical prefix through preview_roll_history.
     configure_execution_noise(
         planner, env, int(seed or 0) + 300007 if execution_noise_seed is None else execution_noise_seed,
         action_noise=action_noise, noise_hold=noise_hold)
@@ -1516,7 +1512,7 @@ def _solve(
                     planner.fixed_action_targets = dict(previous)
                     planner.fixed_action_targets.update(fixed)
                     try:
-                        res = drive_to_counter(env, planner, dock_xyz, face)
+                        res = drive_to_counter(env, planner, dock_xyz, face, loaded=True)
                     finally:
                         planner.fixed_action_targets = previous
                     if res == -1 or common.stopped_by_horizon(planner):
