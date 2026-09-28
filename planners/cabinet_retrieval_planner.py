@@ -79,6 +79,10 @@ SETTLE_STEPS = 30
 #: HANDLE_DOCK is where every arc-pull number was measured from (W12/W14).
 HANDLE_BAR = (2.302, -0.430, 1.592)
 HANDLE_DOCK = (2.30, -1.30)
+#: D3: the published door grasp's elbow/wrist branch. Profile 13 took it at
+#: 146 of 154 grasp closures; the other 8 were first-door screws that did not
+#: jam at shoulder_lift and kept a positive elbow.
+DOOR_GRASP_BRANCH = dict(elbow=-1, wrist=1)
 DOOR_OPEN_TARGET = 1.75
 """Past the task's 1.6 on purpose, for two measured reasons (sweep 2): the freed
 door drifts back ~0.05 rad after the release (1.601 -> 1.552), and at 1.55 the
@@ -934,43 +938,45 @@ def grasp_the_bar(env, planner, task, door: DoorSpec, *, bar, dock):
     # one cabinet straddle the box centre 10.3 cm apart, so what killed the
     # search's first solo was not the axis but a WOUND wrist after the drive —
     # the caller normalizes the roll joints before this stage.
-    grasp = A.build_grasp_pose(np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0]),
-                               np.array(bar))
-    pre = grasp * sapien.Pose([0, 0, -0.15])
-    # The PRE-grasp plans WITH the doors in the world: it has 15 cm of clearance
-    # off the bar, and a door-free plan is licensed to route THROUGH the panel —
-    # sweep 5, seed 9 measured exactly that: the executed pre-grasp swept the
-    # door to 0.55 rad before the grip ever closed.
-    res = common.arm_move(env, planner, pre, who=WHO, stage="pre-grasp the handle",
-                          tries=3)
-    if res != -1 and common.stopped_by_horizon(planner):
-        return res, True
-    if res == -1:
-        return fail(env, "pre-grasp the handle"), True
-    # K100 contact stroke on the SHORT grasp leg only: the bar stands 5 cm off
-    # the panel and 5 cm from the LEFT door's edge, so the open fingers around
-    # it collide with the doors in the planning world by construction — sweep 3
-    # measured this leg refusing `finger<->hingeleftdoor` on 6 of 10 seeds (and
-    # flipping between sweeps: wall-clock RRT). The fixture being grasped is the
-    # goal, not an obstacle (same_drawer's bar reach does exactly this); and
-    # K102 caps the unchecked contact: the touch IS the arrival — stop at first
-    # gripper contact with the cabinet and close there. `gripper_touching`
-    # matches entity names by substring; the stem names the whole assembly.
-    touch = types.SimpleNamespace(name=door.stem)
-    say(env, "grasp the handle", stop_on="first touch of the cabinet")
-    with common.contact_stroke(planner, [door.stem]):
-        res = -1
-        for _ in range(3):
-            res = planner.static_manipulation(grasp, stop_on_touch=touch)
-            if res != -1:
-                break
-            say(env, "grasp the handle: plan refused, one more draw")
-    planner.planner.update_from_simulation()
-    if res != -1 and common.stopped_by_horizon(planner):
-        return res, True
-    if res == -1:
-        return fail(env, "grasp the handle"), True
-    return res, False
+    branch = getattr(planner, "goal_branch", None)
+    with branch(**DOOR_GRASP_BRANCH) if callable(branch) else contextlib.nullcontext():
+        grasp = A.build_grasp_pose(np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0]),
+                                   np.array(bar))
+        pre = grasp * sapien.Pose([0, 0, -0.15])
+        # The PRE-grasp plans WITH the doors in the world: it has 15 cm of clearance
+        # off the bar, and a door-free plan is licensed to route THROUGH the panel —
+        # sweep 5, seed 9 measured exactly that: the executed pre-grasp swept the
+        # door to 0.55 rad before the grip ever closed.
+        res = common.arm_move(env, planner, pre, who=WHO, stage="pre-grasp the handle",
+                              tries=3)
+        if res != -1 and common.stopped_by_horizon(planner):
+            return res, True
+        if res == -1:
+            return fail(env, "pre-grasp the handle"), True
+        # K100 contact stroke on the SHORT grasp leg only: the bar stands 5 cm off
+        # the panel and 5 cm from the LEFT door's edge, so the open fingers around
+        # it collide with the doors in the planning world by construction — sweep 3
+        # measured this leg refusing `finger<->hingeleftdoor` on 6 of 10 seeds (and
+        # flipping between sweeps: wall-clock RRT). The fixture being grasped is the
+        # goal, not an obstacle (same_drawer's bar reach does exactly this); and
+        # K102 caps the unchecked contact: the touch IS the arrival — stop at first
+        # gripper contact with the cabinet and close there. `gripper_touching`
+        # matches entity names by substring; the stem names the whole assembly.
+        touch = types.SimpleNamespace(name=door.stem)
+        say(env, "grasp the handle", stop_on="first touch of the cabinet")
+        with common.contact_stroke(planner, [door.stem]):
+            res = -1
+            for _ in range(3):
+                res = planner.static_manipulation(grasp, stop_on_touch=touch)
+                if res != -1:
+                    break
+                say(env, "grasp the handle: plan refused, one more draw")
+        planner.planner.update_from_simulation()
+        if res != -1 and common.stopped_by_horizon(planner):
+            return res, True
+        if res == -1:
+            return fail(env, "grasp the handle"), True
+        return res, False
 
 
 def open_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=None,

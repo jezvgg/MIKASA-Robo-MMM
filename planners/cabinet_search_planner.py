@@ -669,8 +669,17 @@ def drive_home(env, planner, task):
         say(env, "waypoint noise", offset_m=delta.tolist())
     planner.planner.update_from_simulation()
     say(env, "drive home", home=[hx, hy])
-    res = planner.drive_base(target_pos=np.array([hx, hy, 0.0]), target_view_vec=view,
-                             freeze_arm=True)
+    # D5: stop within this distance instead of the ~1-2 cm reverse at the end of
+    # the braking tail. The home disk is 0.20 m; docks at doors keep full precision.
+    tolerance = float(getattr(task, "motion_parameters", {}).get("home_arrival_tolerance_m", 0.0))
+    assert 0.0 <= tolerance <= 0.05, tolerance
+    previous = getattr(planner, "navigation_arrival_tolerance", 0.0)
+    planner.navigation_arrival_tolerance = tolerance
+    try:
+        res = planner.drive_base(target_pos=np.array([hx, hy, 0.0]), target_view_vec=view,
+                                 freeze_arm=True)
+    finally:
+        planner.navigation_arrival_tolerance = previous
     if res == -1:
         return -1
     if common.stopped_by_horizon(planner):

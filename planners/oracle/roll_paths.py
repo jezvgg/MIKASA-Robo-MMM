@@ -53,6 +53,43 @@ class RollPathPlanner:
             and np.all(high - low <= np.pi - self.margin)
         )
 
+    def ends_on_goal_branch(self, qpos, *, move_group=False):
+        """Only the endpoint must carry the owner's `_goal_branch` signs (D3).
+
+        Unlike `_grasp_branch`, the path may pass through the other branch: the
+        transit posture itself has a positive elbow.
+        """
+        full = np.atleast_2d(qpos)
+        if not len(full):
+            return True
+        for index, sign in getattr(self._owner, "_goal_branch", {}).items():
+            column = list(self.move_group_joint_indices).index(index) if move_group else index
+            if sign * full[-1, column] < self.margin:
+                return False
+        return True
+
+    def _screw_on_goal_branch(self, goal, current, *args, **kwargs):
+        """Retry a screw that ended on the wrong branch with shoulder_lift held.
+
+        This is the solver's own `joint limit` unjam variant, which the published
+        door grasps already take whenever their screw jams at shoulder_lift.
+        """
+        if kwargs.get("masked_joints") is None:
+            return None
+        joints = self._owner.env_agent.robot.active_joints_map
+        held = np.array(kwargs["masked_joints"], dtype=bool).copy()
+        held[int(joints["shoulder_lift_joint"].active_index[0])] = False
+        result = self._planner.plan_screw(goal, current, *args, **{**kwargs, "masked_joints": held})
+        if result.get("status") != "Success":
+            return None
+        if not (self.accepts(result["position"], move_group=True)
+                and self.ends_on_goal_branch(result["position"], move_group=True)):
+            return None
+        report = getattr(self._owner, "_report", None)
+        if callable(report):
+            report("goal_branch", held="shoulder_lift_joint", knots=int(len(result["position"])))
+        return result
+
     @contextmanager
     def _limits(self):
         previous = self._planner.joint_limits
@@ -81,10 +118,10 @@ class RollPathPlanner:
         # proposed path to a different roll angle than the simulator's actual one.
         if not self.accepts(current):
             return (failure, None) if method == "IK" else {"status": failure}
-        if method == "plan_qpos_line" and not self.accepts(goal):
+        if method == "plan_qpos_line" and not (self.accepts(goal) and self.ends_on_goal_branch(goal)):
             return {"status": failure}
         if method == "plan_qpos":
-            goal = [q for q in goal if self.accepts(q)]
+            goal = [q for q in goal if self.accepts(q) and self.ends_on_goal_branch(q)]
             if not goal:
                 return {"status": failure}
         if method == "IK":
@@ -116,12 +153,18 @@ class RollPathPlanner:
                     status, candidates = result
                     if status != "Success":
                         return result
-                    valid = [q for q in np.atleast_2d(candidates) if self.accepts(q)]
+                    valid = [q for q in np.atleast_2d(candidates)
+                             if self.accepts(q) and self.ends_on_goal_branch(q)]
                     if not valid:
                         return failure, None
                     return status, valid[0] if kwargs.get("return_closest") else valid
                 if result.get("status") != "Success":
                     return result
                 if self.accepts(result["position"], move_group=True):
-                    return result
+                    if self.ends_on_goal_branch(result["position"], move_group=True):
+                        return result
+                    if method == "plan_screw":
+                        held = self._screw_on_goal_branch(goal, current, *args, **kwargs)
+                        return held if held is not None else {
+                            "status": "collection goal branch: wrong elbow/wrist signs at the end"}
         return {"status": failure}
