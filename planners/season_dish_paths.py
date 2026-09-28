@@ -126,6 +126,9 @@ def monotone_approach(planner, task, start, goal):
 def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
     """Reject grasps whose lift or carry would require changing elbow branch."""
     p = planner.planner
+    rule = getattr(task, 'motion_parameters', {}).get('grasp_continuation', 'complete')
+    if rule not in ('complete', 'carry_or_direct'):
+        raise ValueError(f'Unknown grasp continuation: {rule}')
     current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
     folded = p.fold_qpos(current)
     reasons=Counter(); planner._chain_reasons=reasons
@@ -194,7 +197,7 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
                     # The physical post-lift choice still checks direct first.
                     fold=carry_path(planner,task,raised,attachment)
                     route=None
-                    if fold is not None:
+                    if fold is not None and rule=='complete':
                         carried=raised.copy();carried[moves]=fold['position'][-1]
                         fold_prefix=np.broadcast_to(raised,(len(fold['position']),len(raised))).copy()
                         fold_prefix[:,moves]=fold['position']
@@ -206,8 +209,14 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
                         if route is None:
                             journal(planner,record,'loaded_continuation','pour_or_loaded_route_unavailable',
                                     height_m=z,details=getattr(planner,'_hover_failures',[]))
-                    direct=None if route is not None else plan_loaded_hover(planner,task,raised,attachment)
-                    if route is None:fold=None if direct is None else direct['approach']
+                    if rule=='complete':
+                        direct=None if route is not None else plan_loaded_hover(planner,task,raised,attachment)
+                        if route is None:fold=None if direct is None else direct['approach']
+                    else:
+                        # Profile15 rule: a carry endpoint or a direct pour
+                        # suffices; the loaded route is checked after lifting.
+                        direct=None if fold is not None else plan_loaded_hover(planner,task,raised,attachment)
+                        if direct is not None:fold=direct['approach']
                 reasons['direct pour '+str(direct is not None)]+=1
                 reasons['upright continuation '+str(fold is not None)]+=1
                 if fold is None:
@@ -229,7 +238,7 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
                 journal(planner,record,'complete_path','joint_limit',seconds=time.perf_counter()-candidate_start)
                 continue
         journal(planner,record,'accepted',seconds=time.perf_counter()-candidate_start,
-                direct_pour=direct is not None,complete_wrist_pour=True)
+                direct_pour=direct is not None,complete_wrist_pour=route is not None or direct is not None)
         return dict(approach=line,contact=contact,lift_z=z,grasp_pose=grasp,
                     grasp_qpos=closed,carry=fold,direct_pour=direct is not None,
                     progress_powers=line.get('progress_powers'),

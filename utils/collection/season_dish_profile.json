@@ -1,5 +1,5 @@
 {
-  "profile_version": 18,
+  "profile_version": 20,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -127,7 +127,7 @@
       1
     ],
     "gripper_switch_control_step_parity": 0,
-    "motion_revision": "bounded_dual_ik_cone_ablation_2026_09_27",
+    "motion_revision": "bounded_legacy_carry_or_direct_dual_hover_2026_09_28",
     "navigation_posture": "dair_6168333_tcp_25cm_fixed_named_core_actual_grasp_wrists",
     "pour_motion": "wrist_roll_only",
     "cue_observation_steps": 100,
@@ -142,6 +142,10 @@
       "forearm_roll_joint": -2.8097833941893957
     },
     "grasp_lookahead": "horizontal_grasp_lift_then_complete_direct_or_loaded_drive_hover_wrist_pour",
+    "grasp_lookahead_options": {
+      "complete": "default since profile16: carry must also pass loaded drive, hover and wrist-only pour before grasping",
+      "carry_or_direct": "profile15 rule: carry endpoint or direct pour before grasping; loaded route checked after lift, still before driving"
+    },
     "lift_fallback": "refuse_no_RRT",
     "grasp_fallback": "horizontal_checked_chain_only",
     "initial_payload_support_contact": "only_initial_sample_exact_payload_counter_pair",
@@ -152,7 +156,8 @@
     "motion_parameters": {
       "station_backoff_m": 0.1,
       "compact_initial_and_travel": false,
-      "grasp_selection": "diverse",
+      "grasp_selection": "legacy",
+      "grasp_continuation": "carry_or_direct",
       "pour_preview_clearance_reserve_m": 0.0,
       "pour_preview_wrist_reserve_rad": 0.0,
       "hover_ik_start": "dual",
@@ -244,6 +249,13 @@
       "arm_schedules": 2,
       "fallback": null,
       "physical_rejection_degrees": 15
+    },
+    "finalist_selection": {
+      "development_pool": "7700000-7700039, same waypoint/execution noise as all bounded variants",
+      "selected": "legacy grasp selection + carry_or_direct continuation + dual hover IK start, exact upright wrist, no preview reserves",
+      "development_source_successes": "30/40 (native20 30/30, held10 30/30); profile15 aligned 29/40 is a strict subset; 14 variants compared",
+      "search": "120s budget, IK32, 8 grasp configurations unchanged; mean 25.5s, max 67.7s, no exhaustion",
+      "holdout": "sealed 40 (9010000.., 20 per condiment) run only after this selection; no tuning on it"
     }
   },
   "quality_exceptions": {
