@@ -173,3 +173,43 @@ def test_joint_line_checks_real_open_fingers_after_hypothetical_closed_preview()
     assert native.plan_qpos_line(current, current)["status"] == "Success"
     assert guard.plan_qpos_line(current, current)["status"] == "finger collision"
     np.testing.assert_array_equal(current[13:], [.05, .05])
+
+
+def test_reference_starts_only_after_random_ik_fails_and_stay_bounded():
+    guard, native, owner = make_guard()
+    current = np.zeros(15)
+    random_goal = np.zeros(15)
+    random_goal[12] = 3.5  # outside the roll window: rejected
+    near = np.zeros(15)
+    near[12] = 1.0
+    starts = []
+
+    def ik(goal, start, mask=None, *, n_init_qpos=20):
+        starts.append((start.copy(), n_init_qpos))
+        if n_init_qpos == 1 and start[5] == -0.9:
+            return "Success", [near]
+        if n_init_qpos == 1:
+            return "Success", [random_goal]
+        return "Success", [random_goal]
+
+    native.IK = ik
+    # No references: the unchanged refusal.
+    assert guard.IK(None, current, n_init_qpos=40)[0] != "Success"
+    assert len(starts) == 1
+
+    owner._ik_reference_arms = [("a", {5: -0.9}), ("b", {5: 0.6})]
+    owner._ik_reference_used = []
+    status, goals = guard.IK(None, current, n_init_qpos=40)
+    assert status == "Success"
+    np.testing.assert_array_equal(np.atleast_2d(goals), [near])
+    assert owner._ik_reference_used == ["a"]
+    assert [n for _, n in starts[1:]] == [40, 1, 1]
+    assert starts[2][0][5] == -0.9 and starts[3][0][5] == 0.6
+    np.testing.assert_array_equal(current, np.zeros(15))
+
+    # A random-restart solution inside the window still wins; no reference call.
+    starts.clear()
+    native.IK = lambda goal, start, mask=None, *, n_init_qpos=20: (
+        starts.append(n_init_qpos) or ("Success", [near]))
+    assert guard.IK(None, current, n_init_qpos=40)[0] == "Success"
+    assert starts == [40]

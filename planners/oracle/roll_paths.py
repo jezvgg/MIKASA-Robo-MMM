@@ -75,6 +75,49 @@ class RollPathPlanner:
         finally:
             self._planner.joint_limits = previous
 
+    def _ik_mask(self, current, supplied):
+        mask = np.zeros(len(current), dtype=bool)
+        if supplied is not None and len(supplied):
+            mask[:] = supplied
+        movable = np.zeros(len(current), dtype=bool)
+        movable[self.move_group_joint_indices] = True
+        return mask | ~movable
+
+    def reference_goals(self, goal, current, mask):
+        """Accepted IK solutions from the owner's reference starts alone.
+
+        For callers whose random-restart solutions were valid IK but failed a
+        later check (for example the next contact stroke).
+        """
+        if not self.accepts(current):
+            return []
+        with self._limits():
+            return self._reference_ik(goal, current, self._ik_mask(current, mask))
+
+    def _reference_ik(self, goal, current, *args, **kwargs):
+        """Deterministic IK from fixed arm configurations, after random restarts.
+
+        The owner sets `_ik_reference_arms` ((label, {joint index: value}), ...)
+        only around a chosen motion. Each start is tried once; every solution
+        still passes the grasp branch and roll-window check of `accepts`.
+        """
+        references = getattr(self._owner, "_ik_reference_arms", None)
+        if not references:
+            return []
+        found = []
+        for label, arm in references:
+            start = np.array(current, dtype=float)
+            start[list(arm)] = list(arm.values())
+            status, candidates = self._planner.IK(
+                goal, start, *args, **dict(kwargs, n_init_qpos=1))
+            if status != "Success":
+                continue
+            for q in np.atleast_2d(candidates):
+                if self.accepts(q) and not any(np.linalg.norm(q - v) < 0.1 for v in found):
+                    found.append(q)
+                    self._owner._ik_reference_used.append(label)
+        return found
+
     def _plan(self, method, goal, current, *args, **kwargs):
         failure = "collection joint limit: no bounded path"
         # Prevent inherited fix_joint_limits from silently moving the start of a
@@ -91,13 +134,7 @@ class RollPathPlanner:
             # IK random restarts sample the full robot, although the returned
             # path moves only the arm/base group. Keep the head and fingers at
             # their real values, including in subsequent contact previews.
-            supplied = args[0] if args else kwargs.get("mask")
-            mask = np.zeros(len(current), dtype=bool)
-            if supplied is not None and len(supplied):
-                mask[:] = supplied
-            movable = np.zeros(len(current), dtype=bool)
-            movable[self.move_group_joint_indices] = True
-            mask |= ~movable
+            mask = self._ik_mask(current, args[0] if args else kwargs.get("mask"))
             if args:
                 args = (mask, *args[1:])
             else:
@@ -114,12 +151,13 @@ class RollPathPlanner:
                 result = getattr(self._planner, method)(goal, current, *args, **kwargs)
                 if method == "IK":
                     status, candidates = result
-                    if status != "Success":
-                        return result
-                    valid = [q for q in np.atleast_2d(candidates) if self.accepts(q)]
+                    valid = [] if status != "Success" else [
+                        q for q in np.atleast_2d(candidates) if self.accepts(q)]
                     if not valid:
-                        return failure, None
-                    return status, valid[0] if kwargs.get("return_closest") else valid
+                        valid = self._reference_ik(goal, current, *args, **kwargs)
+                    if not valid:
+                        return result if status != "Success" else (failure, None)
+                    return "Success", valid[0] if kwargs.get("return_closest") else valid
                 if result.get("status") != "Success":
                     return result
                 if self.accepts(result["position"], move_group=True):
