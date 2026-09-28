@@ -25,7 +25,17 @@ CARRY_TARGETS = dict(torso_lift_joint=.20, shoulder_pan_joint=-.6557497327377413
     wrist_flex_joint=-1.9402379512175012, wrist_roll_joint=1.907999995746957)
 
 
+# The identical carry hand pose with the forearm unrolled (forearm +pi, wrist flex
+# negated, wrist roll -pi); used with grasp_family="unrolled".
+UNROLLED_CARRY_TARGETS = dict(CARRY_TARGETS,
+    forearm_roll_joint=CARRY_TARGETS['forearm_roll_joint'] + np.pi,
+    wrist_flex_joint=-CARRY_TARGETS['wrist_flex_joint'],
+    wrist_roll_joint=CARRY_TARGETS['wrist_roll_joint'] - np.pi)
+
+
 def carry_targets(task):
+    if getattr(task, 'motion_parameters', {}).get('grasp_family', 'rolled') == 'unrolled':
+        return UNROLLED_CARRY_TARGETS
     return CARRY_TARGETS
 
 
@@ -122,6 +132,23 @@ def monotone_approach(planner, task, start, goal):
     return None
 
 
+def above_via(planner, task, q, reach, above_m):
+    """Configuration with the same hand orientation `above_m` over the standoff.
+
+    It is the end of a straight vertical screw from the standoff configuration
+    itself with base and torso held, so the elbow/wrist branch and roll angles
+    stay those of `q` by continuity. Returns the full qpos, or None.
+    """
+    pose = sapien.Pose(np.asarray(reach.p) + [0., 0., above_m], reach.q)
+    up = straight_plan(planner, pose, current=q, freeze_lift=True)
+    planner._above_status = dict(statuses=list(map(str, planner._straight_failures)))
+    if up is None:
+        return None
+    via = q.copy()
+    via[list(planner.planner.move_group_joint_indices)] = up['position'][-1]
+    return via
+
+
 @measured
 def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
     """Reject grasps whose lift or carry would require changing elbow branch."""
@@ -144,8 +171,22 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
     heights = list(dict.fromkeys((height, max(floor, height-.04))))
     moves = list(p.move_group_joint_indices)
     other=task.condiment_bottle if obj is task.shaker else task.shaker
+    above_m = float(getattr(task,'motion_parameters',{}).get('approach_via_above_m', 0.))
     for q,grasp,reach,record in candidates:
         candidate_start = time.perf_counter()
+        down=None;target=q
+        if above_m > 0:
+            via=above_via(planner,task,q,reach,above_m)
+            if via is None:
+                journal(planner,record,'above','unreachable',height_m=above_m,**getattr(planner,'_above_status',{}))
+                continue
+            with common.keepout(planner,[obj,other],pad=[.025,.03]):
+                down=straight_plan(planner,reach,current=via)
+            if down is None:
+                journal(planner,record,'above','descent',statuses=planner._straight_failures)
+                continue
+            target=via
+            q=via.copy();q[moves]=down['position'][-1]
         contact=straight_plan(planner,grasp,current=q)
         reasons['contact '+str(contact is not None)]+=1
         if contact is None:
@@ -155,14 +196,14 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
                     collision=getattr(planner,'_last_path_collision',None))
             continue
         with common.keepout(planner,[obj,other],pad=[.025,.03]):
-            line=p.plan_qpos_line(q,current,time_step=task.control_timestep,
+            line=p.plan_qpos_line(target,current,time_step=task.control_timestep,
                                  ref_yaw=float(current[2]),qpos_step=.02)
             line_clear = (line.get('status')=='Success'
                           and path_clear(planner,current,line['position']))
         reasons['approach '+line.get('status','?')]+=1
         if not line_clear:
             with common.keepout(planner,[obj,other],pad=[.025,.03]):
-                line=monotone_approach(planner,task,current,q)
+                line=monotone_approach(planner,task,current,target)
             if line is None:
                 journal(planner,record,'approach',failure_kind([],getattr(planner,'_last_path_collision',None)),
                         collision=getattr(planner,'_last_path_collision',None))
@@ -185,7 +226,8 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
                 # Both approach families move each joint monotonically. Their
                 # endpoint extrema suffice here; build an expensive curved
                 # approach only after this grasp has a usable continuation.
-                prefix_knots=np.vstack([current[moves],q[moves],contact['position'],up['position']])
+                prefix_knots=np.vstack([current[moves],target[moves]]+([down['position']] if down is not None else [])
+                                       +[q[moves],contact['position'],up['position']])
                 prefix=np.broadcast_to(current,(len(prefix_knots),len(current))).copy()
                 prefix[:,moves]=prefix_knots
                 # The preview must spend the roll range used by the proposed
@@ -229,7 +271,8 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
             journal(planner,record,'rejected','no_continuation',seconds=time.perf_counter()-candidate_start)
             continue
         up,fold,z,direct,route=continuation
-        all_knots=np.vstack([line['position'],contact['position'],up['position'],fold['position']])
+        all_knots=np.vstack([line['position']]+([down['position']] if down is not None else [])
+                            +[contact['position'],up['position'],fold['position']])
         if direct is not None:all_knots=np.vstack([all_knots,direct['pour']['position']])
         if route is not None:
             all_knots=np.vstack([all_knots,route['hover']['approach']['position'],route['hover']['pour']['position']])
@@ -239,7 +282,7 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
                 continue
         journal(planner,record,'accepted',seconds=time.perf_counter()-candidate_start,
                 direct_pour=direct is not None,complete_wrist_pour=route is not None or direct is not None)
-        return dict(approach=line,contact=contact,lift_z=z,grasp_pose=grasp,
+        return dict(approach=line,down=down,reach_pose=reach,above_m=above_m,contact=contact,lift_z=z,grasp_pose=grasp,
                     grasp_qpos=closed,carry=fold,direct_pour=direct is not None,
                     progress_powers=line.get('progress_powers'),
                     total_joint_travel=float(np.abs(np.diff(all_knots,axis=0)).sum()))
@@ -259,6 +302,16 @@ def grasp_with_continuation(env,planner,task,obj,grasp,reach):
     result=planner.follow_forward_path_w_refinement(chain['approach'],refine=True)
     if common.stopped_by_horizon(planner):return result,False
     planner.planner.update_from_simulation()
+    if chain['down'] is not None:
+        other=task.condiment_bottle if obj is task.shaker else task.shaker
+        with common.keepout(planner,[obj,other],pad=[.025,.03]):
+            down=straight_plan(planner,chain['reach_pose'])
+        common.say(env,'season_dish_planner','descend from above the condiment',
+                   above_m=chain['above_m'],planned=down is not None)
+        if down is None:return -1,False
+        result=execute_straight(planner,down)
+        if common.stopped_by_horizon(planner):return result,False
+        planner.planner.update_from_simulation()
     path=straight_plan(planner,chain['grasp_pose'])
     if path is None:return -1,False
     result=execute_straight(planner,path)

@@ -1381,7 +1381,14 @@ def _solve(
 
     # -- STAGE 2: grasp the target ---------------------------------------------------
     say(env, "grasp the target")
-    planner.set_grasp_branch(elbow=1, wrist=1)
+    if getattr(task, "motion_parameters", {}).get("grasp_family", "rolled") == "unrolled":
+        # Same hand poses with the forearm unrolled: the wrist flexes negative at the
+        # grasp and crosses zero on the way from the rest pose, so only the elbow sign
+        # is enforced along paths; candidates keep the wrist sign at their endpoints.
+        joints = task.agent.robot.active_joints_map
+        planner._grasp_branch = {int(joints["elbow_flex_joint"].active_index[0]): 1}
+    else:
+        planner.set_grasp_branch(elbow=1, wrist=1)
     mesh = target.get_first_collision_mesh(to_world_frame=True)
     if mesh is None:
         return fail(env, "grasp the target: no collision mesh")

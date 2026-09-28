@@ -1,5 +1,5 @@
 {
-  "profile_version": 23,
+  "profile_version": 25,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -164,7 +164,9 @@
       "pour_preview_clearance_reserve_m": 0.0,
       "pour_preview_wrist_reserve_rad": 0.0,
       "hover_ik_start": "dual",
-      "upright_compensation": "exact"
+      "upright_compensation": "exact",
+      "grasp_family": "unrolled",
+      "approach_via_above_m": 0.15
     },
     "max_transfer_tilt_degrees_exclusive": 15.0,
     "search_limits": {
@@ -259,7 +261,8 @@
       "development_source_successes": "30/40 (native20 30/30, held10 30/30); profile15 aligned 29/40 is a strict subset; 14 variants compared",
       "search": "120s budget, IK32, 8 grasp configurations unchanged; mean 25.5s, max 67.7s, no exhaustion",
       "holdout": "sealed 40 (9010000.., 20 per condiment) run only after this selection; no tuning on it"
-    }
+    },
+    "unrolled_grasp_family": "grasp_family unrolled: the same grasp/carry hand poses with the forearm unrolled (forearm +pi, wrist flex negated, wrist roll +pi); the approach goes to a point 0.15 m above the standoff with the final hand orientation and descends straight. Removes the forearm/wrist counter-roll (\"arm somersault\"): hand rotation during the approach median 204 -> 129 deg; paired 80 scenes 50 -> 64 successes (19 wins, 5 losses), all held; D2-D6, E1, clearance pass."
   },
   "quality_exceptions": {
     "D6": {
