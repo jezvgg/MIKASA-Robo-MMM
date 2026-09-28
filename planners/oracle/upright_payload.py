@@ -108,9 +108,15 @@ def upright_wrist_candidates(axis_in_wrist, up_in_parent, previous, limits):
 
 
 @measured
-def upright_path(planner, task, current, goal, hand_object, *, max_tilt_degrees=5.):
+def upright_path(planner, task, current, goal, hand_object, *, max_tilt_degrees=5., terminal="hover"):
     """Compensate the wrist throughout a monotone fold, then collision-check TOPP."""
+    mode = getattr(task, 'motion_parameters', {}).get('upright_compensation', 'exact')
+    if mode == 'cone12' or (mode == 'cone_hover12' and terminal == 'hover'):
+        from planners.oracle.upright_cone import upright_cone_path
+        return upright_cone_path(planner, task, current, goal, hand_object,
+                                 terminal=terminal)
     p = planner.planner
+    failures = []; planner._upright_failures = failures
     fk = kinematics(planner, task)
     wrist = [fk.indices[n] for n in ('wrist_flex_joint', 'wrist_roll_joint')]
     local_axis = hand_object[:3, :3] @ np.asarray(task.cfg.pour_axis_body)
@@ -119,6 +125,7 @@ def upright_path(planner, task, current, goal, hand_object, *, max_tilt_degrees=
     moves = list(p.move_group_joint_indices)
     start_axis = fk.matrix(current)[:3, :3] @ local_axis
     if start_axis[2] <= math.cos(math.radians(15.)):
+        failures.append("initial_tilt_limit")
         return None
     count = max(81, int(np.ceil(np.linalg.norm(goal - current) / .02)) + 1)
     # Time progress can curve around fixtures without introducing another pose
@@ -137,16 +144,22 @@ def upright_path(planner, task, current, goal, hand_object, *, max_tilt_degrees=
             up /= np.linalg.norm(up)
             candidates = upright_wrist_candidates(wr.T @ hand @ local_axis, wr.T @ up, full[-1][wrist], limits)
             if not candidates:
+                failures.append("wrist_limit_or_unreachable_axis")
                 break
             q[wrist] = candidates[0]
             if np.max(np.abs(q[wrist] - full[-1][wrist])) > .20:
+                failures.append("configuration_jump")
                 break
             full.append(q)
         if len(full) != count:
             continue
         full = np.asarray(full)
         with elbow_only(planner, task):
-            if not p.accepts(full) or not path_clear(planner, current, full[:, moves]):
+            if not p.accepts(full):
+                failures.append("joint_limit")
+                continue
+            if not path_clear(planner, current, full[:, moves]):
+                failures.append({"collision": getattr(planner,"_last_path_collision",None)})
                 continue
             try:
                 times, pos, vel, acc, duration = p.TOPP(full[:, moves], task.control_timestep)
