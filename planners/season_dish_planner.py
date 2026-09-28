@@ -88,6 +88,11 @@ PRE_HOVER_BACK = 0.35
 POUR_SETTLE_STEPS = 4
 """Steps to let the object come to rest before its tilt is believed."""
 
+# Settling at the condiment station: hold in 2-step pairs until the measured head
+# is on target and the base is still, never longer than the former fixed hold.
+STATION_SETTLE_MAX_STEPS = 12
+HEAD_SETTLE_TOL_RAD = 0.005
+BASE_SETTLE_TOL = 0.002
 HOLD_POLL_CHUNK = 1
 HOLD_POLL_BUDGET = 60
 """The hold is polled in `HOLD_POLL_CHUNK` steps up to `HOLD_POLL_BUDGET`, breaking as
@@ -1356,9 +1361,23 @@ def _solve(
     if common.stopped_by_horizon(planner):
         return res
     pan, tilt = planner._head_tracker.desired()
-    res = planner.hold_head(pan=pan, tilt=tilt, t=12, ramp=10)
-    if res == -1 or common.stopped_by_horizon(planner):
-        return res
+    # Let the head and the base settle after the final turn, but only while the
+    # measured state still moves: the fixed 12-step hold recorded up to six
+    # identical 10 Hz frames after both had come to rest (checklist D6).
+    joints = task.agent.robot.active_joints_map
+    head_idx = [int(joints[n].active_index[0]) for n in ("head_pan_joint", "head_tilt_joint")]
+    held = 0
+    while held < STATION_SETTLE_MAX_STEPS:
+        q = _np(task.agent.robot.get_qpos())[0]
+        v = _np(task.agent.robot.get_qvel())[0]
+        head_error = float(np.max(np.abs(q[head_idx] - np.array([pan, tilt]))))
+        if head_error <= HEAD_SETTLE_TOL_RAD and float(np.max(np.abs(v[:3]))) <= BASE_SETTLE_TOL:
+            break
+        res = planner.hold_head(pan=pan, tilt=tilt, t=2, ramp=2 if held == 0 else 0)
+        held += 2
+        if res == -1 or common.stopped_by_horizon(planner):
+            return res
+    say(env, "settle at condiment station", steps=held, head_error_rad=head_error)
 
     # -- STAGE 2: grasp the target ---------------------------------------------------
     say(env, "grasp the target")

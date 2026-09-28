@@ -1,5 +1,5 @@
 {
-  "profile_version": 20,
+  "profile_version": 23,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -60,6 +60,7 @@
     "require_return": false,
     "start_backoff_m": 0.75,
     "start_backoff_jitter_m": 0.05,
+    "start_yaw_jitter_rad": 0.1,
     "initial_arm_jitter_rad": 0.04,
     "initial_torso_jitter_m": 0.01,
     "initial_head_jitter_rad": 0.05,
@@ -153,6 +154,8 @@
     "planned_transfer_max_tilt_deg": 5,
     "executed_transfer_max_tilt_deg": 15,
     "direct_pour_priority": true,
+    "start_heading_jitter": "uniform +-0.1 rad start yaw in front of the fridge from a generator keyed by the episode seed; all other reset draws unchanged (checklist C2)",
+    "station_settle": "hold in 2-step pairs only until the measured head is within 0.005 rad of the tracker target and base joint speeds <= 0.002, at most the former 12 steps (D6); profile21 removed the settle and lost SR (planning started before the robot had settled)",
     "motion_parameters": {
       "station_backoff_m": 0.1,
       "compact_initial_and_travel": false,
