@@ -85,9 +85,15 @@ class CollectionMotionPlanner(FetchMotionPlanningSapienSolver):
         self._head_tracker.target = target
 
     def approach_for_contact(self, reach, grasp, n_init_qpos=40, *, torso_height=None,
-                             contact_context=None):
-        """Choose an approach whose following straight contact stroke also plans."""
+                             contact_context=None, follow_through=None):
+        """Choose an approach whose following straight contact stroke also plans.
+
+        `follow_through` is an optional next straight stroke (a push after
+        contact); it must also plan from the contact endpoint, in the same
+        contact context, and the whole sequence must pass the roll window.
+        """
         from contextlib import nullcontext
+        from planners.oracle.straight_paths import straight_plan
         import mplib
 
         # The caller synchronizes before entering any contact-obstacle context.
@@ -120,6 +126,7 @@ class CollectionMotionPlanner(FetchMotionPlanningSapienSolver):
             for freeze_lift in (True,) if torso_height is not None else (True, False):
                 # Keep the target as an obstacle on the free approach; only the
                 # subsequent deliberate contact may omit it from planning.
+                knots = [line["position"]]
                 with nullcontext() if contact_context is None else contact_context():
                     contact = p.plan_screw(
                         mplib.Pose(grasp.p, grasp.q),
@@ -130,8 +137,17 @@ class CollectionMotionPlanner(FetchMotionPlanningSapienSolver):
                         ),
                         goal_tolerance=self.ARM_SCREW_GOAL_TOLERANCE,
                     )
+                    if contact.get("status") == "Success":
+                        knots.append(contact["position"])
+                        if follow_through is not None:
+                            end = np.array(goal, dtype=float)
+                            end[p.move_group_joint_indices] = contact["position"][-1]
+                            stroke = straight_plan(self, follow_through, current=end)
+                            if stroke is None:
+                                continue
+                            knots.append(stroke["position"])
                 if contact.get("status") == "Success" and p.accepts(
-                    np.vstack([line["position"], contact["position"]]),
+                    np.vstack(knots),
                     move_group=True,
                 ):
                     return True
@@ -149,6 +165,16 @@ class CollectionMotionPlanner(FetchMotionPlanningSapienSolver):
             tag="contact_standoff",
             precheck=contact_follows,
         )
+        if result is None and getattr(self, "_ik_reference_arms", None):
+            # Every random-restart goal failed the next-stroke checks; offer the
+            # caller's fixed reference starts to the same checks once.
+            goals = p.reference_goals(
+                p._transform_goal_to_wrt_base(target), initial,
+                [True, True, True, torso_height is not None] + [False] * 11)
+            if goals:
+                result = self._line_to_ik_goals(
+                    target, goals, cur, folded, float(cur[2]), 1, None, None,
+                    tag="contact_standoff", precheck=contact_follows)
         return -1 if result is None else result
 
     def gripper_touching(self, actor, threshold=1e-6):

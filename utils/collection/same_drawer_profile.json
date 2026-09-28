@@ -1,5 +1,5 @@
 {
-  "profile_version": 17,
+  "profile_version": 20,
   "env_id": "MikasaSameDrawer-v0",
   "task_variant": "four_drawers_apple_interlude",
   "robot_reference": {
@@ -138,6 +138,10 @@
     "apple_retention": "irreversible_failure_after_release_until_end",
     "initial_push_motion": "straight_hand_along_slider_base_stopped",
     "upper_handle_initial_torso_m": 0.2,
+    "apple_reach_ik_starts": "after random-restart IK finds no bounded solution, one deterministic IK start from each of two fixed named arm configurations (medoids of the two families among 29 profile17 apple reaches); same branch, roll window, collision and path checks; logged; no seed lookup",
+    "closing_push_follow_through_precheck": "drawers 1-3: an approach is accepted only if the following closing push (handle + open amount + 4 cm along the slider) also plans from the contact endpoint within the roll window; stricter selection, no limit relaxed",
+    "closing_approach_ik_starts": "drawers 1-3: when every random-restart standoff goal fails the contact-and-push lookahead, one deterministic IK start from that drawer's fixed standoff medoid (profile17 successes) is offered to the same lookahead; logged; no seed lookup",
+    "closing_low_handle_torso_m": "0.10, then 0.01 only if the 0.10 closing approach (with contact-and-push lookahead) is refused before any motion; logged",
     "apple_grasp_branch": {
       "elbow_flex": 1,
       "wrist_flex": 1
