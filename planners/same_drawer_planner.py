@@ -20,7 +20,7 @@ from planners.oracle.rest_paths import curved_rest
 from planners.oracle.settling import ReleaseSettling
 from planners.oracle.straight_paths import straight_plan, execute_straight
 from planners.same_drawer_paths import DrawerPathPlanner
-from planners.same_drawer_approach import direct_bottom_contact
+from planners.same_drawer_approach import direct_bottom_contact, hand_contact, moving_drawer_push
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
 from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
@@ -264,7 +264,9 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
             planner.planner.update_from_simulation()
         # Deliberate contact is allowed only with the selected drawer in the
         # planning model. All physical contacts remain enabled in the simulator.
-        with common.contact_stroke(planner, [DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX]):
+        contact_context = (hand_contact(planner, task, drawer) if direct_contact else
+                           common.contact_stroke(planner, [DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX]))
+        with contact_context:
             if (opening or low_handle) and not middle_handle and not direct_contact:
                 if low_handle:
                     # Lower outside the worktop before reaching under it. Check
@@ -377,9 +379,19 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                 travel = max(0., amount) if direct_contact else amount + .04
                 goal = sapien.Pose(tcp.p + [0, travel, 0], tcp.q)
                 log("close drawer with arm", max_travel_m=travel)
-                result = (planner._guard.last_step if amount <= cfg.closed_tol else
-                          execute_straight(planner, straight_plan(planner, goal),
-                            stop_when=lambda: float(array(task.drawer_open_amounts())[0, drawer]) <= cfg.closed_tol))
+                if amount <= cfg.closed_tol:
+                    result = planner._guard.last_step
+                else:
+                    if direct_contact:
+                        planner.planner.update_from_simulation()
+                        current = array(task.agent.robot.get_qpos())[0].astype(float)
+                        stroke = moving_drawer_push(planner, task, current, goal, drawer)
+                        log("actual bottom push checked", accepted=stroke is not None,
+                            remaining_travel_m=travel)
+                    else:
+                        stroke = straight_plan(planner, goal)
+                    result = execute_straight(planner, stroke,
+                        stop_when=lambda: float(array(task.drawer_open_amounts())[0, drawer]) <= cfg.closed_tol)
                 if direct_contact and result != -1 and not stopped(result):
                     result = wait_for_state("physical bottom closure",
                         lambda: float(array(task.drawer_open_amounts())[0, drawer]) <= cfg.closed_tol,
@@ -408,7 +420,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                 # The diagonal exit includes lateral motion, so move the arm;
                 # a forward-only base cannot execute that Cartesian translation.
                 result = move("clear handle with arm", clearance,
-                              noisy=False, sync=False, contact=True, contact_stretch=1)
+                              noisy=False, sync=direct_contact, contact=True, contact_stretch=1)
                 if stopped(result):
                     return result, False
                 amount = float(array(task.drawer_open_amounts())[0, drawer])

@@ -1,5 +1,5 @@
 {
-  "profile_version": 14,
+  "profile_version": 17,
   "env_id": "MikasaSameDrawer-v0",
   "task_variant": "four_drawers_apple_interlude",
   "robot_reference": {
@@ -193,7 +193,12 @@
         "source_successes": 0,
         "attempts": 10,
         "reason": "no improvement over unshifted continuous endpoint, 5/10; no runtime fallback"
-      }
+      },
+      "actual_push_rechecked": true,
+      "selected_articulation": "present during actual contact; hand-only allowance; moving-slider sweep before actual push",
+      "collision_sampling": "dense geometric and retimed paths at shared .025 joint-distance spacing",
+      "withdrawal_model": "resync measured physical closed drawer before planning withdrawal",
+      "withdrawal_allowance": "hand-only allowance kept after the moving-slider preview re-adds the drawer model; profile16 lost it, refused the arm-only exit and its torso-rise fallback reopened 3/40 closed drawers"
     }
   },
   "collection_balance": {

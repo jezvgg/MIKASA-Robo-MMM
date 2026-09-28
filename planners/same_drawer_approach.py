@@ -6,27 +6,37 @@ from robots.fetch.utils import unwrap_toward
 from planners.oracle.straight_paths import straight_plan
 
 
-@contextmanager
-def hand_contact(planner, task, drawer, *, allowed=True):
-    """Permit intentional hand contact only; keep the forearm and all fixtures."""
-    from mplib.pymp.collision_detection import AllowedCollision
-    acm=planner.planner.planning_world.get_allowed_collision_matrix()
+def _hand_pairs(planner, drawer):
     from my_scenes.same_drawer import DRAWER_FIXTURES, DRAWER_ART_SUFFIX
     world=planner.planner.planning_world
     hand=[n for n in planner.planner.robot.get_user_link_names() if 'gripper' in n]
     selected=DRAWER_FIXTURES[drawer]+DRAWER_ART_SUFFIX
     links=[n for name in world.get_articulation_names() if selected in name
            for n in world.get_articulation(name).get_user_link_names()]
-    previous=[]
-    for a in hand:
-        for b in links:
-            previous.append((a,b,acm.get_entry(a,b)))
-            acm.set_entry(a,b,allowed)
+    return world.get_allowed_collision_matrix(),[(a,b) for a in hand for b in links]
+
+
+@contextmanager
+def _kept_hand_entries(planner, drawer):
+    """Restore hand/drawer ACM entries that removing the drawer model erases."""
+    from mplib.pymp.collision_detection import AllowedCollision
+    acm,pairs=_hand_pairs(planner, drawer)
+    previous=[(a,b,acm.get_entry(a,b)) for a,b in pairs]
     try:yield
     finally:
         for a,b,value in previous:
             if value is None:acm.remove_entry(a,b)
             else:acm.set_entry(a,b,value==AllowedCollision.ALWAYS)
+
+
+@contextmanager
+def hand_contact(planner, task, drawer, *, allowed=True):
+    """Permit intentional hand contact only; keep the forearm and all fixtures."""
+    with _kept_hand_entries(planner, drawer):
+        acm,pairs=_hand_pairs(planner, drawer)
+        for a,b in pairs:
+            acm.set_entry(a,b,allowed)
+        yield
 
 
 def moving_drawer_push(planner, task, current, goal, drawer):
@@ -36,7 +46,8 @@ def moving_drawer_push(planner, task, current, goal, drawer):
     from my_scenes.same_drawer import DRAWER_FIXTURES, DRAWER_ART_SUFFIX
     p = planner.planner
     selected = DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX
-    with common.contact_stroke(planner, [selected]):
+    # Re-adding the removed model drops its ACM entries; keep the caller's.
+    with _kept_hand_entries(planner, drawer), common.contact_stroke(planner, [selected]):
         path = straight_plan(planner, goal, current=current)
     if path is None:
         return None

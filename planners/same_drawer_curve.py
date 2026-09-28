@@ -9,6 +9,7 @@ No lookup of seed-specific endpoint positions is performed.
 import numpy as np
 from mplib.pymp.collision_detection import fcl
 from mani_skill.utils.geometry.trimesh_utils import get_component_mesh
+from planners.oracle.path_clearance import dense_samples
 
 # Bezier progress control values. q(s)=q0+(q1-q0)*B(0,c1,c2,1;s).
 # Pan's necessary excursion provides clearance around the counter; it is reported,
@@ -65,7 +66,7 @@ def continuous_lower_curve(planner, task, current, goal, grasp, drawer):
             failures.append(dict(reason='collection_joint_window'))
             return False
         previous_distance = None
-        for knot, q in enumerate(poses):
+        for knot, q in enumerate(dense_samples(poses)):
             folded = p.fold_qpos(q)
             if (np.any(folded < limits[:, 0]-1e-7)
                     or np.any(folded > limits[:, 1]+1e-7)):
