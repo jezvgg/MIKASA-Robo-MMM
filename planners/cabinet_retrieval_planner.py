@@ -894,7 +894,7 @@ def stow_hand(env, planner, task, z: float = 1.10, aheads=(0.70, 0.55, 0.85)) ->
     say(env, "stow refused; driving with the hand as it is")
 
 
-def grasp_the_bar(env, planner, task, door: DoorSpec, *, bar, dock):
+def grasp_the_bar(env, planner, task, door: DoorSpec, *, bar, dock, grasp_noise=True):
     """Dock, pre-grasp and stroke onto a leaf's bar. `(res, done)`.
 
     Extracted from `open_the_door` UNCHANGED, so a second caller gets the measured
@@ -940,8 +940,18 @@ def grasp_the_bar(env, planner, task, door: DoorSpec, *, bar, dock):
     # the caller normalizes the roll joints before this stage.
     branch = getattr(planner, "goal_branch", None)
     with branch(**DOOR_GRASP_BRANCH) if callable(branch) else contextlib.nullcontext():
-        grasp = A.build_grasp_pose(np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0]),
-                                   np.array(bar))
+        bar = np.array(bar, dtype=float)
+        amplitude = float(getattr(task, "motion_parameters", {}).get("grasp_noise_m", 0.0))
+        noise = getattr(planner, "cabinet_waypoint_noise", None)
+        if amplitude > 0 and noise is not None and grasp_noise:
+            # BIBLE 5: a small per-episode offset of the grasp point along the vertical
+            # bar and in depth (the stroke still stops at the first touch). No offset
+            # across the bar: an off-centre grip changes the recorded closing retrace.
+            delta = np.zeros(3)
+            delta[[1, 2]] = noise.uniform(-amplitude, amplitude, size=2)
+            bar = bar + delta
+            say(env, "waypoint noise", waypoint="handle grasp", offset_m=delta.tolist())
+        grasp = A.build_grasp_pose(np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0]), bar)
         pre = grasp * sapien.Pose([0, 0, -0.15])
         # The PRE-grasp plans WITH the doors in the world: it has 15 cm of clearance
         # off the bar, and a door-free plan is licensed to route THROUGH the panel —
@@ -1803,7 +1813,7 @@ def finish_by_the_handle(env, planner, task, *, door: DoorSpec, anchor=None, res
         bar=[round(v, 3) for v in bar], carried_deg=round(float(np.degrees(phi)), 1))
     out, done = grasp_the_bar(
         env, planner, task, door, bar=bar,
-        dock=np.array([door.handle_dock[0], door.handle_dock[1], 0.0]))
+        dock=np.array([door.handle_dock[0], door.handle_dock[1], 0.0]), grasp_noise=False)
     if done:
         return (out if out != -1 else res), False
     res = out

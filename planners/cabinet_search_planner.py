@@ -945,6 +945,14 @@ def nudge_the_cube(env, planner, task, res, cab=None):
         else:
             say(env, "the level posture refused; the screw from the ready posture")
         planner.planner.update_from_simulation()
+    amplitude = float(getattr(task, "motion_parameters", {}).get("grasp_noise_m", 0.0))
+    noise = getattr(planner, "cabinet_waypoint_noise", None)
+    touch_offset = np.zeros(3)
+    if amplitude > 0 and noise is not None:
+        # BIBLE 5: sideways and vertical offset of the touch; the push depth is kept so the
+        # required displacement is unchanged.
+        touch_offset[[0, 2]] = noise.uniform(-amplitude, amplitude, size=2)
+        say(env, "waypoint noise", waypoint="can touch", offset_m=touch_offset.tolist())
     for attempt in range(NUDGE_TRIES):
         target_p = _np(task.revealed_target()).reshape(-1, 3)[0].astype(np.float64)
         if not np.all(np.isfinite(target_p)):
@@ -954,8 +962,8 @@ def nudge_the_cube(env, planner, task, res, cab=None):
             say(env, "MISSED: the compartment is no longer revealed; the cube was not nudged", attempt=attempt)
             return res
         z = target_p[2] + NUDGE_Z_OFFSET
-        pre_c = np.array([target_p[0], target_p[1] - half - NUDGE_PRE_M, z])
-        push_c = np.array([target_p[0], target_p[1] + NUDGE_PAST_M, z])
+        pre_c = np.array([target_p[0], target_p[1] - half - NUDGE_PRE_M, z]) + touch_offset
+        push_c = np.array([target_p[0], target_p[1] + NUDGE_PAST_M, z]) + touch_offset
         pre = task.agent.build_grasp_pose(approach, closing, pre_c)
         push = task.agent.build_grasp_pose(approach, closing, push_c)
         # The lift frozen when it was raised (the level reach); the plain plan, torso
