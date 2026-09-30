@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from utils.collection.merge_lerobot import merge_provenance, validate_release
+from utils.collection.merge_lerobot import merge_provenance, select_episodes, validate_release
 from utils.collection.provenance import dataset_provenance_complete
 
 
@@ -171,3 +171,21 @@ def test_nested_merge_keeps_distinct_video_settings_for_same_converter():
     for episode, expected in zip(merged["episodes"], [a, b]):
         assert by_id[episode["conversion_id"]]["video"] == expected["video"]
         assert episode["video_encoding"] == expected["episodes"][0]["video_encoding"]
+
+
+def test_selection_keeps_every_attempt_and_renumbers_selected_episodes():
+    merged = merge_provenance([batch("/first", [1, 2, 3], [1, 3]), batch("/second", [4, 5, 6], [4, 5, 6])])
+    selected = select_episodes(merged, dict(rule="first three accepted", episode_seeds=[1, 3, 4]))
+    assert [e["scene_seed"] for e in selected["episodes"]] == [1, 3, 4]
+    assert [e["episode_index"] for e in selected["episodes"]] == [0, 1, 2]
+    assert len(selected["source_episode_outcomes"]) == 6
+    assert sum(e["success"] for e in selected["source_episode_outcomes"]) == 5
+    assert selected["episode_selection"]["accepted_not_selected_seeds"] == [5, 6]
+    assert len(merged["episodes"]) == 5
+
+
+@pytest.mark.parametrize("seeds", [[1, 1], [2], [7]])
+def test_selection_rejects_duplicates_and_unmerged_seeds(seeds):
+    merged = merge_provenance([batch("/first", [1, 2, 3], [1, 3])])
+    with pytest.raises(ValueError):
+        select_episodes(merged, dict(rule="x", episode_seeds=seeds))
