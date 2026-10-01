@@ -7,7 +7,7 @@ from typing import Optional
 import numpy as np
 
 from .monotone import MonotonePath, plan_path
-from .config import (CLOSE_IN_MAX_SPEED, MONOTONE_FEEDBACK, NEAR_HOLD_RHO, MONOTONE_MAX_FAILED_PLANS, MONOTONE_REPLAN_EVERY, MONOTONE_LOOKAHEAD, MONOTONE_MIN_SPEED, ARRIVE_YAW_TOL, BASE_MAX_SPEED, BASE_MAX_SPEED_NORM, BASE_MAX_YAW_NORM,
+from .config import (CLOSE_IN_MAX_SPEED, MONOTONE_FEEDBACK, NEAR_HOLD_RHO, MONOTONE_MAX_FAILED_PLANS, CLOSE_IN_LATCH_RHO, MONOTONE_REPLAN_EVERY, MONOTONE_LOOKAHEAD, MONOTONE_MIN_SPEED, ARRIVE_YAW_TOL, BASE_MAX_SPEED, BASE_MAX_SPEED_NORM, BASE_MAX_YAW_NORM,
                      BASE_MAX_YAW_RATE, CREEP_MIN_DISTANCE, CREEP_SPEED, NEAR_LATCH_RHO, NEAR_LATCH_PAR, NEAR_LATCH_PAR_RHO, YAW_TRIM_MIN_RATE, REVERSE_MAX_DISTANCE, REVERSE_SPEED, K_ALPHA, K_BETA, K_RHO, TURN_FIRST_ALPHA)
 
 
@@ -32,6 +32,7 @@ class ServoState:
     index: int = 0
     since_plan: int = 0
     failed_plans: int = 0
+    close_in: bool = False       # once close in without a path, stay in the close-in mode (no polar-law spin past the stand)
 
 
 def servo_command(pose: np.ndarray, goal: np.ndarray, state: ServoState | None = None) -> tuple[float, float, bool]:
@@ -74,7 +75,11 @@ def servo_command(pose: np.ndarray, goal: np.ndarray, state: ServoState | None =
         if state.index >= len(state.path.theta) - 1 and rho < NEAR_HOLD_RHO:
             state.latched = True                   # end of the reference path: only the yaw is left to trim
         return v, w, False
-    if rho < NEAR_HOLD_RHO:
+    state.close_in = state.close_in or rho < NEAR_HOLD_RHO
+    if state.close_in:
+        if rho < CLOSE_IN_LATCH_RHO:
+            state.latched = True
+            return 0.0, 0.0, False
         return _close_in(e_par, yaw_err, state)
     gamma = np.arctan2(dy, dx)
     alpha = wrap(gamma - pose[2])

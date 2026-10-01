@@ -9,9 +9,11 @@ from my_scenes.my_robocasa_takeitback_tray import MyRoboCasaSceneTakeItBackTray
 from robots.fetch.extand import FetchMotionPlanningSapienSolver
 
 from . import manip
-from .config import APPROACH_ATTEMPTS, SETTLE_AFTER_RELEASE, GRIPPER_OPEN, STAND_NOISE
+from .config import APPROACH_ATTEMPTS, RETRY_KEEP_ARM_DIST, RETRY_KEEP_ARM_YAW, SETTLE_AFTER_RELEASE, GRIPPER_OPEN, STAND_NOISE
 from .gaze import base_xyyaw, install_gaze
-from .whole_body import drive_concurrent, find_stand
+from .servo import wrap
+from .stands import find_stand
+from .whole_body import drive_concurrent
 
 
 def _noise(seed) -> np.ndarray:
@@ -52,16 +54,22 @@ def _episode(env, seed, debug, vis, info, holder) -> bool:
 
     failed: list = []
     ok = False
+    arm_now = None          # arm command left by a failed grasp attempt; None when the arm is tucked
+    last_pose = None
     for attempt in range(APPROACH_ATTEMPTS):
         planner.v61_attempt = attempt
-        stand = find_stand(planner, unwenv, agent, _noise(seed), exclude=tuple(failed))
+        stand = (find_stand(planner, unwenv, agent, _noise(seed), exclude=tuple(failed)) if arm_now is None else
+                 find_stand(planner, unwenv, agent, _noise(seed), exclude=tuple(failed), from_arm=arm_now))
         if stand is None:
             env.log_event("error", "v6: no stand pose with IK for pregrasp, grasp and place")
             return False
         env.log_event("waypoint", "v6 approach: base, torso and arm move together",
                       start=base_xyyaw(agent).tolist(), stand=stand.pose.tolist(), torso_pre=stand.torso_pre)
         failed.append(stand.pose[:2].copy())
-        if not drive_concurrent(planner, agent, stand.pose, stand.arm_pre, stand.torso_pre):
+        keep = (arm_now is not None and last_pose is not None and float(np.hypot(*(stand.pose[:2] - last_pose[:2]))) < RETRY_KEEP_ARM_DIST
+                and abs(wrap(float(stand.pose[2] - last_pose[2]))) < RETRY_KEEP_ARM_YAW)
+        last_pose = stand.pose
+        if not drive_concurrent(planner, agent, stand.pose, stand.arm_pre, stand.torso_pre, keep_arm=keep):
             env.log_event("error", "v6: approach did not arrive", base=base_xyyaw(agent).tolist(), reason=getattr(planner, "v6_reason", ""))
             continue
         planner.idle_steps(t=4)
@@ -71,6 +79,7 @@ def _episode(env, seed, debug, vis, info, holder) -> bool:
         env.log_event("waypoint_complete" if ok else "error", "v6 grasp", grasped=ok, reason=getattr(unwenv, "reason", ""))
         if ok:
             break
+        arm_now = agent.controller.controllers["arm"].qpos[0].cpu().numpy().astype(np.float64)
     if not ok:
         return False
     gaze["target"] = unwenv.tray
@@ -79,7 +88,8 @@ def _episode(env, seed, debug, vis, info, holder) -> bool:
     if not ok:
         return False
     ok = manip.lower_and_release(planner, env, unwenv, agent)
-    planner.idle_steps(t=SETTLE_AFTER_RELEASE)   # the verdict needs a static cup
+    planner.idle_steps(t=SETTLE_AFTER_RELEASE)
+    manip.settle_cup(planner, unwenv)            # the verdict needs a static cup
     success = bool(unwenv.evaluate()["success"].item())
     env.log_event("waypoint_complete" if ok else "error", "v6 release", released=ok, task_success=success,
                   base_trace=[[round(float(v), 4) for v in p] for p in trace[::2]])
