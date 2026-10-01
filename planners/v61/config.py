@@ -32,7 +32,7 @@ MAX_APPROACH_STEPS = 700
 # -- concurrent arm / torso schedule ------------------------------------------------------------
 READY_ARM_POSTURE = np.array([0.0, 1.31, 0.0, -2.09, 0.0, 0.79, 0.0])   # planfix v4 compact posture
 READY_RAMP_STEPS = 40            # steps to reach the compact posture, base already driving
-ARM_START_PROGRESS = 0.15         # base path progress at which arm and torso start to move
+ARM_START_PROGRESS = 0.0         # base path progress at which arm and torso start to move
 ARM_END_PROGRESS = 0.90           # ... and at which they have arrived
 ARM_MIN_TAIL_STEPS = 10
 
@@ -79,3 +79,7 @@ MONOTONE_MAX_FAILED_PLANS = 3     # consecutive failed re-plans after which the 
 MONOTONE_MIN_CHORD = 0.3          # a path whose chord / length ratio is below this (heading sweeps too much) is rejected
 NEAR_HOLD_RHO = 0.15              # m: nearer than this to the stand a path that went stale is kept (and latched at its end) instead of the polar law
 CLOSE_IN_MAX_SPEED = 0.15           # m/s: along-track speed limit of the close-in mode (no path, stand within NEAR_HOLD_RHO)
+
+# -- smooth arm motion (v6.1b) ---------------------------------------------------------------------
+ARM_MAX_STEP = 0.05              # rad per env step (1.0 rad/s): v5/v4 peak at 0.09-0.11 rad per 10 Hz frame
+ARM_MAX_ACCEL = 0.004             # rad per env step^2: reaches full speed in ~13 steps

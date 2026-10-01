@@ -8,6 +8,7 @@ import mplib
 import numpy as np
 import sapien
 
+from .arm_path import JointLimiter
 from .config import (ARM_END_PROGRESS, ARM_MIN_TAIL_STEPS, ARM_START_PROGRESS, BASE_RADIUS, COUNTER_CLEARANCE,
                      FLOOR_MARGIN, IK_SEEDS, MAX_APPROACH_STEPS, PLACE_HOVER, PREGRASP_GAP, READY_ARM_POSTURE, READY_RAMP_STEPS, STAND_HEADING, STAND_HEADING_TILT, STAND_HEADING_STEPS, ARM_YAW_BAND, ARM_YAW_FULL, STAND_COUNTER_END_MARGIN, STAND_DX_WEIGHT, STAND_EXCLUDE_RADIUS, STALL_WINDOW, STALL_MIN_MOVE,
                      STAND_X_OFFSETS, STAND_Y_STEPS)
@@ -158,10 +159,13 @@ def drive_concurrent(planner, agent, goal: np.ndarray, arm1: np.ndarray, torso1:
     progress, arrived, tail = 0.0, False, 0
     state = ServoState()
     window = []
+    last = getattr(agent.controller.controllers["arm"], "_target_qpos", None)   # the last command, not the lagging measurement
+    limiter = JointLimiter(arm_init if last is None else last[0].cpu().numpy().astype(np.float64))
+    tucked = False
     for i in range(MAX_APPROACH_STEPS):
         pose = base_xyyaw(agent)
         v, w, done = servo_command(pose, goal, state)
-        if i >= READY_RAMP_STEPS:
+        if tucked:
             window.append(pose[:2].copy())
         if not done and not arrived and abs(v) > 0.15 and len(window) > STALL_WINDOW:
             if float(np.hypot(*(window[-1] - window[-1 - STALL_WINDOW]))) < STALL_MIN_MOVE:
@@ -173,9 +177,10 @@ def drive_concurrent(planner, agent, goal: np.ndarray, arm1: np.ndarray, torso1:
         s = 1.0 if arrived else _smooth((progress - ARM_START_PROGRESS) / (ARM_END_PROGRESS - ARM_START_PROGRESS))
         s_gate = float(np.clip((ARM_YAW_FULL + ARM_YAW_BAND - abs(wrap(goal[2] - pose[2]))) / ARM_YAW_BAND, 0.0, 1.0))
         s = s if arrived else s * s_gate   # the arm only unfolds once the base is nearly facing the stand heading
-        arm = arm_init + (arm0 - arm_init) * _smooth((i + 1) / READY_RAMP_STEPS) if i < READY_RAMP_STEPS else arm0 + (arm1 - arm0) * s
+        tucked = tucked or (i >= READY_RAMP_STEPS and float(np.max(np.abs(limiter.q - arm0))) < 0.02)
+        arm = limiter.update(arm0 + (arm1 - arm0) * s if tucked else arm0)
         body = np.array([0.0, 0.0, body0[2] + (torso1 - body0[2]) * s])
-        v, w = (0.0, 0.0) if (arrived or i < READY_RAMP_STEPS) else (v, w)   # tuck the arm before the base turns it into the cabinets
+        v, w = (0.0, 0.0) if (arrived or not tucked) else (v, w)   # tuck the arm before the base turns it into the cabinets
         _log_servo(planner, i, pose, goal, v, w, arrived)
         planner._step(planner._compose(arm, body, base_action(v, w)))
         if planner.truncated:

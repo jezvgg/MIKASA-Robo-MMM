@@ -33,9 +33,9 @@ def _hold(planner, agent, steps: int, stop) -> None:
             return
 
 
-def move_tcp(planner, pose: sapien.Pose, free_torso: bool) -> bool:
-    """TCP to `pose` with the base held: a joint line first, then the solver's screw/RRT."""
-    for by_line in (True, False):
+def move_tcp(planner, pose: sapien.Pose, free_torso: bool, line_first: bool = True) -> bool:
+    """TCP to `pose` with the base held: a joint line and the solver's screw/RRT, in the order `line_first` picks."""
+    for by_line in ((True, False) if line_first else (False, True)):
         res = planner.static_manipulation(pose, n_init_qpos=100, disable_lift_joint=not free_torso, by_line=by_line)
         if res != -1:
             return True
@@ -70,7 +70,7 @@ def carry_over_tray(planner, env, unwenv, place_pose: sapien.Pose) -> bool:
 
     hold_object_in_planner(env, planner, unwenv, unwenv.cup, held=True, who="takeitback_tray")
     planner.gripper_state = GRIPPER_CLOSED
-    return move_tcp(planner, place_pose, free_torso=True) and bool(unwenv.agent.is_grasping(unwenv.cup).item())
+    return move_tcp(planner, place_pose, free_torso=True, line_first=False) and bool(unwenv.agent.is_grasping(unwenv.cup).item())
 
 
 def lower_and_release(planner, env, unwenv, agent) -> bool:
