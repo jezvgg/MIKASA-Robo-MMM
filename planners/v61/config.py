@@ -121,3 +121,10 @@ RETREAT_UP = 0.06                # m: torso rise that lifts the open hand off th
 RETREAT_STEPS = 40                # env steps of that rise
 PLACE_MARGIN = 0.02               # m: a preferred stand also reaches the place pose this much further from the base (the carry IK with the cup attached is tighter than the bare-hand one)
 MARGIN_WEIGHT = 6.0               # stand cost added when the place pose has no reach margin
+
+# -- v6.1e WS4: gentle release (the cup is put down, still, and the fingers open gradually) -------------
+RELEASE_GAP = 0.004               # m: the cup bottom is lowered to this far above the tray top before the fingers open (was TRAY_DROP_GAP = 1 cm of free fall)
+RELEASE_MAX_DZ = 0.0005           # m per env step: the cup may descend no faster than this when the fingers start to open
+RELEASE_MAX_TILT = np.deg2rad(10.0)   # rad: the held cup must stand within this of vertical before the fingers open
+RELEASE_WAIT_MAX = 20             # env steps the release waits for the two conditions above
+RELEASE_RAMP_STEPS = 16           # env steps of the gripper command ramp from closed (-1) to open (+1): the squeeze fades before the pads leave the cup
