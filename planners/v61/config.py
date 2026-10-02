@@ -128,3 +128,6 @@ ROUTE_STEP_YAW = 0.10             # rad: ... or the yaw change between them
 ARRIVAL_ENVELOPE = ((-0.10, 0.0), (-0.05, 0.04), (-0.05, -0.04))   # (along, sideways) m of the base frame: where the base really stops relative to the stand (d5: median 0.03 behind, worst 0.10), place IK is also needed there
 RELEASE_RAMP_STEPS = 10           # env steps over which the gripper command goes from closed to open at the release
 CARRY_WAYPOINTS = (0.4, 0.75)    # fractions of the way from the lifted cup to the place pose at which the carry stops first
+
+# -- v6.1e WS5: reversals and base turn ----------------------------------------------------------------
+TURN_FLIP_COST = 20.0             # stand cost when the first turn of the approach is against the last turn of the previous attempt (a reversal across attempts)
