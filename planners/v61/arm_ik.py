@@ -37,6 +37,7 @@ class ArmChain:
     cost: float
     roll_travel: float          # rad of roll-joint travel ready -> pre -> grasp -> place
     pan: float = 0.0            # |shoulder pan| at the grasp: a large one means the stand is far off the approach axis
+    margin_miss: float = 0.0    # 1.0 when the place pose pushed PLACE_MARGIN further from the base is out of reach
     max_roll: float = 0.0       # largest |roll joint| over pregrasp, grasp and place
 
 
@@ -161,17 +162,17 @@ def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place
         if not places:
             continue
         stage["place_ik"] += 1
+        miss = 0.0
         if margin:   # the same place pose pushed further from the base must stay reachable
             away = place.p[:2] - pose[:2]
             far = sapien.Pose(p=place.p + np.append(PLACE_MARGIN * away / max(float(np.linalg.norm(away)), 1e-6), 0.0), q=place.q)
-            if not ik_candidates(planner, agent, pose, far, arm_g, roll_cap=roll_cap):
-                continue
+            miss = 0.0 if ik_candidates(planner, agent, pose, far, arm_g, roll_cap=roll_cap) else 1.0
         arm_pl = places[0][0]
         path = ((ready, arm_pre), (arm_pre, arm_g), (arm_g, arm_pl))
         cost = sum(joint_cost(b, a) for a, b in path)
         roll = sum(float(np.sum(np.abs(b[list(ROLL_IDX)] - a[list(ROLL_IDX)]))) for a, b in path)
         if best is None or cost < best.cost:
             max_roll = max(float(np.max(np.abs(a[list(ROLL_IDX)]))) for a in (arm_pre, arm_g, arm_pl))
-            best = ArmChain(flip, pre, grasp, place, arm_pre, torso_g, arm_g, arm_pl, cost, roll, abs(float(arm_g[0])), max_roll)
+            best = ArmChain(flip, pre, grasp, place, arm_pre, torso_g, arm_g, arm_pl, cost, roll, abs(float(arm_g[0])), miss, max_roll)
     logger.debug("chain at %s flip=%s: %s -> %s", np.round(pose, 2).tolist(), flip, stage, "ok" if best else "none")
     return best
