@@ -126,5 +126,11 @@ MARGIN_WEIGHT = 6.0               # stand cost added when the place pose has no 
 ROUTE_STEP_M = 0.06               # m: spacing of the poses of the predicted base route that are checked for collisions
 ROUTE_STEP_YAW = 0.10             # rad: ... or the yaw change between them
 ARRIVAL_ENVELOPE = ((-0.10, 0.0), (-0.05, 0.04), (-0.05, -0.04))   # (along, sideways) m of the base frame: where the base really stops relative to the stand (d5: median 0.03 behind, worst 0.10), place IK is also needed there
-RELEASE_RAMP_STEPS = 10           # env steps over which the gripper command goes from closed to open at the release
 CARRY_WAYPOINTS = (0.4, 0.75)    # fractions of the way from the lifted cup to the place pose at which the carry stops first
+
+# -- v6.1e WS4: gentle release (the cup is put down, still, and the fingers open gradually) -------------
+RELEASE_GAP = 0.004               # m: the cup bottom is lowered to this far above the tray top before the fingers open (was TRAY_DROP_GAP = 1 cm of free fall)
+RELEASE_MAX_DZ = 0.0005           # m per env step: the cup may descend no faster than this when the fingers start to open
+RELEASE_MAX_TILT = np.deg2rad(10.0)   # rad: the held cup must stand within this of vertical before the fingers open
+RELEASE_WAIT_MAX = 20             # env steps the release waits for the two conditions above
+RELEASE_RAMP_STEPS = 16           # env steps of the gripper command ramp from closed (-1) to open (+1): the squeeze fades before the pads leave the cup

@@ -5,7 +5,9 @@ from __future__ import annotations
 import numpy as np
 import sapien
 
-from .config import (CARRY_WAYPOINTS, RETREAT_STEPS, RETREAT_UP, CARRY_LIFT, CUP_REST_STEPS, CUP_REST_V, CUP_REST_W, CUP_SETTLE_MAX, LOWER_RAMP_STEPS, LOWER_TOL, LOWER_TRIM_GAIN, LOWER_TRIM_STEPS, PLACE_EXTRA_HEIGHTS, RELEASE_RAMP_STEPS, GRIP_SETTLE_STEPS, GRIPPER_CLOSED, GRIPPER_OPEN, TRAY_DROP_GAP)
+from .config import (CARRY_WAYPOINTS, RETREAT_STEPS, RETREAT_UP, CARRY_LIFT, CUP_REST_STEPS, CUP_REST_V, CUP_REST_W, CUP_SETTLE_MAX, LOWER_RAMP_STEPS, LOWER_TOL, LOWER_TRIM_GAIN, LOWER_TRIM_STEPS, PLACE_EXTRA_HEIGHTS, GRIP_SETTLE_STEPS, GRIPPER_CLOSED, GRIPPER_OPEN, TRAY_DROP_GAP)
+from .config import RELEASE_GAP
+from .grasp_safety import release
 
 
 def _targets(agent):
@@ -134,7 +136,7 @@ def lower_and_release(planner, env, unwenv, agent) -> bool:
 
     arm, body = _targets(agent)
     tray_top = float(unwenv.tray.pose.p[0].cpu().numpy()[2] + unwenv.tray_half[2])
-    target_z = tray_top + float(unwenv.cup_half[2]) + TRAY_DROP_GAP
+    target_z = tray_top + float(unwenv.cup_half[2]) + RELEASE_GAP
     cup_z = float(unwenv.cup.pose.p[0].cpu().numpy()[2])
     torso0 = float(body[2])
     torso1 = float(np.clip(torso0 - (cup_z - target_z), 0.0, 0.386))
@@ -157,14 +159,8 @@ def lower_and_release(planner, env, unwenv, agent) -> bool:
         planner._step(planner._from_abs(planner._last_abs))
         if planner.truncated:
             return False
-    align_gripper_switch(planner, unwenv)
-    for i in range(RELEASE_RAMP_STEPS):   # open the fingers gradually: a command step flings a cup the pinch has put spin on (5257)
-        planner.gripper_state = GRIPPER_CLOSED + (GRIPPER_OPEN - GRIPPER_CLOSED) * (i + 1) / RELEASE_RAMP_STEPS
-        planner._compose(arm, body, np.zeros(2))
-        planner._step(planner._from_abs(planner._last_abs))
-        if planner.truncated:
-            return False
-    planner.gripper_state = GRIPPER_OPEN
+    if not release(planner, unwenv, arm, body):
+        return False
     _hold(planner, agent, 30, lambda: not bool(unwenv.agent.is_grasping(unwenv.cup).item()), targets=(arm, body))   # keep the commanded torso: re-reading the lagging measured one lifts the hand off the cup
     planner.planner.update_from_simulation()
     hold_object_in_planner(env, planner, unwenv, unwenv.cup, held=False, who="takeitback_tray")

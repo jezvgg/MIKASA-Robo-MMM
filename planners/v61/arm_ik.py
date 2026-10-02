@@ -17,7 +17,7 @@ import sapien
 
 from robots.fetch.utils import attach_object, convert_object_name
 
-from .config import (ARRIVAL_ENVELOPE, CARRY_LIFT, ARM_NON_ROLL_WEIGHT, ARM_ROLL_ABS_WEIGHT, ARM_ROLL_WEIGHT, GRASP_PROBE_GAP, IK_SEEDS, LOWER_MARGIN, PLACE_HOVER, PREGRASP_GAP,
+from .config import (ARRIVAL_ENVELOPE, CARRY_LIFT, ARM_NON_ROLL_WEIGHT, ARM_ROLL_ABS_WEIGHT, ARM_ROLL_WEIGHT, GRASP_PROBE_GAP, IK_SEEDS, LOWER_MARGIN, PLACE_HOVER, PREGRASP_GAP, RELEASE_GAP,
                      PRE_CANDIDATES, READY_ARM_POSTURE, TRAY_DROP_GAP, UNFOLD_MARGIN, UNFOLD_SAMPLES)
 
 logger = logging.getLogger(__name__)
@@ -121,7 +121,7 @@ def unfold_is_free(planner, agent, pose: np.ndarray, arm0: np.ndarray, arm1: np.
 
 def lowered_is_free(planner, agent, pose: np.ndarray, arm: np.ndarray, torso: float) -> bool:
     """The arm at the place pose, with the torso down by the hover height (the lowering of the cup), touches nothing."""
-    drop = PLACE_HOVER - TRAY_DROP_GAP + LOWER_MARGIN
+    drop = PLACE_HOVER - RELEASE_GAP + LOWER_MARGIN
     return not _collides(planner, agent, pose, arm, max(0.0, torso - drop))
 
 
