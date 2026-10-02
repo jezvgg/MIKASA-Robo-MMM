@@ -137,3 +137,15 @@ RELEASE_RAMP_STEPS = 16           # env steps of the gripper command ramp from c
 
 ALLOW_INVERTED_GRASP = False      # the closing half-turned about the approach axis is upside down (hand-up axis world z = -1); all 300 demos have +1.00
 PLACE_IK_SEEDS = 240               # IK restarts on the place pose (60 left a stand with 2 or 0 low-roll places depending on the random stream)
+
+# -- v6.1e ws2: carry check ----------------------------------------------------------------------------
+TORSO_MAX = 0.386                 # m: upper limit of torso_lift_joint (manip clips the torso command to it)
+ARRIVE_SHORT = 0.10               # m: the base may stop this far short of the stand (away from the tray): measured 0.07-0.10 on 5806/5807/5708
+ARRIVE_TOL = 0.07                 # m: and this far sideways
+ARRIVE_YAW = 0.05                 # rad: with a yaw error this large (measured 0.05 on the same seeds)
+CARRY_BRANCH_MAX = 2.5            # rad: the place IK must lie within this of the grasp arm on every joint (no wrist flip on the carry)
+CARRY_WEIGHT = 10.0               # stand cost per unit of the share of arrival-shifted base poses without a place IK
+CARRY_ROLL_MAX = 0.12             # m: the base may roll this far ahead with the cup held to bring the hover pose in reach
+CARRY_ROLL_STEP = 0.02            # m: candidate roll distances
+CARRY_ROLL_CLEARANCE = 0.03       # m: the arm at the rolled pose must also be collision-free this much further
+CARRY_ROLL_SPEED = 0.10           # m/s of that roll
