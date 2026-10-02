@@ -121,3 +121,7 @@ RETREAT_UP = 0.06                # m: torso rise that lifts the open hand off th
 RETREAT_STEPS = 40                # env steps of that rise
 PLACE_MARGIN = 0.02               # m: a preferred stand also reaches the place pose this much further from the base (the carry IK with the cup attached is tighter than the bare-hand one)
 MARGIN_WEIGHT = 6.0               # stand cost added when the place pose has no reach margin
+
+# -- v6.1e ---------------------------------------------------------------------------------------------
+ALLOW_INVERTED_GRASP = False      # the closing half-turned about the approach axis is upside down (hand-up axis world z = -1); all 300 demos have +1.00
+PLACE_IK_SEEDS = 240               # IK restarts on the place pose (60 left a stand with 2 or 0 low-roll places depending on the random stream)
