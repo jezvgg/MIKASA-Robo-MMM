@@ -12,9 +12,9 @@ from .arm_ik import ArmChain, chain_for_stand
 from .config import (MARGIN_WEIGHT, ROLL_HARD, ROLL_SOFT, ROLL_WEIGHT, ARM_COST_WEIGHT, BASE_RADIUS, COUNTER_CLEARANCE, FLOOR_MARGIN, PLACE_HOVER, PAN_FREE, PAN_WEIGHT, PLACE_REACH_SOFT, PLACE_REACH_WEIGHT,
                      STAND_COUNTER_END_MARGIN, STAND_DX_WEIGHT, STAND_EXCLUDE_RADIUS, STAND_HEADING, STAND_HEADING_STEPS,
                      STAND_HEADING_TILT, STAND_TOPK, STRAIGHT_MAX_DX, BEARING_TILT, TORSO_SOFT, TORSO_WEIGHT, STAND_X_OFFSETS, STAND_Y_STEPS)
+from .clearance import clear_ranked
 from .gaze import base_xyyaw
 from .predict import stand_cost
-from .routes import route_free
 from .servo import wrap
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class StandPlan:
     """A base pose from which the cup is grasped and the tray reached, with the arm chain."""
-    pose: np.ndarray            # (x, y, yaw) of the base
+    pose: np.ndarray            # (x, y, yaw) of the base, then the via point (x, y) of the drive when it needs one
     grasp_pose: sapien.Pose
     pregrasp_pose: sapien.Pose
     place_pose: sapien.Pose     # TCP pose that carries the cup over the tray
@@ -78,14 +78,14 @@ def _candidates(unwenv, agent, noise_xy: np.ndarray, exclude: tuple) -> list:
 def find_stand(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple = ()) -> Optional[StandPlan]:
     """The best stand with checked arm motions; when none exists, the best one without the collision checks."""
     for cap in (ROLL_HARD, None):   # a roll past +-pi is a wrap: it is given up last, after every relaxation of the other checks
-        for margin, route in ((True, True), (True, False), (False, True), (False, False)):
-            plan = _search(planner, unwenv, agent, noise_xy, exclude, True, cap, margin, route)
+        for margin in (True, False):   # the drive check of the tucked arm is clear_ranked's (via point, or pushed back)
+            plan = _search(planner, unwenv, agent, noise_xy, exclude, True, cap, margin)
             if plan:
                 return plan
     return _search(planner, unwenv, agent, noise_xy, exclude, False, None)
 
 
-def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checked: bool, roll_cap: Optional[float] = None, margin: bool = False, route: bool = False) -> Optional[StandPlan]:
+def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checked: bool, roll_cap: Optional[float] = None, margin: bool = False) -> Optional[StandPlan]:
     """The stand minimising base cost + ARM_COST_WEIGHT x arm-chain cost among the STAND_TOPK cheapest feasible ones.
 
     A stand is feasible when an arm chain (pregrasp with a collision-free unfold from the ready posture, grasp with the torso
@@ -102,11 +102,8 @@ def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checke
 
     best: Optional[StandPlan] = None
     seen = 0
-    pose_now = base_xyyaw(agent)
-    for base_cost, xy, h in _candidates(unwenv, agent, noise_xy, exclude):
+    for base_cost, xy, h, via in clear_ranked(planner, agent, _candidates(unwenv, agent, noise_xy, exclude)):   # drive free of the furniture first
         pose = np.array([xy[0], xy[1], h])
-        if route and not route_free(planner, agent, pose_now, pose):   # the tucked arm would sweep an open door or a fixture on the way
-            continue
         chains = [c for c in (chain_for_stand(planner, agent, unwenv, pose, cup_pos, place_for, flip, checked, roll_cap, margin) for flip in (False, True)) if c]
         if not chains:
             continue
@@ -114,7 +111,7 @@ def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checke
         total = base_cost + ARM_COST_WEIGHT * chain.cost + PAN_WEIGHT * max(0.0, chain.pan - PAN_FREE) + TORSO_WEIGHT * max(0.0, chain.torso_pre - TORSO_SOFT) + ROLL_WEIGHT * max(0.0, chain.max_roll - ROLL_SOFT) + MARGIN_WEIGHT * chain.margin_miss
         logger.info("stand %s base %.2f arm %.2f roll %.2f maxroll %.2f pan %.2f flip=%s", np.round(pose, 2).tolist(), base_cost, chain.cost, chain.roll_travel, chain.max_roll, chain.pan, chain.flip)
         if best is None or total < best.total_cost:
-            best = StandPlan(pose, chain.grasp_pose, chain.pre_pose, chain.place_pose, chain.arm_pre, chain.torso_pre, total, chain.roll_travel)
+            best = StandPlan(np.concatenate([pose, via]), chain.grasp_pose, chain.pre_pose, chain.place_pose, chain.arm_pre, chain.torso_pre, total, chain.roll_travel)
         seen += 1
         if seen >= STAND_TOPK:
             break

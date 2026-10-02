@@ -32,10 +32,23 @@ class ServoState:
     index: int = 0
     since_plan: int = 0
     failed_plans: int = 0
+    via_done: bool = False       # the via point of a goal that has one is behind the base
     close_in: bool = False       # once close in without a path, stay in the close-in mode (no polar-law spin past the stand)
 
 
 def servo_command(pose: np.ndarray, goal: np.ndarray, state: ServoState | None = None) -> tuple[float, float, bool]:
+    """`_servo_to` the goal (x, y, yaw); a goal (x, y, yaw, vx, vy) is reached through the via point (vx, vy) with the goal
+    heading first (the base turns there, away from the furniture, and then drives straight in)."""
+    state = state if state is not None else ServoState()
+    if len(goal) > 3 and not state.via_done:
+        v, w, done = _servo_to(pose, np.array([goal[3], goal[4], goal[2]]), state)
+        if not done:
+            return v, w, False
+        state.__dict__.update(ServoState(via_done=True).__dict__)   # arrived at the via point: a fresh approach to the goal
+    return _servo_to(pose, goal[:3], state)
+
+
+def _servo_to(pose: np.ndarray, goal: np.ndarray, state: ServoState) -> tuple[float, float, bool]:
     """(v m/s, w rad/s, arrived) of the pose-servo law towards `goal` (x, y, yaw).
 
     Far from the goal the polar law curves the path so the final heading is reached on arrival; when
@@ -44,7 +57,6 @@ def servo_command(pose: np.ndarray, goal: np.ndarray, state: ServoState | None =
     (or abreast of it) the position is latched: the base stops and only trims the yaw, in one
     direction and without a polar bearing, which is noise at that range. The last centimetres are the arm's.
     """
-    state = state if state is not None else ServoState()
     dx, dy = goal[0] - pose[0], goal[1] - pose[1]
     rho = float(np.hypot(dx, dy))
     yaw_err = wrap(goal[2] - pose[2])
