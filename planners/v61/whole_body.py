@@ -58,7 +58,10 @@ def drive_concurrent(planner, agent, goal: np.ndarray, arm1: np.ndarray, torso1:
     limiter = JointLimiter(arm_init if last is None else last[0].cpu().numpy().astype(np.float64))
     for i in range(MAX_APPROACH_STEPS):
         pose = base_xyyaw(agent)
+        at_via = state.via_done
         v, w, done = servo_command(pose, goal, state)
+        if state.via_done and not at_via:
+            window.clear()   # the base rested at the via point turning: that standstill is not a block
         if tucked:
             window.append(pose[:2].copy())
         if not done and not arrived and abs(v) > 0.15 and len(window) > STALL_WINDOW:
