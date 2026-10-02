@@ -15,8 +15,8 @@ import mplib
 import numpy as np
 import sapien
 
-from .config import (ARM_NON_ROLL_WEIGHT, ARM_ROLL_ABS_WEIGHT, ARM_ROLL_WEIGHT, IK_SEEDS, PREGRASP_GAP, READY_ARM_POSTURE,
-                     PRE_CANDIDATES, GRASP_PROBE_GAP)
+from .config import (ARM_NON_ROLL_WEIGHT, ARM_ROLL_ABS_WEIGHT, ARM_ROLL_WEIGHT, GRASP_PROBE_GAP, IK_SEEDS, LOWER_MARGIN, PLACE_HOVER, PREGRASP_GAP,
+                     PRE_CANDIDATES, READY_ARM_POSTURE, TRAY_DROP_GAP, UNFOLD_MARGIN, UNFOLD_SAMPLES)
 
 logger = logging.getLogger(__name__)
 ROLL_IDX = (2, 4, 6)          # upperarm_roll, forearm_roll, wrist_roll within the 7 arm joints
@@ -97,6 +97,29 @@ def ik_candidates(planner, agent, pose: np.ndarray, target: sapien.Pose, seed_ar
     return out
 
 
+def _collides(planner, agent, pose: np.ndarray, arm: np.ndarray, torso: float) -> bool:
+    """True when the robot at base `pose` with this arm and torso touches the planning world."""
+    return len(planner.planner.check_for_env_collision(_folded_qpos(planner, agent, pose, arm, torso))) > 0
+
+
+def unfold_is_free(planner, agent, pose: np.ndarray, arm0: np.ndarray, arm1: np.ndarray, torso1: float) -> bool:
+    """The straight joint line (arm and torso) the approach will run after arrival is collision-free at base `pose`
+    and with the base UNFOLD_MARGIN further ahead (the base never stops exactly on the stand)."""
+    torso0 = float(planner.robot.get_qpos().cpu().numpy()[0][_joint_index(agent)["torso_lift_joint"]])
+    ahead = UNFOLD_MARGIN * np.array([np.cos(pose[2]), np.sin(pose[2]), 0.0])
+    for shift in (np.zeros(3), ahead):
+        for t in np.linspace(0.0, 1.0, UNFOLD_SAMPLES):
+            if _collides(planner, agent, pose + shift, arm0 + (arm1 - arm0) * t, torso0 + (torso1 - torso0) * t):
+                return False
+    return True
+
+
+def lowered_is_free(planner, agent, pose: np.ndarray, arm: np.ndarray, torso: float) -> bool:
+    """The arm at the place pose, with the torso down by the hover height (the lowering of the cup), touches nothing."""
+    drop = PLACE_HOVER - TRAY_DROP_GAP + LOWER_MARGIN
+    return not _collides(planner, agent, pose, arm, max(0.0, torso - drop))
+
+
 def grasp_poses(agent, stand_xy: np.ndarray, cup_pos: np.ndarray, flip: bool, gap: float = PREGRASP_GAP):
     """(grasp, pregrasp) TCP poses; `flip` turns the gripper half a turn about the approach axis (same grasp)."""
     approach = np.asarray(cup_pos, dtype=float) - np.array([stand_xy[0], stand_xy[1], 0.0])
@@ -109,14 +132,15 @@ def grasp_poses(agent, stand_xy: np.ndarray, cup_pos: np.ndarray, flip: bool, ga
 
 
 def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place_for, flip: bool,
-                    from_arm: np.ndarray = READY_ARM_POSTURE) -> Optional[ArmChain]:
+                    checked: bool = True) -> Optional[ArmChain]:
     """Cheapest valid arm chain for base `pose` and closing sign `flip`, or None.
 
-    `place_for(grasp)` returns the place TCP pose belonging to a grasp pose.
+    `place_for(grasp)` returns the place TCP pose belonging to a grasp pose. With `checked` the unfold line from the
+    ready posture to the pregrasp and the arm at the lowered place pose must be collision-free too.
     """
     grasp, pre = grasp_poses(agent, pose[:2], cup_pos, flip)
     place = place_for(grasp)
-    ready = from_arm
+    ready = READY_ARM_POSTURE
     best: Optional[ArmChain] = None
     stage = {"grasp_ik": 0, "pre_ik": 0, "place_ik": 0}
     # grasp first, torso free: its torso is the one the locked-torso grasp motion then needs, so the pregrasp holds it
@@ -129,12 +153,15 @@ def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place
             continue
         stage["pre_ik"] += 1
         arm_pre = pres[0][0]
+        if checked and not unfold_is_free(planner, agent, pose, ready, arm_pre, torso_g):
+            continue
         places = ik_candidates(planner, agent, pose, place, arm_g)
+        places = [p for p in places[:3] if not checked or lowered_is_free(planner, agent, pose, p[0], p[1])]
         if not places:
             continue
         stage["place_ik"] += 1
         arm_pl = places[0][0]
-        path = ((from_arm, arm_pre), (arm_pre, arm_g), (arm_g, arm_pl))
+        path = ((ready, arm_pre), (arm_pre, arm_g), (arm_g, arm_pl))
         cost = sum(joint_cost(b, a) for a, b in path)
         roll = sum(float(np.sum(np.abs(b[list(ROLL_IDX)] - a[list(ROLL_IDX)]))) for a, b in path)
         if best is None or cost < best.cost:
