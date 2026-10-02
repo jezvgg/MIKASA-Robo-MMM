@@ -9,7 +9,8 @@ import numpy as np
 import sapien
 
 from .arm_ik import ArmChain, chain_for_stand
-from .config import (MARGIN_WEIGHT, ROLL_HARD, ROLL_SOFT, ROLL_WEIGHT, ARM_COST_WEIGHT, BASE_RADIUS, COUNTER_CLEARANCE, FLOOR_MARGIN, PLACE_HOVER, PAN_FREE, PAN_WEIGHT, PLACE_REACH_SOFT, PLACE_REACH_WEIGHT,
+from .carry_check import carry_score
+from .config import (CARRY_WEIGHT, MARGIN_WEIGHT, ROLL_HARD, ROLL_SOFT, ROLL_WEIGHT, ARM_COST_WEIGHT, BASE_RADIUS, COUNTER_CLEARANCE, FLOOR_MARGIN, PLACE_HOVER, PAN_FREE, PAN_WEIGHT, PLACE_REACH_SOFT, PLACE_REACH_WEIGHT,
                      STAND_COUNTER_END_MARGIN, STAND_DX_WEIGHT, STAND_EXCLUDE_RADIUS, STAND_HEADING, STAND_HEADING_STEPS,
                      STAND_HEADING_TILT, STAND_TOPK, STRAIGHT_MAX_DX, BEARING_TILT, TORSO_SOFT, TORSO_WEIGHT, STAND_X_OFFSETS, STAND_Y_STEPS)
 from .gaze import base_xyyaw
@@ -76,16 +77,17 @@ def _candidates(unwenv, agent, noise_xy: np.ndarray, exclude: tuple) -> list:
 
 def find_stand(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple = ()) -> Optional[StandPlan]:
     """The best stand with checked arm motions; when none exists, the best one without the collision checks."""
-    return (_search(planner, unwenv, agent, noise_xy, exclude, True, ROLL_HARD, True) or _search(planner, unwenv, agent, noise_xy, exclude, True, None)
+    return (_search(planner, unwenv, agent, noise_xy, exclude, True, ROLL_HARD, True, True) or _search(planner, unwenv, agent, noise_xy, exclude, True, ROLL_HARD, True) or _search(planner, unwenv, agent, noise_xy, exclude, True, None)
             or _search(planner, unwenv, agent, noise_xy, exclude, False, None))
 
 
-def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checked: bool, roll_cap: Optional[float] = None, margin: bool = False) -> Optional[StandPlan]:
+def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checked: bool, roll_cap: Optional[float] = None, margin: bool = False, carry: bool = False) -> Optional[StandPlan]:
     """The stand minimising base cost + ARM_COST_WEIGHT x arm-chain cost among the STAND_TOPK cheapest feasible ones.
 
     A stand is feasible when an arm chain (pregrasp with a collision-free unfold from the ready posture, grasp with the torso
     held, place) exists for it; both closings of the gripper are tried and the cheaper chain wins. Stands within
-    STAND_EXCLUDE_RADIUS of `exclude` are skipped.
+    STAND_EXCLUDE_RADIUS of `exclude` are skipped. With `carry` a stand whose place IK (cup held) is unreachable from the
+    nominal base pose is dropped, and one unreachable from arrival-shifted poses pays CARRY_WEIGHT per share lost.
     """
     planner.planner.update_from_simulation()   # the planning world must hold the scene as it is now before arm lines are checked
     cup_pose = unwenv.cup.pose.sp
@@ -103,7 +105,15 @@ def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checke
         if not chains:
             continue
         chain: ArmChain = min(chains, key=lambda c: c.cost)
-        total = base_cost + ARM_COST_WEIGHT * chain.cost + PAN_WEIGHT * max(0.0, chain.pan - PAN_FREE) + TORSO_WEIGHT * max(0.0, chain.torso_pre - TORSO_SOFT) + ROLL_WEIGHT * max(0.0, chain.max_roll - ROLL_SOFT) + MARGIN_WEIGHT * chain.margin_miss
+        carry_cost = 0.0
+        if carry:
+            scores = [(carry_score(planner, agent, pose, c), c) for c in chains]
+            scores = [(share, c) for (nominal, share), c in scores if nominal]
+            if not scores:
+                continue
+            share, chain = max(scores, key=lambda t: (t[0], -t[1].cost))
+            carry_cost = CARRY_WEIGHT * (1.0 - share)
+        total = carry_cost + base_cost + ARM_COST_WEIGHT * chain.cost + PAN_WEIGHT * max(0.0, chain.pan - PAN_FREE) + TORSO_WEIGHT * max(0.0, chain.torso_pre - TORSO_SOFT) + ROLL_WEIGHT * max(0.0, chain.max_roll - ROLL_SOFT) + MARGIN_WEIGHT * chain.margin_miss
         logger.info("stand %s base %.2f arm %.2f roll %.2f maxroll %.2f pan %.2f flip=%s", np.round(pose, 2).tolist(), base_cost, chain.cost, chain.roll_travel, chain.max_roll, chain.pan, chain.flip)
         if best is None or total < best.total_cost:
             best = StandPlan(pose, chain.grasp_pose, chain.pre_pose, chain.place_pose, chain.arm_pre, chain.torso_pre, total, chain.roll_travel)

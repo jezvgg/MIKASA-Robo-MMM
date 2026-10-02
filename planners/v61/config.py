@@ -121,3 +121,15 @@ RETREAT_UP = 0.06                # m: torso rise that lifts the open hand off th
 RETREAT_STEPS = 40                # env steps of that rise
 PLACE_MARGIN = 0.02               # m: a preferred stand also reaches the place pose this much further from the base (the carry IK with the cup attached is tighter than the bare-hand one)
 MARGIN_WEIGHT = 6.0               # stand cost added when the place pose has no reach margin
+
+# -- v6.1e ws2: carry check ----------------------------------------------------------------------------
+TORSO_MAX = 0.386                 # m: upper limit of torso_lift_joint (manip clips the torso command to it)
+ARRIVE_SHORT = 0.10               # m: the base may stop this far short of the stand (away from the tray): measured 0.07-0.10 on 5806/5807/5708
+ARRIVE_TOL = 0.07                 # m: and this far sideways
+ARRIVE_YAW = 0.05                 # rad: with a yaw error this large (measured 0.05 on the same seeds)
+CARRY_BRANCH_MAX = 2.5            # rad: the place IK must lie within this of the grasp arm on every joint (no wrist flip on the carry)
+CARRY_WEIGHT = 10.0               # stand cost per unit of the share of arrival-shifted base poses without a place IK
+CARRY_ROLL_MAX = 0.12             # m: the base may roll this far ahead with the cup held to bring the hover pose in reach
+CARRY_ROLL_STEP = 0.02            # m: candidate roll distances
+CARRY_ROLL_CLEARANCE = 0.03       # m: the arm at the rolled pose must also be collision-free this much further
+CARRY_ROLL_SPEED = 0.10           # m/s of that roll

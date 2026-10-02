@@ -5,7 +5,8 @@ from __future__ import annotations
 import numpy as np
 import sapien
 
-from .config import (RETREAT_STEPS, RETREAT_UP, CARRY_LIFT, CUP_REST_STEPS, CUP_REST_V, CUP_REST_W, CUP_SETTLE_MAX, LOWER_RAMP_STEPS, LOWER_TOL, LOWER_TRIM_GAIN, LOWER_TRIM_STEPS, PLACE_EXTRA_HEIGHTS, GRIP_SETTLE_STEPS, GRIPPER_CLOSED, GRIPPER_OPEN, TRAY_DROP_GAP)
+from .carry_check import roll_in_reach
+from .config import (RETREAT_STEPS, RETREAT_UP, CARRY_LIFT, CUP_REST_STEPS, CUP_REST_V, CUP_REST_W, CUP_SETTLE_MAX, LOWER_RAMP_STEPS, LOWER_TOL, LOWER_TRIM_GAIN, LOWER_TRIM_STEPS, PLACE_EXTRA_HEIGHTS, GRIP_SETTLE_STEPS, GRIPPER_CLOSED, GRIPPER_OPEN, TRAY_DROP_GAP, TORSO_MAX)
 
 
 def _targets(agent):
@@ -74,6 +75,7 @@ def carry_over_tray(planner, env, unwenv, place_pose: sapien.Pose) -> bool:
     tcp = unwenv.agent.tcp.pose
     lift = sapien.Pose(p=tcp.p[0].cpu().numpy() + np.array([0.0, 0.0, CARRY_LIFT]), q=tcp.q[0].cpu().numpy())
     move_tcp(planner, lift, free_torso=True, line_first=False)   # clear the counter before swinging over; a refusal is no reason to give up
+    roll_in_reach(planner, unwenv.agent, place_pose, *_targets(unwenv.agent))   # the base may have stopped short of the stand
     for extra in PLACE_EXTRA_HEIGHTS:   # a higher hover when the planner refuses the exact place pose; the torso lowers the cup afterwards
         hover = sapien.Pose(p=place_pose.p + np.array([0.0, 0.0, extra]), q=place_pose.q)
         if move_tcp(planner, hover, free_torso=True, line_first=False):
@@ -106,7 +108,7 @@ def lower_and_release(planner, env, unwenv, agent) -> bool:
     target_z = tray_top + float(unwenv.cup_half[2]) + TRAY_DROP_GAP
     cup_z = float(unwenv.cup.pose.p[0].cpu().numpy()[2])
     torso0 = float(body[2])
-    torso1 = float(np.clip(torso0 - (cup_z - target_z), 0.0, 0.386))
+    torso1 = float(np.clip(torso0 - (cup_z - target_z), 0.0, TORSO_MAX))
     for i in range(LOWER_RAMP_STEPS):
         b = body.copy()
         b[2] = torso0 + (torso1 - torso0) * ((i + 1) / LOWER_RAMP_STEPS)
@@ -121,7 +123,7 @@ def lower_and_release(planner, env, unwenv, agent) -> bool:
         if err < LOWER_TOL:
             break
         body = body.copy()
-        body[2] = float(np.clip(body[2] - LOWER_TRIM_GAIN * err, 0.0, 0.386))
+        body[2] = float(np.clip(body[2] - LOWER_TRIM_GAIN * err, 0.0, TORSO_MAX))
         planner._compose(arm, body, np.zeros(2))
         planner._step(planner._from_abs(planner._last_abs))
         if planner.truncated:
@@ -134,7 +136,7 @@ def lower_and_release(planner, env, unwenv, agent) -> bool:
     released = not bool(unwenv.agent.is_grasping(unwenv.cup).item())
     calm = float(unwenv.cup.linear_velocity.norm()) <= CUP_REST_V and float(unwenv.cup.angular_velocity.norm()) <= CUP_REST_W
     if released and not calm:   # the open hand still disturbs the cup: lift it off (a calm cup is left alone, the lift would stir it)
-        top = float(np.clip(body[2] + RETREAT_UP, 0.0, 0.386))
+        top = float(np.clip(body[2] + RETREAT_UP, 0.0, TORSO_MAX))
         for i in range(RETREAT_STEPS):
             b = body.copy()
             b[2] = body[2] + (top - body[2]) * ((i + 1) / RETREAT_STEPS)
