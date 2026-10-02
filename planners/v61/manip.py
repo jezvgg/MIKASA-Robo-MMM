@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import sapien
 
-from .config import (RETREAT_STEPS, RETREAT_UP, CARRY_LIFT, CUP_REST_STEPS, CUP_REST_V, CUP_REST_W, CUP_SETTLE_MAX, LOWER_RAMP_STEPS, LOWER_TOL, LOWER_TRIM_GAIN, LOWER_TRIM_STEPS, PLACE_EXTRA_HEIGHTS, GRIP_SETTLE_STEPS, GRIPPER_CLOSED, GRIPPER_OPEN, TRAY_DROP_GAP)
+from .config import (CARRY_WAYPOINTS, RETREAT_STEPS, RETREAT_UP, CARRY_LIFT, CUP_REST_STEPS, CUP_REST_V, CUP_REST_W, CUP_SETTLE_MAX, LOWER_RAMP_STEPS, LOWER_TOL, LOWER_TRIM_GAIN, LOWER_TRIM_STEPS, PLACE_EXTRA_HEIGHTS, RELEASE_RAMP_STEPS, GRIP_SETTLE_STEPS, GRIPPER_CLOSED, GRIPPER_OPEN, TRAY_DROP_GAP)
 
 
 def _targets(agent):
@@ -65,6 +65,32 @@ def grasp_cup(planner, unwenv, agent, grasp_pose: sapien.Pose, pregrasp_pose: sa
     return grasping()
 
 
+def carry_reachable(planner, unwenv, agent, stand) -> bool:
+    """With the base where it really stopped: does the carry (lift, then over the tray) have IK with the cup in the hand?
+
+    Asked after the approach, before the grasp, so a stop too far from the tray costs a new approach and not a failed carry.
+    """
+    from .arm_ik import carry_reach
+    from .gaze import base_xyyaw
+
+    planner.planner.update_from_simulation()
+    return carry_reach(planner, agent, unwenv, base_xyyaw(agent), stand.grasp_pose, stand.arm_pre, stand.place_pose, None, False) is not None
+
+
+def _slerp(a: np.ndarray, b: np.ndarray, f: float) -> np.ndarray:
+    """Quaternion (w, x, y, z) interpolation along the shorter arc."""
+    a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+    d = float(np.dot(a, b))
+    if d < 0.0:
+        b, d = -b, -d
+    if d > 0.9995:
+        q = a + f * (b - a)
+    else:
+        th = np.arccos(d)
+        q = (np.sin((1 - f) * th) * a + np.sin(f * th) * b) / np.sin(th)
+    return q / np.linalg.norm(q)
+
+
 def carry_over_tray(planner, env, unwenv, place_pose: sapien.Pose) -> bool:
     """Attach the cup to the planning hand and move it over the tray (torso free, so it rises with the arm)."""
     from planners.oracle.oracle_common import hold_object_in_planner
@@ -74,6 +100,11 @@ def carry_over_tray(planner, env, unwenv, place_pose: sapien.Pose) -> bool:
     tcp = unwenv.agent.tcp.pose
     lift = sapien.Pose(p=tcp.p[0].cpu().numpy() + np.array([0.0, 0.0, CARRY_LIFT]), q=tcp.q[0].cpu().numpy())
     move_tcp(planner, lift, free_torso=True, line_first=False)   # clear the counter before swinging over; a refusal is no reason to give up
+    start = unwenv.agent.tcp.pose
+    p0, q0 = start.p[0].cpu().numpy(), start.q[0].cpu().numpy()
+    for f in CARRY_WAYPOINTS:   # intermediate poses keep the IK on one branch (a single far jump lets the solver pick a rolled-over wrist); a refusal is no reason to give up
+        mid = sapien.Pose(p=p0 + f * (place_pose.p - p0), q=_slerp(q0, place_pose.q, f))
+        move_tcp(planner, mid, free_torso=True, line_first=False)
     for extra in PLACE_EXTRA_HEIGHTS:   # a higher hover when the planner refuses the exact place pose; the torso lowers the cup afterwards
         hover = sapien.Pose(p=place_pose.p + np.array([0.0, 0.0, extra]), q=place_pose.q)
         if move_tcp(planner, hover, free_torso=True, line_first=False):
@@ -127,6 +158,12 @@ def lower_and_release(planner, env, unwenv, agent) -> bool:
         if planner.truncated:
             return False
     align_gripper_switch(planner, unwenv)
+    for i in range(RELEASE_RAMP_STEPS):   # open the fingers gradually: a command step flings a cup the pinch has put spin on (5257)
+        planner.gripper_state = GRIPPER_CLOSED + (GRIPPER_OPEN - GRIPPER_CLOSED) * (i + 1) / RELEASE_RAMP_STEPS
+        planner._compose(arm, body, np.zeros(2))
+        planner._step(planner._from_abs(planner._last_abs))
+        if planner.truncated:
+            return False
     planner.gripper_state = GRIPPER_OPEN
     _hold(planner, agent, 30, lambda: not bool(unwenv.agent.is_grasping(unwenv.cup).item()), targets=(arm, body))   # keep the commanded torso: re-reading the lagging measured one lifts the hand off the cup
     planner.planner.update_from_simulation()

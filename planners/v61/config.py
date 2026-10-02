@@ -121,3 +121,10 @@ RETREAT_UP = 0.06                # m: torso rise that lifts the open hand off th
 RETREAT_STEPS = 40                # env steps of that rise
 PLACE_MARGIN = 0.02               # m: a preferred stand also reaches the place pose this much further from the base (the carry IK with the cup attached is tighter than the bare-hand one)
 MARGIN_WEIGHT = 6.0               # stand cost added when the place pose has no reach margin
+
+# -- v6.1e ---------------------------------------------------------------------------------------------
+ROUTE_STEP_M = 0.06               # m: spacing of the poses of the predicted base route that are checked for collisions
+ROUTE_STEP_YAW = 0.10             # rad: ... or the yaw change between them
+ARRIVAL_ENVELOPE = ((-0.10, 0.0), (-0.05, 0.04), (-0.05, -0.04))   # (along, sideways) m of the base frame: where the base really stops relative to the stand (d5: median 0.03 behind, worst 0.10), place IK is also needed there
+RELEASE_RAMP_STEPS = 10           # env steps over which the gripper command goes from closed to open at the release
+CARRY_WAYPOINTS = (0.4, 0.75)    # fractions of the way from the lifted cup to the place pose at which the carry stops first

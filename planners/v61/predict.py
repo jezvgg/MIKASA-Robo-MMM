@@ -1,7 +1,7 @@
 """Kinematic rollout of the pose servo (no arm, no obstacles) to score a stand pose before driving to it."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -20,6 +20,7 @@ class Prediction:
     backward: float        # m driven against the heading
     path: float            # m
     arrived: bool
+    trace: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)), compare=False, repr=False)   # (n, 3) poses at PREDICT_DT
 
 
 def rollout(pose0: np.ndarray, goal: np.ndarray) -> Prediction:
@@ -36,10 +37,10 @@ def rollout(pose0: np.ndarray, goal: np.ndarray) -> Prediction:
         trace.append(pose.copy())
     t = np.array(trace)[::2]
     if len(t) < 3:
-        return Prediction(len(trace), 0.0, 0, 0.0, 0.0, arrived)
+        return Prediction(len(trace), 0.0, 0, 0.0, 0.0, arrived, np.array(trace))
     yaw = np.unwrap(t[:, 2])
     return Prediction(len(trace), float(np.abs(np.diff(yaw)).sum()), len(reversal_steps(t)), backward_distance(t),
-                      float(np.linalg.norm(np.diff(t[:, :2], axis=0), axis=1).sum()), arrived)
+                      float(np.linalg.norm(np.diff(t[:, :2], axis=0), axis=1).sum()), arrived, np.array(trace))
 
 
 def stand_cost(pose0: np.ndarray, goal: np.ndarray) -> float:

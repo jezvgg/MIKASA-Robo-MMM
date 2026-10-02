@@ -15,7 +15,9 @@ import mplib
 import numpy as np
 import sapien
 
-from .config import (PLACE_MARGIN, ARM_NON_ROLL_WEIGHT, ARM_ROLL_ABS_WEIGHT, ARM_ROLL_WEIGHT, GRASP_PROBE_GAP, IK_SEEDS, LOWER_MARGIN, PLACE_HOVER, PREGRASP_GAP,
+from robots.fetch.utils import attach_object, convert_object_name
+
+from .config import (ARRIVAL_ENVELOPE, CARRY_LIFT, ARM_NON_ROLL_WEIGHT, ARM_ROLL_ABS_WEIGHT, ARM_ROLL_WEIGHT, GRASP_PROBE_GAP, IK_SEEDS, LOWER_MARGIN, PLACE_HOVER, PREGRASP_GAP,
                      PRE_CANDIDATES, READY_ARM_POSTURE, TRAY_DROP_GAP, UNFOLD_MARGIN, UNFOLD_SAMPLES)
 
 logger = logging.getLogger(__name__)
@@ -105,11 +107,12 @@ def _collides(planner, agent, pose: np.ndarray, arm: np.ndarray, torso: float) -
 
 
 def unfold_is_free(planner, agent, pose: np.ndarray, arm0: np.ndarray, arm1: np.ndarray, torso1: float) -> bool:
-    """The straight joint line (arm and torso) the approach will run after arrival is collision-free at base `pose`
-    and with the base UNFOLD_MARGIN further ahead (the base never stops exactly on the stand)."""
+    """The straight joint line (arm and torso) the approach will run after arrival is collision-free at base `pose`,
+    with the base UNFOLD_MARGIN further ahead and at the ARRIVAL_ENVELOPE displacements (the base never stops exactly on the stand)."""
     torso0 = float(planner.robot.get_qpos().cpu().numpy()[0][_joint_index(agent)["torso_lift_joint"]])
-    ahead = UNFOLD_MARGIN * np.array([np.cos(pose[2]), np.sin(pose[2]), 0.0])
-    for shift in (np.zeros(3), ahead):
+    fwd, left = np.array([np.cos(pose[2]), np.sin(pose[2])]), np.array([-np.sin(pose[2]), np.cos(pose[2])])
+    shifts = [np.zeros(3), UNFOLD_MARGIN * np.append(fwd, 0.0)] + [np.append(a * fwd + s * left, 0.0) for a, s in ARRIVAL_ENVELOPE]
+    for shift in shifts:
         for t in np.linspace(0.0, 1.0, UNFOLD_SAMPLES):
             if _collides(planner, agent, pose + shift, arm0 + (arm1 - arm0) * t, torso0 + (torso1 - torso0) * t):
                 return False
@@ -133,7 +136,57 @@ def grasp_poses(agent, stand_xy: np.ndarray, cup_pos: np.ndarray, flip: bool, ga
     return grasp, grasp * sapien.Pose([0.0, 0.0, -gap])
 
 
-def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place_for, flip: bool,
+class HeldCup:
+    """Context manager: the cup is attached to the planning hand as if the gripper stood on `grasp` (the planned grasp pose).
+
+    This is the planning world the carry will really see: the cup moves with the hand and collides with everything but the
+    fingers and the wrist. On exit the cup is an obstacle again, at the pose the simulation holds it in.
+    """
+
+    def __init__(self, planner, agent, unwenv, grasp: sapien.Pose):
+        self.planner, self.agent, self.unwenv, self.grasp = planner, agent, unwenv, grasp
+
+    def __enter__(self) -> "HeldCup":
+        world = self.planner.planner.planning_world
+        robot = self.agent.robot._objs[0]
+        link = next(l for l in robot.links if l.name.endswith("gripper_link"))
+        touch = [l for l in robot.links if any(k in l.name for k in ("gripper", "wrist"))]
+        link_now = link.entity.pose
+        tcp_to_link = self.agent.tcp.pose.sp.inv() * link_now
+        rel = (self.grasp * tcp_to_link).inv() * self.unwenv.cup.pose.sp     # link -> cup at the planned grasp
+        self.entity = self.unwenv.cup._objs[0]
+        attach_object(world, self.entity, robot, link, pose=mplib.Pose(p=rel.p, q=rel.q), touch_links=touch)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.planner.planner.planning_world.detach_object(convert_object_name(self.entity))
+        self.planner.planner.update_from_simulation()
+
+
+def carry_reach(planner, agent, unwenv, pose: np.ndarray, grasp: sapien.Pose, arm_g: np.ndarray, place: sapien.Pose, roll_cap: Optional[float], envelope: bool = True):
+    """(arm at place, number of arrival-error base poses with no place IK) with the cup attached, or None when the carry has no IK.
+
+    The carry lifts the cup CARRY_LIFT, then moves it over the tray; both IKs must exist with the cup in the planning hand. The
+    place IK is repeated at base poses displaced by ARRIVAL_ENVELOPE (along, sideways) in the base frame: the base never stops
+    exactly on the stand, and a stand whose place pose is reachable only from the exact pose fails at the tray.
+    """
+    lift = sapien.Pose(p=grasp.p + np.array([0.0, 0.0, CARRY_LIFT]), q=grasp.q)
+    with HeldCup(planner, agent, unwenv, grasp):
+        lifts = ik_candidates(planner, agent, pose, lift, arm_g, roll_cap=roll_cap)
+        if not lifts:
+            return None
+        places = ik_candidates(planner, agent, pose, place, lifts[0][0], roll_cap=roll_cap)
+        if not places:
+            return None
+        fwd, left = np.array([np.cos(pose[2]), np.sin(pose[2])]), np.array([-np.sin(pose[2]), np.cos(pose[2])])
+        miss = 0
+        for along, side in (ARRIVAL_ENVELOPE if envelope else ()):
+            moved = pose + np.append(along * fwd + side * left, 0.0)
+            miss += 0 if ik_candidates(planner, agent, moved, place, places[0][0], roll_cap=roll_cap) else 1
+    return places, miss
+
+
+def chain_for_stand(planner, agent, unwenv, pose: np.ndarray, cup_pos: np.ndarray, place_for, flip: bool,
                     checked: bool = True, roll_cap: Optional[float] = None, margin: bool = False) -> Optional[ArmChain]:
     """Cheapest valid arm chain for base `pose` and closing sign `flip`, or None.
 
@@ -157,16 +210,19 @@ def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place
         arm_pre = pres[0][0]
         if checked and not unfold_is_free(planner, agent, pose, ready, arm_pre, torso_g):
             continue
-        places = ik_candidates(planner, agent, pose, place, arm_g, roll_cap=roll_cap)
-        places = [p for p in places[:3] if not checked or lowered_is_free(planner, agent, pose, p[0], p[1])]
+        miss = 0.0
+        if checked:   # the carry as the real solver will meet it: cup in the hand, base where it really stops
+            reach = carry_reach(planner, agent, unwenv, pose, grasp, arm_g, place, roll_cap, margin)
+            if reach is None:
+                continue
+            places, misses = reach
+            miss = misses / len(ARRIVAL_ENVELOPE)
+            places = [p for p in places[:3] if lowered_is_free(planner, agent, pose, p[0], p[1])]
+        else:
+            places = ik_candidates(planner, agent, pose, place, arm_g, roll_cap=roll_cap)[:3]
         if not places:
             continue
         stage["place_ik"] += 1
-        miss = 0.0
-        if margin:   # the same place pose pushed further from the base must stay reachable
-            away = place.p[:2] - pose[:2]
-            far = sapien.Pose(p=place.p + np.append(PLACE_MARGIN * away / max(float(np.linalg.norm(away)), 1e-6), 0.0), q=place.q)
-            miss = 0.0 if ik_candidates(planner, agent, pose, far, arm_g, roll_cap=roll_cap) else 1.0
         arm_pl = places[0][0]
         path = ((ready, arm_pre), (arm_pre, arm_g), (arm_g, arm_pl))
         cost = sum(joint_cost(b, a) for a, b in path)

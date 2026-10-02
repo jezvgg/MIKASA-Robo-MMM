@@ -68,6 +68,11 @@ def _episode(env, seed, debug, vis, info, holder) -> bool:
         planner.idle_steps(t=4)
         planner.planner.update_from_simulation()
         env.log_event("waypoint_complete", "v6 approach done", base=base_xyyaw(agent).tolist(), steps=len(trace))
+        reach = manip.carry_reachable(planner, unwenv, agent, stand)
+        env.log_event("info", "v61e carry check", carry_ik=bool(reach), base=base_xyyaw(agent).tolist())
+        if attempt < APPROACH_ATTEMPTS - 1 and not reach:   # e3 showed every seed that failed the check also failed the carry: a new approach is cheaper
+            env.log_event("error", "v61e: no carry IK with the cup attached from the base pose the approach ended in", base=base_xyyaw(agent).tolist())
+            continue
         ok = manip.grasp_cup(planner, unwenv, agent, stand.grasp_pose, stand.pregrasp_pose)
         env.log_event("waypoint_complete" if ok else "error", "v6 grasp", grasped=ok, reason=getattr(unwenv, "reason", ""))
         if ok:

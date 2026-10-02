@@ -14,6 +14,7 @@ from .config import (MARGIN_WEIGHT, ROLL_HARD, ROLL_SOFT, ROLL_WEIGHT, ARM_COST_
                      STAND_HEADING_TILT, STAND_TOPK, STRAIGHT_MAX_DX, BEARING_TILT, TORSO_SOFT, TORSO_WEIGHT, STAND_X_OFFSETS, STAND_Y_STEPS)
 from .gaze import base_xyyaw
 from .predict import stand_cost
+from .routes import route_free
 from .servo import wrap
 
 logger = logging.getLogger(__name__)
@@ -76,11 +77,15 @@ def _candidates(unwenv, agent, noise_xy: np.ndarray, exclude: tuple) -> list:
 
 def find_stand(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple = ()) -> Optional[StandPlan]:
     """The best stand with checked arm motions; when none exists, the best one without the collision checks."""
-    return (_search(planner, unwenv, agent, noise_xy, exclude, True, ROLL_HARD, True) or _search(planner, unwenv, agent, noise_xy, exclude, True, None)
-            or _search(planner, unwenv, agent, noise_xy, exclude, False, None))
+    for cap in (ROLL_HARD, None):   # a roll past +-pi is a wrap: it is given up last, after every relaxation of the other checks
+        for margin, route in ((True, True), (True, False), (False, True), (False, False)):
+            plan = _search(planner, unwenv, agent, noise_xy, exclude, True, cap, margin, route)
+            if plan:
+                return plan
+    return _search(planner, unwenv, agent, noise_xy, exclude, False, None)
 
 
-def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checked: bool, roll_cap: Optional[float] = None, margin: bool = False) -> Optional[StandPlan]:
+def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checked: bool, roll_cap: Optional[float] = None, margin: bool = False, route: bool = False) -> Optional[StandPlan]:
     """The stand minimising base cost + ARM_COST_WEIGHT x arm-chain cost among the STAND_TOPK cheapest feasible ones.
 
     A stand is feasible when an arm chain (pregrasp with a collision-free unfold from the ready posture, grasp with the torso
@@ -97,9 +102,12 @@ def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checke
 
     best: Optional[StandPlan] = None
     seen = 0
+    pose_now = base_xyyaw(agent)
     for base_cost, xy, h in _candidates(unwenv, agent, noise_xy, exclude):
         pose = np.array([xy[0], xy[1], h])
-        chains = [c for c in (chain_for_stand(planner, agent, pose, cup_pos, place_for, flip, checked, roll_cap, margin) for flip in (False, True)) if c]
+        if route and not route_free(planner, agent, pose_now, pose):   # the tucked arm would sweep an open door or a fixture on the way
+            continue
+        chains = [c for c in (chain_for_stand(planner, agent, unwenv, pose, cup_pos, place_for, flip, checked, roll_cap, margin) for flip in (False, True)) if c]
         if not chains:
             continue
         chain: ArmChain = min(chains, key=lambda c: c.cost)
