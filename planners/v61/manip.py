@@ -5,8 +5,9 @@ from __future__ import annotations
 import numpy as np
 import sapien
 
-from .config import (RETREAT_STEPS, RETREAT_UP, CARRY_LIFT, CUP_REST_STEPS, CUP_REST_V, CUP_REST_W, CUP_SETTLE_MAX, LOWER_RAMP_STEPS, LOWER_TOL, LOWER_TRIM_GAIN, LOWER_TRIM_STEPS, PLACE_EXTRA_HEIGHTS, GRIP_SETTLE_STEPS, GRIPPER_CLOSED, GRIPPER_OPEN, RELEASE_GAP)
-from .grasp_safety import open_gradually, wait_cup_down
+from .config import (RETREAT_STEPS, RETREAT_UP, CARRY_LIFT, CUP_REST_STEPS, CUP_REST_V, CUP_REST_W, CUP_SETTLE_MAX, LOWER_RAMP_STEPS, LOWER_TOL, LOWER_TRIM_GAIN, LOWER_TRIM_STEPS, PLACE_EXTRA_HEIGHTS, GRIP_SETTLE_STEPS, GRIPPER_CLOSED, GRIPPER_OPEN, TRAY_DROP_GAP)
+from .config import RELEASE_GAP
+from .grasp_safety import release
 
 
 def _targets(agent):
@@ -127,9 +128,8 @@ def lower_and_release(planner, env, unwenv, agent) -> bool:
         planner._step(planner._from_abs(planner._last_abs))
         if planner.truncated:
             return False
-    wait_cup_down(planner, unwenv, arm, body)
-    align_gripper_switch(planner, unwenv)
-    open_gradually(planner, arm, body)
+    if not release(planner, unwenv, arm, body):
+        return False
     _hold(planner, agent, 30, lambda: not bool(unwenv.agent.is_grasping(unwenv.cup).item()), targets=(arm, body))   # keep the commanded torso: re-reading the lagging measured one lifts the hand off the cup
     planner.planner.update_from_simulation()
     hold_object_in_planner(env, planner, unwenv, unwenv.cup, held=False, who="takeitback_tray")

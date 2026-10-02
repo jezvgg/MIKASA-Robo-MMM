@@ -23,15 +23,14 @@ def _step_hold(planner, arm: np.ndarray, body: np.ndarray) -> None:
 
 def wait_cup_down(planner, unwenv, arm: np.ndarray, body: np.ndarray) -> None:
     """Hold the commanded arm and torso until the cup stopped descending and stands upright (at most RELEASE_WAIT_MAX steps)."""
-    z = float(unwenv.cup.pose.p[0].cpu().numpy()[2])
     for i in range(RELEASE_WAIT_MAX):
-        z_new = float(unwenv.cup.pose.p[0].cpu().numpy()[2])
-        if abs(z_new - z) <= RELEASE_MAX_DZ and cup_tilt(unwenv) <= RELEASE_MAX_TILT:
-            logger.debug('release: cup still after %d extra steps, tilt %.1f deg', i, np.degrees(cup_tilt(unwenv)))
-            return
-        z = z_new
+        z = float(unwenv.cup.pose.p[0].cpu().numpy()[2])
         _step_hold(planner, arm, body)
         if planner.truncated:
+            return
+        dz = abs(float(unwenv.cup.pose.p[0].cpu().numpy()[2]) - z)
+        if dz <= RELEASE_MAX_DZ and cup_tilt(unwenv) <= RELEASE_MAX_TILT:
+            logger.debug('release: cup still after %d steps, tilt %.1f deg', i + 1, np.degrees(cup_tilt(unwenv)))
             return
     logger.warning('release: cup not still after %d steps (tilt %.1f deg)', RELEASE_WAIT_MAX, np.degrees(cup_tilt(unwenv)))
 
@@ -45,3 +44,18 @@ def open_gradually(planner, arm: np.ndarray, body: np.ndarray) -> None:
             return
     planner.gripper_state = GRIPPER_OPEN
 
+
+
+def release(planner, unwenv, arm: np.ndarray, body: np.ndarray) -> bool:
+    """Wait for a still upright cup, land the gripper switch on an even env step (the dataset keeps every second one), open gradually.
+
+    Holds the commanded arm and torso throughout; False when the episode was truncated on the way.
+    """
+    wait_cup_down(planner, unwenv, arm, body)
+    if int(unwenv.elapsed_steps.reshape(-1)[0]) % 2 == 1 and not planner.truncated:
+        _step_hold(planner, arm, body)
+    if planner.truncated:
+        return False
+    open_gradually(planner, arm, body)
+    planner.gripper_state = GRIPPER_OPEN
+    return not planner.truncated
