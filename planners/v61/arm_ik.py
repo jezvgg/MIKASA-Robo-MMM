@@ -165,6 +165,6 @@ def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place
         cost = sum(joint_cost(b, a) for a, b in path)
         roll = sum(float(np.sum(np.abs(b[list(ROLL_IDX)] - a[list(ROLL_IDX)]))) for a, b in path)
         if best is None or cost < best.cost:
-            best = ArmChain(flip, pre, grasp, place, arm_pre, torso_g, arm_g, arm_pl, cost, roll, abs(float(arm_g[0])))
+            best = ArmChain(flip, pre, grasp, place, arm_pre, torso_g, arm_g, arm_pl, cost, roll, max(abs(float(arm_g[0])), abs(float(arm_pl[0]))))
     logger.debug("chain at %s flip=%s: %s -> %s", np.round(pose, 2).tolist(), flip, stage, "ok" if best else "none")
     return best
