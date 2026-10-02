@@ -18,7 +18,7 @@ import sapien
 from robots.fetch.utils import attach_object, convert_object_name
 
 from .config import (ARRIVAL_ENVELOPE, CARRY_LIFT, ARM_NON_ROLL_WEIGHT, ARM_ROLL_ABS_WEIGHT, ARM_ROLL_WEIGHT, GRASP_PROBE_GAP, IK_SEEDS, LOWER_MARGIN, PLACE_HOVER, PREGRASP_GAP, RELEASE_GAP,
-                     PRE_CANDIDATES, READY_ARM_POSTURE, TRAY_DROP_GAP, UNFOLD_MARGIN, UNFOLD_SAMPLES)
+                     PRE_CANDIDATES, ALLOW_INVERTED_GRASP, PLACE_IK_SEEDS, READY_ARM_POSTURE, TRAY_DROP_GAP, UNFOLD_MARGIN, UNFOLD_SAMPLES)
 
 logger = logging.getLogger(__name__)
 ROLL_IDX = (2, 4, 6)          # upperarm_roll, forearm_roll, wrist_roll within the 7 arm joints
@@ -69,10 +69,11 @@ def _folded_qpos(planner, agent, pose: np.ndarray, arm: np.ndarray, torso: float
 
 
 def ik_candidates(planner, agent, pose: np.ndarray, target: sapien.Pose, seed_arm: np.ndarray,
-                  torso: Optional[float] = None, roll_cap: Optional[float] = None) -> list:
+                  torso: Optional[float] = None, roll_cap: Optional[float] = None, seeds: int = IK_SEEDS) -> list:
     """In-limit IK solutions (arm7, torso) of `target` at base `pose`, cheapest `joint_cost` from `seed_arm` first.
 
-    `torso` None leaves the torso free; a value holds it there. Every solution is shifted by whole turns onto the
+    `torso` None leaves the torso free; a value holds it there. `seeds` IK restarts: a marginal pose (the place
+    pose) shows its low-roll branch only with many. Every solution is shifted by whole turns onto the
     branch of each joint nearest the seed; with `roll_cap` solutions whose roll joints exceed it are dropped.
     """
     p = planner.planner
@@ -84,7 +85,7 @@ def ik_candidates(planner, agent, pose: np.ndarray, target: sapien.Pose, seed_ar
     if torso is not None:
         cur_f[idx["torso_lift_joint"]] = torso
     goal = p._transform_goal_to_wrt_base(mplib.Pose(p=target.p, q=target.q))
-    status, sols = p.IK(goal, cur_f, mask, n_init_qpos=IK_SEEDS)
+    status, sols = p.IK(goal, cur_f, mask, n_init_qpos=seeds)
     if status != "Success" or sols is None or len(np.atleast_2d(sols)) == 0:
         return []
     cols = _arm_cols(agent)
@@ -175,14 +176,14 @@ def carry_reach(planner, agent, unwenv, pose: np.ndarray, grasp: sapien.Pose, ar
         lifts = ik_candidates(planner, agent, pose, lift, arm_g, roll_cap=roll_cap)
         if not lifts:
             return None
-        places = ik_candidates(planner, agent, pose, place, lifts[0][0], roll_cap=roll_cap)
+        places = ik_candidates(planner, agent, pose, place, lifts[0][0], roll_cap=roll_cap, seeds=PLACE_IK_SEEDS)
         if not places:
             return None
         fwd, left = np.array([np.cos(pose[2]), np.sin(pose[2])]), np.array([-np.sin(pose[2]), np.cos(pose[2])])
         miss = 0
         for along, side in (ARRIVAL_ENVELOPE if envelope else ()):
             moved = pose + np.append(along * fwd + side * left, 0.0)
-            miss += 0 if ik_candidates(planner, agent, moved, place, places[0][0], roll_cap=roll_cap) else 1
+            miss += 0 if ik_candidates(planner, agent, moved, place, places[0][0], roll_cap=roll_cap, seeds=PLACE_IK_SEEDS) else 1
     return places, miss
 
 
@@ -193,6 +194,8 @@ def chain_for_stand(planner, agent, unwenv, pose: np.ndarray, cup_pos: np.ndarra
     `place_for(grasp)` returns the place TCP pose belonging to a grasp pose. With `checked` the unfold line from the
     ready posture to the pregrasp and the arm at the lowered place pose must be collision-free too.
     """
+    if flip and not ALLOW_INVERTED_GRASP:   # the half-turned closing puts the hand upside down (tcp x down); the demos never do
+        return None
     grasp, pre = grasp_poses(agent, pose[:2], cup_pos, flip)
     place = place_for(grasp)
     ready = READY_ARM_POSTURE
@@ -219,7 +222,7 @@ def chain_for_stand(planner, agent, unwenv, pose: np.ndarray, cup_pos: np.ndarra
             miss = misses / len(ARRIVAL_ENVELOPE)
             places = [p for p in places[:3] if lowered_is_free(planner, agent, pose, p[0], p[1])]
         else:
-            places = ik_candidates(planner, agent, pose, place, arm_g, roll_cap=roll_cap)[:3]
+            places = ik_candidates(planner, agent, pose, place, arm_g, roll_cap=roll_cap, seeds=PLACE_IK_SEEDS)[:3]
         if not places:
             continue
         stage["place_ik"] += 1

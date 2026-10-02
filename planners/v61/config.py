@@ -134,3 +134,6 @@ RELEASE_MAX_DZ = 0.0005           # m per env step: the cup may descend no faste
 RELEASE_MAX_TILT = np.deg2rad(10.0)   # rad: the held cup must stand within this of vertical before the fingers open
 RELEASE_WAIT_MAX = 20             # env steps the release waits for the two conditions above
 RELEASE_RAMP_STEPS = 16           # env steps of the gripper command ramp from closed (-1) to open (+1): the squeeze fades before the pads leave the cup
+
+ALLOW_INVERTED_GRASP = False      # the closing half-turned about the approach axis is upside down (hand-up axis world z = -1); all 300 demos have +1.00
+PLACE_IK_SEEDS = 240               # IK restarts on the place pose (60 left a stand with 2 or 0 low-roll places depending on the random stream)
