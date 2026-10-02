@@ -131,4 +131,14 @@ def lower_and_release(planner, env, unwenv, agent) -> bool:
     _hold(planner, agent, 30, lambda: not bool(unwenv.agent.is_grasping(unwenv.cup).item()), targets=(arm, body))   # keep the commanded torso: re-reading the lagging measured one lifts the hand off the cup
     planner.planner.update_from_simulation()
     hold_object_in_planner(env, planner, unwenv, unwenv.cup, held=False, who="takeitback_tray")
-    return not bool(unwenv.agent.is_grasping(unwenv.cup).item())
+    released = not bool(unwenv.agent.is_grasping(unwenv.cup).item())
+    if released:   # lift the open hand off the cup so it can come to rest untouched
+        top = float(np.clip(body[2] + RETREAT_UP, 0.0, 0.386))
+        for i in range(RETREAT_STEPS):
+            b = body.copy()
+            b[2] = body[2] + (top - body[2]) * ((i + 1) / RETREAT_STEPS)
+            planner._compose(arm, b, np.zeros(2))
+            planner._step(planner._from_abs(planner._last_abs))
+            if planner.truncated:
+                break
+    return released

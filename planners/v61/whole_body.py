@@ -49,7 +49,8 @@ def drive_concurrent(planner, agent, goal: np.ndarray, arm1: np.ndarray, torso1:
     arm_init = agent.controller.controllers["arm"].qpos[0].cpu().numpy().astype(np.float64)
     arm0 = READY_ARM_POSTURE
     body0 = agent.controller.controllers["body"].qpos[0].cpu().numpy().astype(np.float64)
-    arrived, tail, tucked = False, 0, False
+    arrived, tail = False, 0
+    tucked = float(np.max(np.abs(arm_init - arm0))) < 0.02   # a retry starts tucked: no 2 s wait for a ramp that is not needed
     steps = unfold_steps(arm0, arm1)
     state = ServoState()
     window = []

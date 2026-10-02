@@ -54,7 +54,7 @@ STAND_EXCLUDE_RADIUS = 0.15        # m: a retried approach skips stands this clo
 STALL_WINDOW = 30                 # steps
 STALL_MIN_MOVE = 0.03             # m: less than this over the window while driving means blocked
 APPROACH_ATTEMPTS = 3
-LOWER_RAMP_STEPS = 60             # env steps of the torso ramp that lowers the held cup onto the tray
+LOWER_RAMP_STEPS = 40             # env steps of the torso ramp that lowers the held cup onto the tray (fast enough that no 10 Hz frame of it reads as a stall)
 LOWER_TRIM_STEPS = 40             # extra steps trimming the torso on the measured cup height
 LOWER_TRIM_GAIN = 0.7             # torso correction per metre of cup-height error
 LOWER_TOL = 0.004                 # m: cup height error above which the lowering goes on
@@ -112,3 +112,10 @@ STRAIGHT_MAX_DX = 0.9               # m: the straight-ahead stand family is kept
 BEARING_TILT = np.deg2rad(50.0)        # the heading that faces the stand from the start is also a candidate, within this of +y
 TORSO_SOFT = 0.28                  # m: torso height at the pregrasp beyond which a stand is penalised (the carry needs headroom below the 0.386 limit)
 TORSO_WEIGHT = 30.0               # stand cost per metre beyond it
+
+# -- v6.1d ---------------------------------------------------------------------------------------------
+ROLL_HARD = 3.0                   # rad: a stand whose pregrasp, grasp or place needs a roll joint beyond this is skipped (a roll past +-pi is a wrap)
+ROLL_SOFT = 2.4                   # rad: roll magnitude beyond which a stand is penalised
+ROLL_WEIGHT = 5.0                 # stand cost per radian beyond it
+RETREAT_UP = 0.06                 # m: torso rise that lifts the open hand off the released cup
+RETREAT_STEPS = 40                # env steps of that rise

@@ -37,6 +37,7 @@ class ArmChain:
     cost: float
     roll_travel: float          # rad of roll-joint travel ready -> pre -> grasp -> place
     pan: float = 0.0            # |shoulder pan| at the grasp: a large one means the stand is far off the approach axis
+    max_roll: float = 0.0       # largest |roll joint| over pregrasp, grasp and place
 
 
 def joint_cost(arm: np.ndarray, seed: np.ndarray) -> float:
@@ -65,11 +66,11 @@ def _folded_qpos(planner, agent, pose: np.ndarray, arm: np.ndarray, torso: float
 
 
 def ik_candidates(planner, agent, pose: np.ndarray, target: sapien.Pose, seed_arm: np.ndarray,
-                  torso: Optional[float] = None) -> list:
+                  torso: Optional[float] = None, roll_cap: Optional[float] = None) -> list:
     """In-limit IK solutions (arm7, torso) of `target` at base `pose`, cheapest `joint_cost` from `seed_arm` first.
 
     `torso` None leaves the torso free; a value holds it there. Every solution is shifted by whole turns onto the
-    branch of each joint nearest the seed.
+    branch of each joint nearest the seed; with `roll_cap` solutions whose roll joints exceed it are dropped.
     """
     p = planner.planner
     idx = _joint_index(agent)
@@ -91,7 +92,7 @@ def ik_candidates(planner, agent, pose: np.ndarray, target: sapien.Pose, seed_ar
         arm = seed_arm + (arm - seed_arm + np.pi) % (2.0 * np.pi) - np.pi
         lo_ok = ~np.isfinite(limits[:, 0]) | (arm >= limits[:, 0] - 1e-3)
         hi_ok = ~np.isfinite(limits[:, 1]) | (arm <= limits[:, 1] + 1e-3)
-        if np.all(lo_ok & hi_ok):
+        if np.all(lo_ok & hi_ok) and (roll_cap is None or np.all(np.abs(arm[list(ROLL_IDX)]) <= roll_cap)):
             out.append((arm, float(r[idx["torso_lift_joint"]])))
     out.sort(key=lambda s: joint_cost(s[0], seed_arm))
     return out
@@ -132,7 +133,7 @@ def grasp_poses(agent, stand_xy: np.ndarray, cup_pos: np.ndarray, flip: bool, ga
 
 
 def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place_for, flip: bool,
-                    checked: bool = True) -> Optional[ArmChain]:
+                    checked: bool = True, roll_cap: Optional[float] = None) -> Optional[ArmChain]:
     """Cheapest valid arm chain for base `pose` and closing sign `flip`, or None.
 
     `place_for(grasp)` returns the place TCP pose belonging to a grasp pose. With `checked` the unfold line from the
@@ -145,17 +146,17 @@ def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place
     stage = {"grasp_ik": 0, "pre_ik": 0, "place_ik": 0}
     # grasp first, torso free: its torso is the one the locked-torso grasp motion then needs, so the pregrasp holds it
     # (mplib's IK refuses poses whose fingers touch the cup, so the reach is probed GRASP_PROBE_GAP short of the grasp)
-    grasps = ik_candidates(planner, agent, pose, grasp * sapien.Pose([0.0, 0.0, -GRASP_PROBE_GAP]), ready)
+    grasps = ik_candidates(planner, agent, pose, grasp * sapien.Pose([0.0, 0.0, -GRASP_PROBE_GAP]), ready, roll_cap=roll_cap)
     stage["grasp_ik"] = len(grasps)
     for arm_g, torso_g in grasps[:PRE_CANDIDATES]:
-        pres = ik_candidates(planner, agent, pose, pre, arm_g, torso=torso_g)
+        pres = ik_candidates(planner, agent, pose, pre, arm_g, torso=torso_g, roll_cap=roll_cap)
         if not pres:
             continue
         stage["pre_ik"] += 1
         arm_pre = pres[0][0]
         if checked and not unfold_is_free(planner, agent, pose, ready, arm_pre, torso_g):
             continue
-        places = ik_candidates(planner, agent, pose, place, arm_g)
+        places = ik_candidates(planner, agent, pose, place, arm_g, roll_cap=roll_cap)
         places = [p for p in places[:3] if not checked or lowered_is_free(planner, agent, pose, p[0], p[1])]
         if not places:
             continue
@@ -165,6 +166,7 @@ def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place
         cost = sum(joint_cost(b, a) for a, b in path)
         roll = sum(float(np.sum(np.abs(b[list(ROLL_IDX)] - a[list(ROLL_IDX)]))) for a, b in path)
         if best is None or cost < best.cost:
-            best = ArmChain(flip, pre, grasp, place, arm_pre, torso_g, arm_g, arm_pl, cost, roll, abs(float(arm_g[0])))
+            max_roll = max(float(np.max(np.abs(a[list(ROLL_IDX)]))) for a in (arm_pre, arm_g, arm_pl))
+            best = ArmChain(flip, pre, grasp, place, arm_pre, torso_g, arm_g, arm_pl, cost, roll, abs(float(arm_g[0])), max_roll)
     logger.debug("chain at %s flip=%s: %s -> %s", np.round(pose, 2).tolist(), flip, stage, "ok" if best else "none")
     return best
