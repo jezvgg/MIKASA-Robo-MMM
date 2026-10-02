@@ -76,11 +76,11 @@ def _candidates(unwenv, agent, noise_xy: np.ndarray, exclude: tuple) -> list:
 
 def find_stand(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple = ()) -> Optional[StandPlan]:
     """The best stand with checked arm motions; when none exists, the best one without the collision checks."""
-    return (_search(planner, unwenv, agent, noise_xy, exclude, True, ROLL_HARD) or _search(planner, unwenv, agent, noise_xy, exclude, True, None)
+    return (_search(planner, unwenv, agent, noise_xy, exclude, True, ROLL_HARD, True) or _search(planner, unwenv, agent, noise_xy, exclude, True, ROLL_HARD) or _search(planner, unwenv, agent, noise_xy, exclude, True, None)
             or _search(planner, unwenv, agent, noise_xy, exclude, False, None))
 
 
-def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checked: bool, roll_cap: Optional[float] = None) -> Optional[StandPlan]:
+def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checked: bool, roll_cap: Optional[float] = None, margin: bool = False) -> Optional[StandPlan]:
     """The stand minimising base cost + ARM_COST_WEIGHT x arm-chain cost among the STAND_TOPK cheapest feasible ones.
 
     A stand is feasible when an arm chain (pregrasp with a collision-free unfold from the ready posture, grasp with the torso
@@ -99,7 +99,7 @@ def _search(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple, checke
     seen = 0
     for base_cost, xy, h in _candidates(unwenv, agent, noise_xy, exclude):
         pose = np.array([xy[0], xy[1], h])
-        chains = [c for c in (chain_for_stand(planner, agent, pose, cup_pos, place_for, flip, checked, roll_cap) for flip in (False, True)) if c]
+        chains = [c for c in (chain_for_stand(planner, agent, pose, cup_pos, place_for, flip, checked, roll_cap, margin) for flip in (False, True)) if c]
         if not chains:
             continue
         chain: ArmChain = min(chains, key=lambda c: c.cost)

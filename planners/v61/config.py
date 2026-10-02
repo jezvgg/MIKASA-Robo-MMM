@@ -117,5 +117,6 @@ TORSO_WEIGHT = 30.0               # stand cost per metre beyond it
 ROLL_HARD = 3.0                   # rad: a stand whose pregrasp, grasp or place needs a roll joint beyond this is skipped (a roll past +-pi is a wrap)
 ROLL_SOFT = 2.4                   # rad: roll magnitude beyond which a stand is penalised
 ROLL_WEIGHT = 5.0                 # stand cost per radian beyond it
-RETREAT_UP = 0.06                 # m: torso rise that lifts the open hand off the released cup
+RETREAT_UP = 0.06                # m: torso rise that lifts the open hand off the released cup
 RETREAT_STEPS = 40                # env steps of that rise
+PLACE_MARGIN = 0.04               # m: a preferred stand also reaches the place pose this much further from the base (the carry IK with the cup attached is tighter than the bare-hand one)

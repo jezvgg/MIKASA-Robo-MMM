@@ -132,7 +132,8 @@ def lower_and_release(planner, env, unwenv, agent) -> bool:
     planner.planner.update_from_simulation()
     hold_object_in_planner(env, planner, unwenv, unwenv.cup, held=False, who="takeitback_tray")
     released = not bool(unwenv.agent.is_grasping(unwenv.cup).item())
-    if released:   # lift the open hand off the cup so it can come to rest untouched
+    calm = float(unwenv.cup.linear_velocity.norm()) <= CUP_REST_V and float(unwenv.cup.angular_velocity.norm()) <= CUP_REST_W
+    if released and not calm:   # the open hand still disturbs the cup: lift it off (a calm cup is left alone, the lift would stir it)
         top = float(np.clip(body[2] + RETREAT_UP, 0.0, 0.386))
         for i in range(RETREAT_STEPS):
             b = body.copy()

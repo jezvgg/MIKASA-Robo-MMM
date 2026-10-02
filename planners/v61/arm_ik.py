@@ -15,7 +15,7 @@ import mplib
 import numpy as np
 import sapien
 
-from .config import (ARM_NON_ROLL_WEIGHT, ARM_ROLL_ABS_WEIGHT, ARM_ROLL_WEIGHT, GRASP_PROBE_GAP, IK_SEEDS, LOWER_MARGIN, PLACE_HOVER, PREGRASP_GAP,
+from .config import (PLACE_MARGIN, ARM_NON_ROLL_WEIGHT, ARM_ROLL_ABS_WEIGHT, ARM_ROLL_WEIGHT, GRASP_PROBE_GAP, IK_SEEDS, LOWER_MARGIN, PLACE_HOVER, PREGRASP_GAP,
                      PRE_CANDIDATES, READY_ARM_POSTURE, TRAY_DROP_GAP, UNFOLD_MARGIN, UNFOLD_SAMPLES)
 
 logger = logging.getLogger(__name__)
@@ -133,7 +133,7 @@ def grasp_poses(agent, stand_xy: np.ndarray, cup_pos: np.ndarray, flip: bool, ga
 
 
 def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place_for, flip: bool,
-                    checked: bool = True, roll_cap: Optional[float] = None) -> Optional[ArmChain]:
+                    checked: bool = True, roll_cap: Optional[float] = None, margin: bool = False) -> Optional[ArmChain]:
     """Cheapest valid arm chain for base `pose` and closing sign `flip`, or None.
 
     `place_for(grasp)` returns the place TCP pose belonging to a grasp pose. With `checked` the unfold line from the
@@ -161,6 +161,11 @@ def chain_for_stand(planner, agent, pose: np.ndarray, cup_pos: np.ndarray, place
         if not places:
             continue
         stage["place_ik"] += 1
+        if margin:   # the same place pose pushed further from the base must stay reachable
+            away = place.p[:2] - pose[:2]
+            far = sapien.Pose(p=place.p + np.append(PLACE_MARGIN * away / max(float(np.linalg.norm(away)), 1e-6), 0.0), q=place.q)
+            if not ik_candidates(planner, agent, pose, far, arm_g, roll_cap=roll_cap):
+                continue
         arm_pl = places[0][0]
         path = ((ready, arm_pre), (arm_pre, arm_g), (arm_g, arm_pl))
         cost = sum(joint_cost(b, a) for a, b in path)
