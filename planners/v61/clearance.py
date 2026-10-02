@@ -22,6 +22,11 @@ from .servo import ServoState, servo_command
 
 logger = logging.getLogger(__name__)
 _NO_VIA = np.empty(0)
+_ROUTES: dict = {}   # (start, goal) -> route(): find_stand scores the same candidates in up to four passes
+
+
+def clear_cache() -> None:
+    _ROUTES.clear()
 
 
 def drive_trace(pose0: np.ndarray, goal: np.ndarray) -> np.ndarray:
@@ -51,6 +56,13 @@ def _is_free(planner, agent, trace: np.ndarray, torso: float) -> bool:
 
 
 def route(planner, agent, pose0: np.ndarray, goal: np.ndarray) -> Optional[np.ndarray]:
+    key = (tuple(np.round(pose0, 3)), tuple(np.round(goal, 3)))
+    if key not in _ROUTES:
+        _ROUTES[key] = _route(planner, agent, pose0, goal)
+    return _ROUTES[key]
+
+
+def _route(planner, agent, pose0: np.ndarray, goal: np.ndarray) -> Optional[np.ndarray]:
     """The via point (x, y) of a collision-free drive from `pose0` to `goal` that turns the base under CLEAR_MAX_TURN:
     an empty array for the direct drive, None when there is none."""
     torso = float(planner.robot.get_qpos().cpu().numpy()[0][_joint_index(agent)["torso_lift_joint"]])

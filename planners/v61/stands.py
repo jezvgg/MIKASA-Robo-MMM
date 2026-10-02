@@ -12,7 +12,7 @@ from .arm_ik import ArmChain, chain_for_stand
 from .config import (MARGIN_WEIGHT, ROLL_HARD, ROLL_SOFT, ROLL_WEIGHT, ARM_COST_WEIGHT, BASE_RADIUS, COUNTER_CLEARANCE, FLOOR_MARGIN, PLACE_HOVER, PAN_FREE, PAN_WEIGHT, PLACE_REACH_SOFT, PLACE_REACH_WEIGHT,
                      STAND_COUNTER_END_MARGIN, STAND_DX_WEIGHT, STAND_EXCLUDE_RADIUS, STAND_HEADING, STAND_HEADING_STEPS,
                      STAND_HEADING_TILT, STAND_TOPK, STRAIGHT_MAX_DX, BEARING_TILT, TORSO_SOFT, TORSO_WEIGHT, STAND_X_OFFSETS, STAND_Y_STEPS)
-from .clearance import clear_ranked
+from .clearance import clear_cache, clear_ranked
 from .gaze import base_xyyaw
 from .predict import stand_cost
 from .servo import wrap
@@ -77,6 +77,7 @@ def _candidates(unwenv, agent, noise_xy: np.ndarray, exclude: tuple) -> list:
 
 def find_stand(planner, unwenv, agent, noise_xy: np.ndarray, exclude: tuple = ()) -> Optional[StandPlan]:
     """The best stand with checked arm motions; when none exists, the best one without the collision checks."""
+    clear_cache()   # the world is the same for all passes below, not for the next call
     for cap in (ROLL_HARD, None):   # a roll past +-pi is a wrap: it is given up last, after every relaxation of the other checks
         for margin in (True, False):   # the drive check of the tucked arm is clear_ranked's (via point, or pushed back)
             plan = _search(planner, unwenv, agent, noise_xy, exclude, True, cap, margin)
