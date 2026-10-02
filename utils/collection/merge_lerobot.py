@@ -100,6 +100,37 @@ def merge_provenance(metadata_list):
     return merged
 
 
+def select_episodes(metadata, selection):
+    """Keep only the listed accepted episodes (e.g. an exact 1000); every campaign
+    attempt, and so the success rate, stays in `source_episode_outcomes`.
+
+    `selection` = {"rule": str, "episode_seeds": [...]}; seeds must be merged
+    episodes, listed once. Episodes keep the merged order and are renumbered.
+    """
+    seeds = [int(s) for s in selection["episode_seeds"]]
+    if len(seeds) != len(set(seeds)):
+        raise ValueError("Selection lists an episode twice")
+    available = [int(e["scene_seed"]) for e in metadata["episodes"]]
+    missing = sorted(set(seeds) - set(available))
+    if missing:
+        raise ValueError(f"Selected seeds are not merged episodes: {missing[:5]}")
+    chosen = set(seeds)
+    selected = copy.deepcopy(metadata)
+    selected["episodes"] = []
+    for row in metadata["episodes"]:
+        if int(row["scene_seed"]) in chosen:
+            row = copy.deepcopy(row)
+            row["episode_index"] = len(selected["episodes"])
+            selected["episodes"].append(row)
+    selected["episode_selection"] = dict(
+        rule=selection["rule"],
+        selected=len(selected["episodes"]),
+        accepted_not_selected_seeds=[s for s in available if s not in chosen],
+        selection_sha256=hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest(),
+    )
+    return selected
+
+
 def validate_release(metadata, output):
     if len(metadata["episodes"]) < 1000:
         if "test" not in Path(output).name.lower():
@@ -110,7 +141,7 @@ def validate_release(metadata, output):
         )
 
 
-def merge(roots, output, repo_id, *, link_videos=False):
+def merge(roots, output, repo_id, *, link_videos=False, selection=None):
     from lerobot.datasets.aggregate import aggregate_datasets
     from .dataset_metadata import write_dataset_metadata
 
@@ -119,6 +150,15 @@ def merge(roots, output, repo_id, *, link_videos=False):
         raise FileExistsError(output)
     metadata_list = [read_json(p / "source_h5_metadata.json") for p in roots]
     metadata = merge_provenance(metadata_list)
+    if selection is not None:
+        if not link_videos:
+            raise ValueError("Episode selection is implemented by the linked merger")
+        metadata = select_episodes(metadata, selection)
+        keep = {int(e["scene_seed"]) for e in metadata["episodes"]}
+        # A shard without any selected episode contributes only its campaign outcomes.
+        used = [i for i, m in enumerate(metadata_list)
+                if any(int(e["scene_seed"]) in keep for e in m["episodes"])]
+        roots, metadata_list = [roots[i] for i in used], [metadata_list[i] for i in used]
     metadata["provenance"] = export_provenance(
         Path(__file__).resolve().parents[2], metadata["source_run"]["signature"]
     )
@@ -138,7 +178,9 @@ def merge(roots, output, repo_id, *, link_videos=False):
         from .linked_aggregate import aggregate_linked, verify_links
 
         storage = aggregate_linked(
-            [m["repository_id"] for m in metadata_list], repo_id, roots, output
+            [m["repository_id"] for m in metadata_list], repo_id, roots, output,
+            keep_seeds=None if selection is None else
+            [e["scene_seed"] for e in metadata["episodes"]],
         )
     else:
         aggregate_datasets(
@@ -169,13 +211,19 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repo-id", required=True)
     parser.add_argument(
+        "--select",
+        type=Path,
+        help="JSON {rule, episode_seeds}: keep only these merged episodes (linked merger)",
+    )
+    parser.add_argument(
         "--link-videos",
         action="store_true",
         help="Hardlink immutable videos on the same filesystem; no video copying",
     )
     args = parser.parse_args()
     metadata = merge(
-        args.inputs, args.output, args.repo_id, link_videos=args.link_videos
+        args.inputs, args.output, args.repo_id, link_videos=args.link_videos,
+        selection=None if args.select is None else read_json(args.select),
     )
     print(
         "Merged",

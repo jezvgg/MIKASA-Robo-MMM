@@ -277,6 +277,8 @@ class SeasonDishConfig:
     # station dock remains the same grasping location after the approach.
     start_backoff_m: float = 0.75
     start_backoff_jitter_m: float = 0.05
+    start_yaw_jitter_rad: float = 0.1
+    "Uniform start-heading jitter in front of the fridge (checklist C2); the head still finds the picture."
 
     # --- the robot's docks -----------------------------------------------------
     dock_toward: float = float(os.environ.get("MIKASA_DOCK_TOWARD", "0.15"))
@@ -346,6 +348,7 @@ class SeasonDishConfig:
         )
         assert self.station_spacing > 0 and self.spawn_jitter_xy >= 0
         assert 0.0 <= self.start_backoff_jitter_m < self.start_backoff_m
+        assert 0.0 <= self.start_yaw_jitter_rad < math.pi / 4
         assert 0.0 < self.reach_band[0] < self.reach_band[1], self.reach_band
         assert self.min_object_gap >= 0.0 and self.contact_band >= 0.0
         assert self.placement_draw_tries > 0
@@ -827,6 +830,16 @@ class SeasonDishTask(BaseEnv):
                 size=2)).reshape(b, 2)
             starts = self.fridge_pictures.starts[env_idx.cpu().numpy()].copy()
             starts[:, :2] += offsets
+            # Vary the start heading as well (checklist C2). A generator keyed by the
+            # episode seed leaves every other draw of this reset, including the
+            # initial joint jitter below, exactly as before.
+            episode_seeds = np.asarray(self._episode_seed).reshape(-1)
+            for j, e in enumerate(env_idx.tolist()):
+                seed = int(episode_seeds[min(e, len(episode_seeds) - 1)])
+                delta = np.random.default_rng([seed, 0x5EA]).uniform(
+                    -self.cfg.start_yaw_jitter_rad, self.cfg.start_yaw_jitter_rad)
+                yaw = 2 * math.atan2(float(starts[j, 6]), float(starts[j, 3])) + delta
+                starts[j, 3:7] = [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]
             self._robot_start_np[env_idx.cpu().numpy()] = starts
             self._robot_start[env_idx] = torch.as_tensor(starts, device=self.device)
             self._restore_robot(env_idx)

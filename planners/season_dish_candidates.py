@@ -32,6 +32,20 @@ ARCHIVE_WARM_STARTS = (
     (-.394138262,1.227037228,1.921497867,-3.053495105,1.177937660,2.045369398))
 
 
+def _wrap(a):
+    return float((a + np.pi) % (2 * np.pi) - np.pi)
+
+
+def unrolled(template):
+    """The same hand pose with the forearm rolled by pi and the wrist flexed the other way.
+
+    For forearm_roll / wrist_flex / wrist_roll, (r1, f, r2) and (r1+pi, -f, r2+pi) put the
+    hand in the identical pose; the shoulder and elbow are unchanged.
+    """
+    sl, ua, el, fa, wf, wr = template
+    return (sl, ua, el, _wrap(fa + np.pi), -wf, _wrap(wr + np.pi))
+
+
 def joint_margin(planner, task, q):
     """Nearest physical or episode roll limit for the arm, in radians."""
     names = task.agent.controller.controllers['arm'].config.joint_names
@@ -87,6 +101,10 @@ def candidates(planner, task, grasp, reach, reasons, *, n_init=32):
         if policy != 'diverse':
             raise ValueError('Low-height comparison requires the four-query policy')
         specifications=LOW_GEOMETRIES if parameters['grasp_heights']=='low' else MIXED_GEOMETRIES
+    family = parameters.get('grasp_family', 'rolled')
+    if family not in ('rolled', 'unrolled'):
+        raise ValueError(f'Unknown grasp family: {family}')
+    wrist = int(task.agent.robot.active_joints_map['wrist_flex_joint'].active_index[0])
     warm_starts=bool(parameters.get('grasp_archive_warm_starts',False))
     warm_queries=parameters.get('grasp_archive_queries',
         {str(i):i%4 for i in range(len(specifications))}) if warm_starts else {}
@@ -102,7 +120,8 @@ def candidates(planner, task, grasp, reach, reasons, *, n_init=32):
         reach_pose = sapien.Pose(g.p+rot@(reach.p-grasp.p), orientation)
         initial = folded.copy()
         archive_index=warm_queries.get(str(request))
-        initial[indices] = ARCHIVE_WARM_STARTS[archive_index] if archive_index is not None else TEMPLATES[template]
+        seed_template = ARCHIVE_WARM_STARTS[archive_index] if archive_index is not None else TEMPLATES[template]
+        initial[indices] = unrolled(seed_template) if family == 'unrolled' else seed_template
         if torso is not None:
             initial[3] = torso
         status, found = p.IK(p._transform_goal_to_wrt_base(mplib.Pose(reach_pose.p,reach_pose.q)),
@@ -123,6 +142,8 @@ def candidates(planner, task, grasp, reach, reasons, *, n_init=32):
             # Unwrapping toward an artificial IK seed can cross the episode's
             # roll window even though mplib's original representative is valid.
             q = wrapped if p.accepts(wrapped) else np.asarray(raw).copy()
+            if family == 'unrolled' and q[wrist] > -.05:
+                continue
             if p.accepts(q):
                 goals.append(q)
         if not goals:
