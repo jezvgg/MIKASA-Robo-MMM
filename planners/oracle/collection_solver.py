@@ -1,5 +1,7 @@
 """Collection-specific action generation; the canonical robot stack is unchanged."""
 
+from contextlib import contextmanager
+
 import numpy as np
 
 from robots.fetch.extand import FetchMotionPlanningSapienSolver
@@ -206,6 +208,22 @@ class CollectionMotionPlanner(FetchMotionPlanningSapienSolver):
         self._roll_low = roll.copy()
         self._roll_high = roll.copy()
         self.planner = RollPathPlanner(self.planner, self)
+
+    @contextmanager
+    def goal_branch(self, *, elbow, wrist):
+        """Require one elbow/wrist sign combination at plan endpoints only (D3)."""
+        if elbow not in (-1, 1) or wrist not in (-1, 1):
+            raise ValueError("Grasp branch signs must be -1 or +1")
+        joints = self.env_agent.robot.active_joints_map
+        previous = getattr(self, "_goal_branch", {})
+        self._goal_branch = {
+            int(joints[name].active_index[0]): sign
+            for name, sign in (("elbow_flex_joint", elbow), ("wrist_flex_joint", wrist))
+        }
+        try:
+            yield
+        finally:
+            self._goal_branch = previous
 
     def set_grasp_branch(self, *, elbow=1, wrist=1):
         """Constrain candidate and intermediate poses to one grasp branch."""

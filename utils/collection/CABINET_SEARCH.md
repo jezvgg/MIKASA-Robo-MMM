@@ -295,3 +295,27 @@ transit clearance, camera audits, ten complete three-camera episodes and the
 remaining storyboards accompany this new profile. Earlier profiles retain their
 original code bindings. Owner E5 and the remaining dataset requirements still
 gate mass collection; this is a development result.
+
+## Profile v14 checklist fixes (2026-09-28)
+
+D3: in profile 13 the door grasp closed on the published negative-elbow/positive-wrist
+branch at 146 of 154 grasps (94.8 %). All eight exceptions were first-door pre-grasp
+screws that did not jam at shoulder_lift and kept a positive elbow. The pre-grasp and
+grasp stroke now require that branch at the plan endpoint only (the transit posture
+itself has a positive elbow). A screw ending on the other branch is re-planned with
+shoulder_lift held, which is the solver's own unjam variant that the other 95 % of
+grasps already take; otherwise the plan is refused. The robot, its limits and the
+door motions are unchanged.
+
+D5: the free-floor home drive stops within 0.03 m of the sampled mark centre (the
+home disk is 0.20 m) instead of reversing 1–2 cm at the end of the TOPP braking tail.
+Door, closing and touch docks keep full precision; the published reverse inside door
+work is unchanged and remains an open owner decision. E1 is unchanged: centered
+parking still covers the mark (no parking offset or south waypoint is restored).
+
+Paired development pool 7800000–7800039 against profile 13 (`cabinet-final-001`):
+source 40/40 and held 40/40 in both. Door-grasp branch 111/111 (was 105/111). Median
+free-navigation direction changes 6 → 4 and reverse frames 191 → 136; D6 maximum
+identical-pair fraction 4.73 % → 3.08 %, longest pause 15 → 6 frames. The eight
+profile-13 wrong-branch seeds (six of them in this pool, plus 7860000 and 7860003)
+all succeed on the published branch with both physical replays.

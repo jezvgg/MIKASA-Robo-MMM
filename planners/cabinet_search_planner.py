@@ -669,8 +669,17 @@ def drive_home(env, planner, task):
         say(env, "waypoint noise", offset_m=delta.tolist())
     planner.planner.update_from_simulation()
     say(env, "drive home", home=[hx, hy])
-    res = planner.drive_base(target_pos=np.array([hx, hy, 0.0]), target_view_vec=view,
-                             freeze_arm=True)
+    # D5: stop within this distance instead of the ~1-2 cm reverse at the end of
+    # the braking tail. The home disk is 0.20 m; docks at doors keep full precision.
+    tolerance = float(getattr(task, "motion_parameters", {}).get("home_arrival_tolerance_m", 0.0))
+    assert 0.0 <= tolerance <= 0.05, tolerance
+    previous = getattr(planner, "navigation_arrival_tolerance", 0.0)
+    planner.navigation_arrival_tolerance = tolerance
+    try:
+        res = planner.drive_base(target_pos=np.array([hx, hy, 0.0]), target_view_vec=view,
+                                 freeze_arm=True)
+    finally:
+        planner.navigation_arrival_tolerance = previous
     if res == -1:
         return -1
     if common.stopped_by_horizon(planner):
@@ -936,6 +945,14 @@ def nudge_the_cube(env, planner, task, res, cab=None):
         else:
             say(env, "the level posture refused; the screw from the ready posture")
         planner.planner.update_from_simulation()
+    amplitude = float(getattr(task, "motion_parameters", {}).get("grasp_noise_m", 0.0))
+    noise = getattr(planner, "cabinet_waypoint_noise", None)
+    touch_offset = np.zeros(3)
+    if amplitude > 0 and noise is not None:
+        # BIBLE 5: sideways and vertical offset of the touch; the push depth is kept so the
+        # required displacement is unchanged.
+        touch_offset[[0, 2]] = noise.uniform(-amplitude, amplitude, size=2)
+        say(env, "waypoint noise", waypoint="can touch", offset_m=touch_offset.tolist())
     for attempt in range(NUDGE_TRIES):
         target_p = _np(task.revealed_target()).reshape(-1, 3)[0].astype(np.float64)
         if not np.all(np.isfinite(target_p)):
@@ -945,8 +962,8 @@ def nudge_the_cube(env, planner, task, res, cab=None):
             say(env, "MISSED: the compartment is no longer revealed; the cube was not nudged", attempt=attempt)
             return res
         z = target_p[2] + NUDGE_Z_OFFSET
-        pre_c = np.array([target_p[0], target_p[1] - half - NUDGE_PRE_M, z])
-        push_c = np.array([target_p[0], target_p[1] + NUDGE_PAST_M, z])
+        pre_c = np.array([target_p[0], target_p[1] - half - NUDGE_PRE_M, z]) + touch_offset
+        push_c = np.array([target_p[0], target_p[1] + NUDGE_PAST_M, z]) + touch_offset
         pre = task.agent.build_grasp_pose(approach, closing, pre_c)
         push = task.agent.build_grasp_pose(approach, closing, push_c)
         # The lift frozen when it was raised (the level reach); the plain plan, torso

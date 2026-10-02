@@ -213,3 +213,70 @@ def test_reference_starts_only_after_random_ik_fails_and_stay_bounded():
         starts.append(n_init_qpos) or ("Success", [near]))
     assert guard.IK(None, current, n_init_qpos=40)[0] == "Success"
     assert starts == [40]
+
+
+def make_branch_guard():
+    guard, native, owner = make_guard()
+    joints = {name: SimpleNamespace(active_index=np.array([index]))
+              for name, index in (("shoulder_lift_joint", 7), ("elbow_flex_joint", 9),
+                                  ("wrist_flex_joint", 11))}
+    owner.env_agent = SimpleNamespace(robot=SimpleNamespace(active_joints_map=joints))
+    owner._goal_branch = {9: -1, 11: 1}
+    owner.reports = []
+    owner._report = lambda stage, **fields: owner.reports.append((stage, fields))
+    return guard, native, owner
+
+
+def branch_path(elbow_end, *, elbow_start=0.9):
+    # move-group columns: shoulder_lift 5, elbow_flex 7, wrist_flex 9
+    path = np.zeros((3, 11))
+    path[:, 7] = [elbow_start, 0.3, elbow_end]
+    path[:, 9] = [2.0, 1.6, 1.3]
+    return path
+
+
+def test_goal_branch_checks_only_the_endpoint():
+    guard, native, owner = make_branch_guard()
+    native.plan_screw = lambda *a, **kw: {"status": "Success", "position": branch_path(-0.3)}
+    result = guard.plan_screw(None, np.zeros(15), masked_joints=np.ones(15, dtype=bool))
+    assert result["status"] == "Success" and result["position"][-1, 7] == -0.3
+    assert owner.reports == []
+
+
+def test_wrong_goal_branch_screw_retries_with_shoulder_lift_held():
+    guard, native, owner = make_branch_guard()
+    masks = []
+
+    def plan(goal, start, **kw):
+        masks.append(np.array(kw["masked_joints"]))
+        return {"status": "Success", "position": branch_path(0.2 if len(masks) == 1 else -0.3)}
+
+    native.plan_screw = plan
+    mask = np.ones(15, dtype=bool)
+    mask[:3] = False
+    result = guard.plan_screw(None, np.zeros(15), masked_joints=mask)
+    assert result["position"][-1, 7] == -0.3
+    assert masks[0][7] and not masks[1][7]
+    np.testing.assert_array_equal(np.delete(masks[1], 7), np.delete(mask, 7))
+    assert owner.reports == [("goal_branch", {"held": "shoulder_lift_joint", "knots": 3})]
+
+
+def test_wrong_goal_branch_is_refused_when_the_held_screw_does_not_fix_it():
+    guard, native, _ = make_branch_guard()
+    native.plan_screw = lambda *a, **kw: {"status": "Success", "position": branch_path(0.2)}
+    result = guard.plan_screw(None, np.zeros(15), masked_joints=np.ones(15, dtype=bool))
+    assert result["status"] != "Success"
+    native.plan_pose = lambda *a, **kw: {"status": "Success", "position": branch_path(0.2)}
+    assert guard.plan_pose(None, np.zeros(15))["status"] != "Success"
+
+
+def test_goal_branch_filters_ik_candidates():
+    guard, native, owner = make_branch_guard()
+    wrong, right = np.zeros(15), np.zeros(15)
+    wrong[[9, 11]] = [0.2, 1.3]
+    right[[9, 11]] = [-0.3, 1.3]
+    native.IK = lambda *a, **kw: ("Success", [wrong, right])
+    status, goals = guard.IK(None, np.zeros(15))
+    assert status == "Success" and len(goals) == 1 and goals[0][9] == -0.3
+    owner._goal_branch = {}
+    assert len(guard.IK(None, np.zeros(15))[1]) == 2
