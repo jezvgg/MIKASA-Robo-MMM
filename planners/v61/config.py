@@ -68,7 +68,7 @@ STAND_DX_WEIGHT = 0.0             # cost per metre away from the cup-tray midpoi
 PREDICT_DT = 0.05              # s: step of the kinematic rollout used to score stands
 PREDICT_MAX_STEPS = 700
 MONOTONE_SAMPLES = 120          # samples of the monotone reference path
-MONOTONE_BEARING_SLACK = 30.0     # deg (WS5: was 8, offline 69 -> 49 start/stand pairs with a reversal): the goal bearing may lie this far outside the start..goal heading cone
+MONOTONE_BEARING_SLACK = 8.0      # deg: the goal bearing may lie this far outside the start..goal heading cone
 MONOTONE_LOOKAHEAD = 4            # path samples ahead used as the heading reference
 MONOTONE_FEEDBACK = 1.5           # 1/s: heading feedback onto the reference
 MONOTONE_MIN_SPEED = 0.05         # m/s
@@ -157,6 +157,3 @@ CLEAR_SAMPLE_EVERY = 5            # env steps between the poses of the predicted
 CLEAR_AHEAD = 0.06                # m: the tucked robot is also checked this much further along its heading (hand finger, arrival error)
 VIA_DISTANCES = (0.4, 0.7, 1.0)   # m: via points tried back from the stand along its final heading (turn there, then drive straight in)
 VIA_COST = 0.5                    # stand cost of a drive through a via point
-
-# -- v6.1e WS5: reversals and base turn ----------------------------------------------------------------
-TURN_FLIP_COST = 20.0             # stand cost when the first turn of the approach is against the last turn of the previous attempt (a reversal across attempts)

@@ -8,7 +8,7 @@ from mani_skill.agents.robots import Fetch
 from my_scenes.my_robocasa_takeitback_tray import MyRoboCasaSceneTakeItBackTray
 from robots.fetch.extand import FetchMotionPlanningSapienSolver
 
-from . import manip, turn_cost
+from . import manip
 from .config import APPROACH_ATTEMPTS, SETTLE_AFTER_RELEASE, GRIPPER_OPEN, STAND_NOISE
 from .gaze import base_xyyaw, install_gaze
 from .stands import find_stand
@@ -48,7 +48,6 @@ def _episode(env, seed, debug, vis, info, holder) -> bool:
     gaze = {"target": unwenv.cup}
     trace = install_gaze(planner, agent, lambda: gaze["target"].pose.p[0].cpu().numpy())
     planner.v61_servo_log = []
-    turn_cost.reset()
     holder.update(trace=trace, planner=planner)
     planner.gripper_state = GRIPPER_OPEN
 
@@ -56,7 +55,6 @@ def _episode(env, seed, debug, vis, info, holder) -> bool:
     ok = False
     for attempt in range(APPROACH_ATTEMPTS):
         planner.v61_attempt = attempt
-        turn_cost.note_log(planner.v61_servo_log)   # the last turn of the earlier approaches, for the stand cost
         stand = find_stand(planner, unwenv, agent, _noise(seed), exclude=tuple(failed))
         if stand is None:
             env.log_event("error", "v6: no stand pose with IK for pregrasp, grasp and place")

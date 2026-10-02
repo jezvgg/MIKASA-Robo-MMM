@@ -55,9 +55,3 @@ def backward_distance(trace: np.ndarray) -> float:
     d = np.diff(t[:, :2], axis=0)
     fwd = d[:, 0] * np.cos(mid) + d[:, 1] * np.sin(mid)
     return float(-fwd[fwd < 0].sum())
-
-
-def end_signs(trace: np.ndarray, **kw) -> Tuple[float, float]:
-    """(sign of the first, sign of the last counted turning segment) of an (T, 3) trace; 0.0 for a trace without one."""
-    segs = segments(trace, **kw)
-    return (segs[0][0], segs[-1][0]) if segs else (0.0, 0.0)
