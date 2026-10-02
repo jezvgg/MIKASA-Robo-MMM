@@ -121,3 +121,11 @@ RETREAT_UP = 0.06                # m: torso rise that lifts the open hand off th
 RETREAT_STEPS = 40                # env steps of that rise
 PLACE_MARGIN = 0.02               # m: a preferred stand also reaches the place pose this much further from the base (the carry IK with the cup attached is tighter than the bare-hand one)
 MARGIN_WEIGHT = 6.0               # stand cost added when the place pose has no reach margin
+
+# -- v6.1e WS3: clearance of the drive to a stand --------------------------------------------------------
+CLEAR_MAX_TURN = 3.49             # rad (200 deg): a stand whose drive turns the base more is pushed back when an alternative exists
+CLEAR_PENALTY = 40.0              # stand cost added to a stand with no collision-free drive (above any base cost of a clear stand)
+CLEAR_SAMPLE_EVERY = 5            # env steps between the poses of the predicted drive checked against the planning world
+CLEAR_AHEAD = 0.06                # m: the tucked robot is also checked this much further along its heading (hand finger, arrival error)
+VIA_DISTANCES = (0.4, 0.7, 1.0)   # m: via points tried back from the stand along its final heading (turn there, then drive straight in)
+VIA_COST = 0.5                    # stand cost of a drive through a via point
