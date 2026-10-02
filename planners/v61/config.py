@@ -119,5 +119,5 @@ ROLL_SOFT = 2.4                   # rad: roll magnitude beyond which a stand is 
 ROLL_WEIGHT = 5.0                 # stand cost per radian beyond it
 RETREAT_UP = 0.06                # m: torso rise that lifts the open hand off the released cup
 RETREAT_STEPS = 40                # env steps of that rise
-PLACE_MARGIN = 0.04               # m: a preferred stand also reaches the place pose this much further from the base (the carry IK with the cup attached is tighter than the bare-hand one)
-MARGIN_WEIGHT = 2.0               # stand cost added when the place pose has no reach margin
+PLACE_MARGIN = 0.02               # m: a preferred stand also reaches the place pose this much further from the base (the carry IK with the cup attached is tighter than the bare-hand one)
+MARGIN_WEIGHT = 6.0               # stand cost added when the place pose has no reach margin
