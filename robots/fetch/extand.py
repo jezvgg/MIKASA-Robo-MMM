@@ -567,6 +567,7 @@ class PandaArmSapienSolver(PandaArmSolverV2):
         mask=_MASK_UNSET,
         n_init_qpos=20,
         base_free: bool = False,
+        disable_lift_joint: bool = False,
     ):
         """RRTConnect to `pose`, with the base masked out of the reach by default.
 
@@ -574,6 +575,11 @@ class PandaArmSapienSolver(PandaArmSolverV2):
         still wins over both.
         """
         mask, fixed = _rrt_base_defaults(mask, base_free)
+        if disable_lift_joint:
+            mask = list(RRT_BASE_MASK if mask is None else mask)
+            mask[3] = True
+            if fixed is not None:
+                fixed = sorted(set(fixed) | {3})
         pose = to_sapien_pose(pose)
         if self.grasp_pose_visual is not None:
             self.grasp_pose_visual.set_pose(pose)
@@ -744,7 +750,8 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         """
         arm_target = np.asarray(arm_target, dtype=np.float64).reshape(-1)
         body_target = np.asarray(body_target, dtype=np.float64).reshape(-1)
-        base_action = np.asarray(base_action, dtype=np.float64).reshape(-1)
+        base_action = np.asarray(base_action, dtype=np.float64).reshape(-1).copy()
+        base_action[np.abs(base_action) < 1e-6] = 0.0
         self._last_abs = np.hstack([arm_target, self.gripper_state, body_target, base_action])
         return self._from_abs(self._last_abs)
 
@@ -758,6 +765,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         # here makes the RECORDED action the executed one (the dataset check reads
         # `|a| <= 1`), nothing else changes.
         vec[-2:] = np.clip(vec[-2:], -1.0, 1.0)
+        vec[-2:][np.abs(vec[-2:]) < 1e-6] = 0.0
         mode = self.control_mode
         if mode == "pd_joint_pos":
             return vec
@@ -2462,7 +2470,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         # 3608, 2026-09-09: the approach cut a corner and knocked the shaker 32 cm). The
         # stall re-issues the same knot with the BASE HELD, so the base still integrates
         # exactly the plan's velocities; `DELTA_LAG_MAX_STALL` bounds it per knot.
-        gate = self.control_mode == "pd_joint_delta_pos"
+        gate = self.control_mode in self.COMPOSE_MODES
         i, stalled, stalls_total = 0, 0, 0
         while i < n_step:
             arm_action = (

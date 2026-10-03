@@ -50,11 +50,8 @@ MPLIB_REQUIRED_ATTRS = [
     ("mplib.collision_detection.fcl", "FCLObject"),
 ]
 
-# (package, requirement) pairs we knowingly violate. mani_skill pins mplib to
-# 0.1.1, which predates the API this benchmark's solver is written against, so
-# we install 0.2.1 over it on purpose. Every other declared requirement has to
-# hold — mplib's own `numpy<2.0` most of all, since violating that one makes
-# its bindings segfault with no error at all.
+# (package, requirement) pairs deliberately overridden in pyproject.toml. uv
+# still resolves mplib's own dependencies, including its required numpy<2.0.
 DELIBERATE_OVERRIDES = {("mani_skill", "mplib")}
 
 # Paths under ASSET_DIR/scene_datasets/robocasa_dataset that the cup task opens.
@@ -301,7 +298,7 @@ def check_mplib(r: Report) -> None:
         r.fail(
             "mplib",
             f"version {version} lacks {', '.join(missing)} — this is the 0.1.x API. "
-            "Fix: pip install --no-deps --force-reinstall mplib==0.2.1",
+            "Fix: uv sync (pyproject.toml pins the compatible MPlib 0.2.1 API)",
         )
     else:
         r.ok("mplib", f"{version} (0.2.x API present)")
@@ -310,11 +307,9 @@ def check_mplib(r: Report) -> None:
 def check_dependency_pins(r: Report) -> None:
     """Check that installed packages satisfy what the installed packages ask for.
 
-    Normally pip guarantees this. Here it cannot: mplib has to go in with
-    --no-deps to get past mani_skill's wrong `mplib==0.1.1`, and --no-deps
-    discards mplib's *own* requirements at the same time. mplib 0.2.1 declares
-    `numpy<2.0` and its bindings segfault when handed a numpy 2 array, with no
-    error message — the process just dies.
+    uv resolves this project from pyproject.toml, which deliberately overrides
+    ManiSkill's mplib pin while retaining mplib's own requirements. This check
+    guards the `numpy<2.0` constraint: mplib 0.2.1 bindings can segfault on numpy 2.
     """
     print("\n[ dependency pins ]")
     try:
@@ -349,8 +344,7 @@ def check_dependency_pins(r: Report) -> None:
             if installed not in req.specifier:
                 r.fail(
                     f"{package} needs {raw}",
-                    f"but {req.name} {installed} is installed. "
-                    f"Fix: pip install '{req.name}{req.specifier}'",
+                    f"but {req.name} {installed} is installed. Fix: uv sync",
                 )
     if not checked:
         r.warn("pins", "nothing to check (mplib and mani_skill both absent)")

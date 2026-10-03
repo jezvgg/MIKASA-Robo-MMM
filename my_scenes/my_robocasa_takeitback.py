@@ -42,6 +42,13 @@ class MyRoboCasaSceneTakeItBack(BaseRoboCasaSimple):
     # center like the cup's.
     TRAY_BAND_Y = (-0.50, -0.20)
 
+    # Realistic non-zero ds_fetch start pose. Keep small per-episode jitter so the
+    # first recorded state is not a single all-zero keyframe.
+    INITIAL_TORSO = 0.25
+    INITIAL_ARM = np.array([0.0, -0.5, 0.0, -1.5, 0.0, 1.5, 0.0])
+    INITIAL_TORSO_JITTER = 0.03
+    INITIAL_ARM_JITTER = 0.03
+
     cup_pos: np.ndarray  # [N, 3] initial cup position per env
     camera_pos: np.ndarray
     agent_pose: sapien.Pose
@@ -113,6 +120,27 @@ class MyRoboCasaSceneTakeItBack(BaseRoboCasaSimple):
         self.cup_pos = np.asarray(cup_pos)
         self.cup.set_pose(Pose.create_from_pq(p=self.cup_pos))
         self.tray.set_pose(Pose.create_from_pq(p=np.asarray(tray_pos)))
+
+        # ds_fetch has no useful reset keyframe; seed torso and arm without changing head.
+        qpos = self.agent.robot.get_qpos()[env_idx].clone()
+        for row in range(len(env_idx)):
+            qpos[row, 3] = self.INITIAL_TORSO + self._main_rng.uniform(
+                -self.INITIAL_TORSO_JITTER, self.INITIAL_TORSO_JITTER
+            )
+            qpos[row, 6:13] = torch.as_tensor(
+                self.INITIAL_ARM
+                + self._main_rng.uniform(
+                    -self.INITIAL_ARM_JITTER, self.INITIAL_ARM_JITTER, size=7
+                ),
+                dtype=qpos.dtype,
+                device=qpos.device,
+            )
+            qpos[row, 13:15] = 0.015
+        self.agent.robot.set_qpos(qpos)
+        qvel = self.agent.robot.get_qvel()[env_idx].clone()
+        qvel[:, 3] = 0
+        qvel[:, 6:15] = 0
+        self.agent.robot.set_qvel(qvel)
 
     # ------------------------------------------------------------------ #
     # Tray asset

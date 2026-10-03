@@ -1,6 +1,6 @@
 # MIKASA-Robo-MMM
 
-Benchmark VLA-памяти на базе ManiSkill. ManiSkill находится в `../ManiSkill` и подключается как editable-зависимость.
+Benchmark VLA-памяти на базе официального пакета ManiSkill 3.0.0b22 с PyPI; локальный `../ManiSkill` не используется. Для Linux motion-planning MPlib 0.2.1 намеренно переопределяет upstream-зависимость MPlib 0.1.1.
 
 ## Установка
 
@@ -24,7 +24,7 @@ uv run python -m planners.myrobocasa_takeitback_planner --help
 |---|---|---|
 | `MyRoboCasa-v1` | `myrobocasa_planner` | `pd_joint_pos` |
 | `MyRoboCasa_TakeItBack-v1` | `myrobocasa_takeitback_planner` | `pd_joint_delta_pos` |
-| `MyRoboCasa_TakeItBackTray-v1` | `myrobocasa_takeitback_tray_planner` | `pd_joint_delta_pos` |
+| `MyRoboCasa_TakeItBackTray-v1` | `myrobocasa_takeitback_tray_planner` | `pd_joint_pos` |
 | `MyRoboCasa_FridgeVeggies-v1` | `myrobocasa_fridge_veggies_planner` | `pd_joint_pos` |
 | `MikasaSeasonDish-v0` | `season_dish_planner` | `pd_joint_pos` |
 | `MikasaWaterPlants-v0` | `water_plants_planner` | `pd_joint_pos` |
@@ -71,14 +71,14 @@ uv run python -m utils.test_planner \
   --render-backend cpu
 ```
 
-Для другого задания замените `--scene` и `--planner` по таблице. Для двух `TakeItBack` используйте `--control-mode pd_joint_delta_pos`:
+Для другого задания замените `--scene` и `--planner` по таблице. Для `TakeItBackTray` используйте `--control-mode pd_joint_pos`; базовый `TakeItBack` сохраняет `pd_joint_delta_pos`:
 
 ```bash
 uv run python -m utils.test_planner \
   --scene MyRoboCasa_TakeItBackTray-v1 \
   --planner myrobocasa_takeitback_tray_planner \
   --num-episodes 100 --start-seed 0 --seed-step 1 \
-  --control-mode pd_joint_delta_pos \
+  --control-mode pd_joint_pos \
   --obs-mode state --sim-backend cpu --render-backend cpu
 ```
 
@@ -101,7 +101,7 @@ uv run python -m utils.test_planner \
   --scene MyRoboCasa_TakeItBackTray-v1 \
   --planner myrobocasa_takeitback_tray_planner \
   --num-episodes 1 --start-seed 3 \
-  --control-mode pd_joint_delta_pos \
+  --control-mode pd_joint_pos \
   --obs-mode state --sim-backend cpu --render-backend cpu \
   --traj-dir runs/trajectories/takeitback_tray_seed3 \
   --log-dir runs/traces/takeitback_tray
@@ -121,6 +121,17 @@ runs/traces/takeitback_tray/seed_3/
 
 Для 100 сидов поменяйте `--num-episodes 1` на `--num-episodes 100`; все непустые эпизоды будут `traj_0`, `traj_1`, ... в одном HDF5. `--log-dir` необязателен. `--video-dir` — отдельная запись MP4, не RGB-данные в HDF5.
 
+`MyRoboCasa_TakeItBackTray-v1` всегда записывается в `pd_joint_pos` на 20 Hz
+(`control_timestep=0.05`). Для LeRobot 10 Hz сначала используйте
+`utils.subsample_h5 --stride 2`, затем `utils.convert_to_lerobot_stream --fps 10`;
+одного изменения `--fps` недостаточно — оно только меняет timestamps. Конвертер
+сохраняет native resolution каждого RGB sensor (DSFetch: `fetch_hand` 128×128,
+камеры на head 256×256) и записывает для каждой episode-camera `chunk_index`,
+`file_index`, `from_timestamp`, `to_timestamp`. Seed, duration, success и reward
+сохраняются в `meta/source_rlds_metadata.json` и episode metadata parquet.
+`observation.state` — `qpos[3:]` (12D); `global_state` — первые 3 координаты
+базы, отдельно для отладки и не как policy observation.
+
 ## Перезапись траекторий с RGB
 
 ### Один эпизод: `utils.replay_rgb`
@@ -132,11 +143,11 @@ uv run python -m utils.replay_rgb \
   runs/trajectories/takeitback_tray_seed3 \
   --output-dir runs/trajectories/takeitback_tray_seed3_rgb \
   --episode 0 \
-  --robot fetch \
+  --robot ds_fetch \
   --stride 10
 ```
 
-Скрипт восстанавливает `env_states`, рендерит RGB каждые 10 control steps и пишет новый `trajectory.h5`/`trajectory.json`. Исходный файл не изменяется. `--stride 1` сохраняет каждый шаг. `--episode` — индекс `traj_N` в исходном HDF5.
+Скрипт восстанавливает `env_states`, рендерит RGB каждые 10 control steps и пишет новый `trajectory.h5`/`trajectory.json`. Sidecar сохраняет активные `CameraConfig` каждого sensor; `utils.subsample_h5` и `utils.merge_replays` сохраняют эти настройки. Конвертер требует этот sidecar для RGB input и переносит параметры в `meta/info.json` под `features[observation.images.<camera>].info.camera_config`. Исходный файл не изменяется. `--stride 1` сохраняет каждый шаг. `--episode` — индекс `traj_N` в исходном HDF5.
 
 ### Все эпизоды: upstream replayer
 
