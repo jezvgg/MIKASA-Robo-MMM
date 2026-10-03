@@ -6,6 +6,7 @@ tray, centers the held cup over it, lowers it, releases it, and verifies placeme
 
 import argparse
 import json
+import os
 import random
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,13 @@ from robots.fetch.extand import (
     FetchMotionPlanningSapienSolver,
 )
 from utils.logging_utils import PlannerLogger, StreamingVideoRecorder, capture_stdout
+
+
+SETTLE_STEPS = 4
+GRIP_SETTLE_STEPS = 10
+RELEASE_SETTLE_STEPS = 8
+EXECUTION_ACTION_NOISE = float(os.environ.get("MIKASA_ACTION_NOISE", "0.001"))
+EXECUTION_NOISE_HOLD = int(os.environ.get("MIKASA_NOISE_HOLD", "10"))
 
 
 def _repair_trajectory_metadata(run_dir: Path) -> None:
@@ -94,6 +102,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _align_gripper_switch(planner, task) -> None:
+    if int(task.elapsed_steps.reshape(-1)[0]) % 2:
+        planner.idle_steps(t=1)
+
+
 def planning(
     env,
     seed: int,
@@ -115,6 +128,9 @@ def planning(
         print_env_info=info,
         debug=debug,
     )
+    planner.action_noise = EXECUTION_ACTION_NOISE
+    planner.noise_hold = EXECUTION_NOISE_HOLD
+    planner.set_execution_noise_seed(seed)
 
     # Keep cup as a real obstacle throughout planning; only grasp stages may
     # later opt into contact explicitly.
@@ -133,6 +149,12 @@ def planning(
     env.track_object(task.tray, "tray")
     env.track_object(agent.tcp, "robot_tcp")
     env.track_object(agent.base_link, "robot_base")
+    env.log_event(
+        "execution_noise",
+        "arm target noise configured",
+        action_noise=planner.action_noise,
+        noise_hold=planner.noise_hold,
+    )
     env.log_event("start", "Waypoints 1-16 planning started")
     initial_tray_position = task.tray.pose.p[0].cpu().numpy()[:3].copy()
     initial_robot_position = agent.base_link.pose.p[0].cpu().numpy()[:3].copy()
@@ -180,7 +202,7 @@ def planning(
         env.log_event("result", "Waypoint 1 failed", waypoint_success=False)
         return False
 
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     after = _heading(agent)
     heading_error = _heading_error(agent, target_direction)
@@ -238,7 +260,7 @@ def planning(
     else:
         planner.idle_steps(t=1)
 
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     gap_after = abs(along_gap())
     success = gap_after <= 0.06
@@ -317,7 +339,7 @@ def planning(
         env.log_event("result", "Waypoint 3 failed", waypoint_success=False)
         return False
 
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     heading_after = _heading(agent)
     heading_error = _heading_error(agent, cup_direction)
@@ -387,7 +409,7 @@ def planning(
     else:
         planner.idle_steps(t=1)
 
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     base_xy = agent.base_link.pose.p[0].cpu().numpy()[:2]
     actual_gap = float(np.dot(base_xy - counter_front, normal) - base_radius)
@@ -663,7 +685,7 @@ def planning(
         return False
 
     planner.follow_path(selected)
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     tcp = agent.tcp.pose.p[0].cpu().numpy()
     grasp_error = float(np.linalg.norm(tcp - np.asarray(grasp_pose.p)))
@@ -707,8 +729,9 @@ def planning(
 
     # WAYPOINT 7: close the gripper without moving base, torso, or arm.
     env.log_event("waypoint", "Waypoint 7: close gripper on cup")
+    _align_gripper_switch(planner, task)
     planner.close_gripper(t=12)
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=GRIP_SETTLE_STEPS)
     planner.planner.update_from_simulation()
     grasped = bool(task.agent.is_grasping(task.cup).item())
     tcp_cup_distance = _tcp_to(agent, cup_center)
@@ -757,7 +780,7 @@ def planning(
         ) * (i + 1) / 150
         env.step(np.hstack([arm, planner.gripper_state, body_target, np.zeros(2)]))
     planner.planner.update_from_simulation()
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     torso_after_lift = float(body.qpos[0].cpu().numpy()[2])
     cup_z_after_lift = float(task.cup.pose.p[0][2])
@@ -811,7 +834,7 @@ def planning(
     base_before_retreat = agent.base_link.pose.p[0].cpu().numpy()[:2].copy()
     cup_xy_before_retreat = task.cup.pose.p[0].cpu().numpy()[:2].copy()
     planner.drive_straight(-0.15, v=0.10, max_steps=350)
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     base_after_retreat = agent.base_link.pose.p[0].cpu().numpy()[:2]
     cup_xy_after_retreat = task.cup.pose.p[0].cpu().numpy()[:2]
@@ -878,7 +901,7 @@ def planning(
         env.log_event("error", "Waypoint 10 rotation failed")
         env.log_event("result", "Stopped after waypoint 10", waypoint_success=False)
         return False
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     heading_after = _heading(agent)
     heading_error = _heading_error(agent, tray_direction)
@@ -953,7 +976,7 @@ def planning(
             return False
     else:
         planner.idle_steps(t=1)
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     cup_after_align = task.cup.pose.p[0].cpu().numpy()[:3]
     tray_after_align = task.tray.pose.p[0].cpu().numpy()[:3]
@@ -1051,7 +1074,7 @@ def planning(
         env.log_event("error", "Waypoint 12 rotation failed")
         env.log_event("result", "Stopped after waypoint 12", waypoint_success=False)
         return False
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     tray_after_turn = task.tray.pose.p[0].cpu().numpy()[:3].copy()
     base_after_turn = agent.base_link.pose.p[0].cpu().numpy()[:3].copy()
@@ -1261,7 +1284,7 @@ def planning(
             return False
     else:
         planner.idle_steps(t=1)
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     cup_after_advance = task.cup.pose.p[0].cpu().numpy()[:3]
     tray_after_advance = task.tray.pose.p[0].cpu().numpy()[:3]
@@ -1387,7 +1410,7 @@ def planning(
         env.log_event("result", "Stopped after waypoint 14", waypoint_success=False)
         return False
     planner.follow_path(selected_center_plan)
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     cup_after_center = task.cup.pose.p[0].cpu().numpy()[:3]
     base_after_center = agent.base_link.pose.p[0].cpu().numpy()[:3]
@@ -1465,7 +1488,7 @@ def planning(
         env.step(np.hstack([arm, planner.gripper_state, body_target, np.zeros(2)]))
         lower_steps += 1
     planner.planner.update_from_simulation()
-    planner.idle_steps(t=30)
+    planner.idle_steps(t=SETTLE_STEPS)
     planner.planner.update_from_simulation()
     cup_after_lower = task.cup.pose.p[0].cpu().numpy()[:3]
     base_after_lower = agent.base_link.pose.p[0].cpu().numpy()[:3]
@@ -1526,8 +1549,9 @@ def planning(
     # cup settle before using the task's real tray-success predicate.
     env.log_event("waypoint", "Waypoint 16: release cup on tray")
     cup_before_release = task.cup.pose.p[0].cpu().numpy()[:3].copy()
+    _align_gripper_switch(planner, task)
     planner.open_gripper(t=12, ramp=12)
-    planner.idle_steps(t=60)
+    planner.idle_steps(t=RELEASE_SETTLE_STEPS)
     planner.planner.update_from_simulation()
     cup_after_release = task.cup.pose.p[0].cpu().numpy()[:3]
     tray_after_release = task.tray.pose.p[0].cpu().numpy()[:3]

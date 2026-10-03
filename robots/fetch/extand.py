@@ -660,6 +660,30 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         self.max_refine_steps = (
             self.MAX_REFINE_STEPS if max_refine_steps is None else int(max_refine_steps)
         )
+        self.action_noise = 0.0
+        self.noise_hold = 0
+        self._execution_noise_rng = np.random.default_rng()
+        self._execution_noise = None
+        self._execution_noise_steps = 0
+
+    def set_execution_noise_seed(self, seed: int) -> None:
+        self._execution_noise_rng = np.random.default_rng(2_000_003 + int(seed))
+        self._reset_execution_noise()
+
+    def _reset_execution_noise(self) -> None:
+        self._execution_noise = None
+        self._execution_noise_steps = 0
+
+    def _apply_execution_noise(self, arm_action):
+        if self.action_noise <= 0.0 or self.noise_hold <= 0:
+            return arm_action
+        if self._execution_noise is None or self._execution_noise_steps <= 0:
+            self._execution_noise = self._execution_noise_rng.normal(
+                0.0, self.action_noise, size=np.asarray(arm_action).shape
+            )
+            self._execution_noise_steps = self.noise_hold
+        self._execution_noise_steps -= 1
+        return np.asarray(arm_action, dtype=np.float64) + self._execution_noise
 
     @property
     def elapsed_steps(self) -> int:
@@ -2412,6 +2436,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
     def follow_forward_path_w_refinement(
         self, result, refine: bool = False, stop_when=None
     ):
+        self._reset_execution_noise()
         # K55. A plan can come back `Success` with **no knots**: the goal was already
         # satisfied to within the planner's tolerance, so there is nothing to
         # interpolate. `_final_qpos_dict` then indexes `[-1]` into an empty array and
@@ -2482,6 +2507,8 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
             stall = gate and stalled < self.DELTA_LAG_MAX_STALL and self._arm_lag(arm_action) > self.DELTA_LAG_GATE
             if stall:
                 base_action[:] = 0.0
+            nominal_arm_action = arm_action.copy()
+            arm_action = self._apply_execution_noise(nominal_arm_action)
             action = self._compose(arm_action, body_action, base_action)
             if self.verbose:
                 print("arm Action:", np.round(arm_action, 4))
@@ -2505,6 +2532,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
 
         if refine and not self.truncated:
             # REFINEMENT!
+            refine_arm_target = nominal_arm_action.copy()
             passed_refine_steps = 0
             last_lift_poses = deque(maxlen=10)
             last_x_base_poses = deque(maxlen=10)
@@ -2565,9 +2593,10 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
                     .numpy()[0]
                 )
 
-                action = self._compose(arm_action, body_action, base_action)
+                noisy_arm_target = self._apply_execution_noise(refine_arm_target)
+                action = self._compose(noisy_arm_target, body_action, base_action)
                 if self.verbose:
-                    print("arm Action:", np.round(arm_action, 4))
+                    print("arm Action:", np.round(noisy_arm_target, 4))
                     print("body Action:", np.round(body_action, 4))
                     print("base Action:", np.round(base_action, 4))
                     print("Full: ", np.round(self.robot.get_qpos().cpu().numpy()[0], 4))
