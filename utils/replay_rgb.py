@@ -96,8 +96,14 @@ def main():
     src_h5_path = args.source_run_dir / "trajectory.h5"
     src_json = json.loads((args.source_run_dir / "trajectory.json").read_text())
     env_info = src_json["env_info"]
-    episode = src_json["episodes"][args.episode]
-    seed = episode.get("episode_seed")
+    episode = dict(src_json["episodes"][args.episode])
+    reset_seed = episode.get("reset_kwargs", {}).get("seed")
+    if isinstance(reset_seed, list) and len(reset_seed) == 1:
+        reset_seed = reset_seed[0]
+    seed = reset_seed if reset_seed is not None else episode.get("episode_seed")
+    if seed is not None:
+        episode["episode_seed"] = int(seed)
+        episode["source_seed"] = int(seed)
     control_mode = episode.get("control_mode", env_info["env_kwargs"]["control_mode"])
     env_kwargs = dict(env_info["env_kwargs"])
     env_kwargs.update(
@@ -180,6 +186,7 @@ def main():
                 shape=(0, *obs["sensor_data"][cam]["rgb"].shape[-3:]),
                 maxshape=(None, *obs["sensor_data"][cam]["rgb"].shape[-3:]),
                 dtype=np.uint8,
+                chunks=(1, *obs["sensor_data"][cam]["rgb"].shape[-3:]),
                 compression="gzip",
                 compression_opts=5,
             )

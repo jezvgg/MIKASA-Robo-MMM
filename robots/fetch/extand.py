@@ -64,6 +64,12 @@ PLANNING_TIME = float(os.environ.get("MIKASA_PLANNING_TIME", "2"))
 #: Left at 0.1; the override stays so the sweep is cheap to repeat.
 RRT_RANGE = float(os.environ.get("MIKASA_RRT_RANGE", "0.1"))
 
+#: Piecewise-constant execution noise for transfer trajectories. The planner's
+#: waypoint jitter is separate: this noise is added to arm targets after planning,
+#: held for `EXECUTION_NOISE_HOLD` control steps, then replaced.
+EXECUTION_ACTION_NOISE = float(os.environ.get("MIKASA_ACTION_NOISE", "0.001"))
+EXECUTION_NOISE_HOLD = int(os.environ.get("MIKASA_NOISE_HOLD", "10"))
+
 #: Measure-only. When `MIKASA_SCREW_SPLIT_PROBE` is set, every RRT fallback in
 #: `static_manipulation` first asks whether the SAME target would plan as two short
 #: screws through its midpoint, and prints `[screw_split]`. It plans and restores;
@@ -667,6 +673,34 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
             self.MAX_REFINE_STEPS if max_refine_steps is None else int(max_refine_steps)
         )
         self._head_target = None
+        self.action_noise = EXECUTION_ACTION_NOISE
+        self.noise_hold = EXECUTION_NOISE_HOLD
+        self._execution_noise_rng = np.random.default_rng()
+        self._execution_noise = None
+        self._execution_noise_steps = 0
+
+    def set_execution_noise_seed(self, seed: int) -> None:
+        """Make execution-noise draws reproducible without touching global RNGs."""
+        self._execution_noise_rng = np.random.default_rng(2_000_003 + int(seed))
+        self._execution_noise = None
+        self._execution_noise_steps = 0
+
+    def _reset_execution_noise(self) -> None:
+        self._execution_noise = None
+        self._execution_noise_steps = 0
+
+    def _apply_execution_noise(self, arm_action):
+        """Add held Gaussian noise to arm targets for one transfer step."""
+        if self.action_noise <= 0.0 or self.noise_hold <= 0:
+            return arm_action
+        if self._execution_noise is None or self._execution_noise_steps <= 0:
+            self._execution_noise = self._execution_noise_rng.normal(
+                0.0, self.action_noise, size=np.asarray(arm_action).shape
+            )
+            self._execution_noise_steps = self.noise_hold
+        noisy = np.asarray(arm_action, dtype=np.float64) + self._execution_noise
+        self._execution_noise_steps -= 1
+        return noisy
 
     @property
     def elapsed_steps(self) -> int:
@@ -727,7 +761,10 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         """
         arm_target = np.asarray(arm_target, dtype=np.float64).reshape(-1)
         body_target = np.asarray(body_target, dtype=np.float64).reshape(-1)
-        base_action = np.asarray(base_action, dtype=np.float64).reshape(-1)
+        base_action = np.asarray(base_action, dtype=np.float64).reshape(-1).copy()
+        # Store exact zero for commanded stops; PhysX/mplib can otherwise leave
+        # signed round-off such as -3e-15 in recorded velocity slots.
+        base_action[np.abs(base_action) < 1e-6] = 0.0
         self._last_abs = np.hstack([arm_target, self.gripper_state, body_target, base_action])
         return self._from_abs(self._last_abs)
 
@@ -741,6 +778,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         # here makes the RECORDED action the executed one (the dataset check reads
         # `|a| <= 1`), nothing else changes.
         vec[-2:] = np.clip(vec[-2:], -1.0, 1.0)
+        vec[-2:][np.abs(vec[-2:]) < 1e-6] = 0.0
         mode = self.control_mode
         if mode == "pd_joint_pos":
             return vec
@@ -2418,6 +2456,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
     def follow_forward_path_w_refinement(
         self, result, refine: bool = False, stop_when=None
     ):
+        self._reset_execution_noise()
         # K55. A plan can come back `Success` with **no knots**: the goal was already
         # satisfied to within the planner's tolerance, so there is nothing to
         # interpolate. `_final_qpos_dict` then indexes `[-1]` into an empty array and
@@ -2490,6 +2529,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
             stall = gate and stalled < self.DELTA_LAG_MAX_STALL and self._arm_lag(arm_action) > self.DELTA_LAG_GATE
             if stall:
                 base_action[:] = 0.0
+            arm_action = self._apply_execution_noise(arm_action)
             action = self._compose(arm_action, body_action, base_action)
             if self.verbose:
                 print("arm Action:", np.round(arm_action, 4))
@@ -2576,6 +2616,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
                     .numpy()[0]
                 )
 
+                arm_action = self._apply_execution_noise(arm_action)
                 action = self._compose(arm_action, body_action, base_action)
                 if self.verbose:
                     print("arm Action:", np.round(arm_action, 4))

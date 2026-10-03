@@ -42,6 +42,15 @@ class MyRoboCasaSceneTakeItBack(BaseRoboCasaSimple):
     # center like the cup's.
     TRAY_BAND_Y = (-0.50, -0.20)
 
+    # Realistic non-zero ds_fetch start pose. Keep small per-episode jitter so the
+    # first recorded state is not a single all-zero keyframe.
+    INITIAL_TORSO = 0.25
+    INITIAL_HEAD = np.array([0.0, 0.25])
+    INITIAL_ARM = np.array([0.0, 1.31, 0.0, -2.09, 0.0, 0.79, 0.0])
+    INITIAL_TORSO_JITTER = 0.03
+    INITIAL_HEAD_JITTER = np.array([0.12, 0.05])
+    INITIAL_ARM_JITTER = 0.03
+
     cup_pos: np.ndarray  # [N, 3] initial cup position per env
     camera_pos: np.ndarray
     agent_pose: sapien.Pose
@@ -113,6 +122,33 @@ class MyRoboCasaSceneTakeItBack(BaseRoboCasaSimple):
         self.cup_pos = np.asarray(cup_pos)
         self.cup.set_pose(Pose.create_from_pq(p=self.cup_pos))
         self.tray.set_pose(Pose.create_from_pq(p=np.asarray(tray_pos)))
+
+        # ds_fetch has no useful reset keyframe: without this, RecordEpisode captures
+        # an all-zero arm/head/torso state before the planner's first action.
+        qpos = self.agent.robot.get_qpos()[env_idx].clone()
+        for row in range(len(env_idx)):
+            qpos[row, 3] = self.INITIAL_TORSO + self._main_rng.uniform(
+                -self.INITIAL_TORSO_JITTER, self.INITIAL_TORSO_JITTER
+            )
+            qpos[row, 4:6] = torch.as_tensor(
+                self.INITIAL_HEAD
+                + self._main_rng.uniform(
+                    -self.INITIAL_HEAD_JITTER, self.INITIAL_HEAD_JITTER
+                ),
+                dtype=qpos.dtype,
+                device=qpos.device,
+            )
+            qpos[row, 6:13] = torch.as_tensor(
+                self.INITIAL_ARM
+                + self._main_rng.uniform(
+                    -self.INITIAL_ARM_JITTER, self.INITIAL_ARM_JITTER, size=7
+                ),
+                dtype=qpos.dtype,
+                device=qpos.device,
+            )
+            qpos[row, 13:15] = 0.015
+        self.agent.robot.set_qpos(qpos)
+        self.agent.robot.set_qvel(torch.zeros_like(qpos))
 
     # ------------------------------------------------------------------ #
     # Tray asset

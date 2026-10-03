@@ -451,6 +451,9 @@ def main(args: Args):
                 "source_episode_id", details.get("episode_id")
             ),
             "episode_seed": details.get("episode_seed"),
+            "source_seed": details.get("source_seed", details.get("episode_seed")),
+            "action_noise": details.get("action_noise"),
+            "noise_hold": details.get("noise_hold"),
             "elapsed_steps": details["elapsed_steps"],
             "duration_s": details["duration_s"],
             "success": details["success"],
