@@ -127,6 +127,10 @@ def _train_config(name: str, **kwargs) -> _config.TrainConfig:
     return _config.TrainConfig(**defaults)
 
 
+# Training episodes 0, 1, 2 and 5 have the cue in drawers 0, 1, 2 and 3 (seeds 9000000, 9000001,
+# 9000006, 9000004): one episode per answer, so the overfit run must use the first frame too.
+OVERFIT_EPISODES = (0, 1, 2, 5)
+
 CONFIGS = {
     # Pipeline check on a small GPU: tiny Gemma (width 64), full-size SigLIP, no base weights.
     "pi05_sd_ff_dummy": _train_config(
@@ -153,17 +157,18 @@ CONFIGS = {
         ema_decay=None,
         lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=300, peak_lr=5e-5, decay_steps=3_000, decay_lr=5e-6),
     ),
-    # 1x H100 overfit check: 10 episodes; the policy must then solve those episodes' seeds.
+    # 1x H100 overfit check (~30 min with evaluation): one episode per cue drawer, ~2,230 frames,
+    # ~7 passes in 500 steps of 32; the policy must then reproduce those episodes' actions.
     "pi05_sd_ff_overfit": _train_config(
         "pi05_sd_ff_overfit",
-        data=SameDrawerDataConfig(episodes=tuple(range(10))),
+        data=SameDrawerDataConfig(episodes=OVERFIT_EPISODES),
         batch_size=32,
         num_workers=8,
-        num_train_steps=2_000,
-        save_interval=1_000,
+        num_train_steps=500,
+        save_interval=500,
         keep_period=None,
         ema_decay=None,
-        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=200, peak_lr=5e-5, decay_steps=2_000, decay_lr=5e-6),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=50, peak_lr=5e-5, decay_steps=500, decay_lr=5e-6),
     ),
     # 4x H100 baseline: ~6.8 epochs of the 560,900 frames.
     "pi05_sd_ff_4xh100": _train_config(

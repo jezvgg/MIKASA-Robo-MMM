@@ -43,6 +43,9 @@ OPENPI_DATA_HOME="${OPENPI_DATA_HOME:-$PI05_WORK/openpi-cache}"
 VULKAN_DIR="${VULKAN_DIR:-$PI05_WORK/vulkan}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$PI05_WORK/uv-cache}"
 export HF_XET_CHUNK_CACHE_SIZE_BYTES="${HF_XET_CHUNK_CACHE_SIZE_BYTES:-0}"   # no extra copy of the dataset
+# Slow mirrors behind a proxy: uv's default 30 s read timeout and 3 retries dropped big CUDA wheels.
+export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-600}" UV_HTTP_RETRIES="${UV_HTTP_RETRIES:-10}"
+export UV_CONCURRENT_DOWNLOADS="${UV_CONCURRENT_DOWNLOADS:-4}"
 
 HF_DATASET=nurtayev-d/samedrawer-1000ep
 HF_REVISION=d126ebae7e8aa4217c2a61a5b08214fc75f1bdac

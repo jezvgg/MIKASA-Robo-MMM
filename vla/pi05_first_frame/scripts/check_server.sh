@@ -24,6 +24,11 @@ echo "== openpi venv: JAX"
 echo "== simulator venv: torch CUDA (sapien_cuda hands camera images to torch on the GPU)"
 "$SIM_VENV/bin/python" -c "import torch; print(torch.__version__, 'cuda', torch.cuda.is_available()); assert torch.cuda.is_available()"
 
+if [[ ! -f "$PI05_WORK/assets/samedrawer/nurtayev-d/samedrawer-1000ep/norm_stats.json" ]]; then
+  echo "== norm stats (once per server, ~1 min)"
+  "$OPENPI_DIR/.venv/bin/python" -m mikasa_pi05 norm-stats pi05_sd_ff_4xh100 2>&1 | grep -E 'frames in|q01==q99'
+fi
+
 echo "== dataset reader and tests"
 (cd "$REPO_DIR" && "$OPENPI_DIR/.venv/bin/python" -m pytest "$HERE/tests" -q -p no:cacheprovider)
 

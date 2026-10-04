@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# The whole single-GPU debug, unattended (~4-6 h on an H100). Source server.env first:
+# The single-GPU debug, unattended. Source server.env first:
 #
 #   . ~/mikasa-pi05/server.env
 #   nohup $REPO_DIR/vla/pi05_first_frame/scripts/debug_1xh100.sh > ~/mikasa-pi05/logs/debug.log 2>&1 < /dev/null &
 #
-# Stages; a finished stage is skipped, so running the script again continues where it stopped:
+# Stages ($STAGES, default "overfit"; "overfit debug" adds stage 2). A finished stage is skipped,
+# so running the script again continues where it stopped:
 #   0. render check (qd-gpucheck where it exists) and norm stats
-#   1. overfit: pi05_sd_ff_overfit on 10 episodes (2k steps), then evaluate on those 10 seeds
-#      (the model has seen these exact episodes; failing here means a pipeline bug, not capacity)
-#   2. debug:   pi05_sd_ff_1xh100 on all episodes (3k steps), then 20 validation seeds
+#   1. overfit (~30 min): pi05_sd_ff_overfit on 4 episodes, one per cue drawer (500 steps), then
+#      - open-loop: predicted vs recorded action chunks on those episodes,
+#      - closed-loop: the simulator on those episodes' seeds.
+#      The model has seen these exact episodes; failing here means a pipeline bug, not capacity.
+#   2. debug (~2 h): pi05_sd_ff_1xh100 on all episodes (3k steps), then 20 validation seeds
 # A full fine-tune that runs out of GPU memory is retried once with --batch-size 16.
 # Stops before the disk passes $DISK_LIMIT_GB (default 90 of the 100 GB quota).
 # The short report to send back: $PI05_WORK/logs/debug-report.txt
@@ -23,6 +26,7 @@ LOGS="$PI05_WORK/logs"
 REPORT="$LOGS/debug-report.txt"
 OVERFIT_CONFIG="${OVERFIT_CONFIG:-pi05_sd_ff_overfit}"
 DEBUG_CONFIG="${DEBUG_CONFIG:-pi05_sd_ff_1xh100}"
+STAGES="${STAGES:-overfit}"
 read -r -a TRAIN_EXTRA <<< "${TRAIN_ARGS:-}"
 read -r -a EVAL_EXTRA <<< "${EVAL_ARGS:-}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -103,11 +107,22 @@ if [[ ! -f "$PI05_WORK/assets/samedrawer/nurtayev-d/samedrawer-1000ep/norm_stats
   "$PY" -m mikasa_pi05 norm-stats pi05_sd_ff_4xh100 > "$LOGS/norm-stats.log" 2>&1
 fi
 
-train "$OVERFIT_CONFIG" overfit1
-evaluate "$OVERFIT_CONFIG" overfit1 "$PI05_WORK/results/overfit1" --seeds train:10 --video 3
+if [[ " $STAGES " == *" overfit "* ]]; then
+  train "$OVERFIT_CONFIG" overfit1
+  say "open-loop action error on the training episodes (log $LOGS/action-error-overfit1.log)"
+  "$PY" "$REPO_DIR/vla/pi05_first_frame/tests/check_action_error.py" "$OVERFIT_CONFIG" \
+      "$(latest_checkpoint "$OVERFIT_CONFIG" overfit1)" > "$LOGS/action-error-overfit1.log" 2>&1 \
+    && grep -A8 'frames from episodes' "$LOGS/action-error-overfit1.log" | tee -a "$REPORT" \
+    || { say "open-loop check failed"; tail -n 20 "$LOGS/action-error-overfit1.log" | tee -a "$REPORT"; }
+  episodes=$("$PY" -c "from mikasa_pi05.configs import get_config as g; e = g('$OVERFIT_CONFIG').data.episodes; print(','.join(map(str, e)) if e else '')" 2>/dev/null)
+  if [[ -n "$episodes" ]]; then seeds="episodes:$episodes"; else seeds="train:4"; fi
+  evaluate "$OVERFIT_CONFIG" overfit1 "$PI05_WORK/results/overfit1" --seeds "$seeds" --video 4
+fi
 
-train "$DEBUG_CONFIG" debug1
-evaluate "$DEBUG_CONFIG" debug1 "$PI05_WORK/results/debug1" --seeds validation --max-episodes 20 --video 5
+if [[ " $STAGES " == *" debug "* ]]; then
+  train "$DEBUG_CONFIG" debug1
+  evaluate "$DEBUG_CONFIG" debug1 "$PI05_WORK/results/debug1" --seeds validation --max-episodes 20 --video 5
+fi
 
 disk_guard
 say "finished; send $REPORT"

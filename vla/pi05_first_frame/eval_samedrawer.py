@@ -251,15 +251,20 @@ def resolve_seeds(spec: str, dataset_dir: Path) -> tuple[list[int], dict[int, in
     """Returns the seeds and, for training episodes, seed -> episode index."""
     if spec == "validation":
         return [int(s) for s in json.loads((dataset_dir / "validation_seeds.json").read_text())["seeds"]], {}
-    if spec.startswith("train:"):
+    if spec.startswith(("train:", "episodes:")):
         import pyarrow.parquet as pq
 
-        count = int(spec.split(":", 1)[1])
         pairs = []
         for path in sorted((dataset_dir / "meta/episodes").glob("*/*.parquet")):
             table = pq.read_table(path, columns=["episode_index", "episode_seed"]).to_pydict()
             pairs += zip(table["episode_index"], table["episode_seed"])
-        pairs = sorted(pairs)[:count]
+        pairs = sorted(pairs)
+        if spec.startswith("train:"):
+            pairs = pairs[: int(spec.split(":", 1)[1])]
+        else:
+            wanted = [int(e) for e in spec.split(":", 1)[1].split(",")]
+            seed_of = dict(pairs)
+            pairs = [(e, seed_of[e]) for e in wanted]
         return [int(s) for _, s in pairs], {int(s): int(e) for e, s in pairs}
     if Path(spec).is_file():
         data = json.loads(Path(spec).read_text())
@@ -303,7 +308,8 @@ def main() -> None:
     parser.add_argument("--server", default="localhost:8000", help="host:port of `python -m mikasa_pi05 serve`")
     parser.add_argument("--out", type=Path, help="results directory")
     parser.add_argument("--dataset-dir", type=Path, default=Path(os.environ.get("SAMEDRAWER_DATASET_DIR", ".")))
-    parser.add_argument("--seeds", default="validation", help="validation | train:N | comma list | json file")
+    parser.add_argument("--seeds", default="validation",
+                        help="validation | train:N (first N episodes) | episodes:I,J,... | seed list | json file")
     parser.add_argument("--shard", default="0/1", help="i/n: evaluate every n-th seed starting at i")
     parser.add_argument("--max-episodes", type=int)
     parser.add_argument("--replan-steps", type=int, default=5, help="10 Hz actions executed per request")
@@ -343,7 +349,7 @@ def main() -> None:
 
     if args.policy == "recorded":
         if not episode_of_seed:
-            parser.error("--policy recorded needs --seeds train:N")
+            parser.error("--policy recorded needs --seeds train:N or episodes:I,J,...")
         recorded = RecordedPolicy(
             {"mikasa_data": policy_metadata(),
              "first_frame": {"key": "observation.first_frame", "camera": "left_base_camera_link", "frame": 0}},
