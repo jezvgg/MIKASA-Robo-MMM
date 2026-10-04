@@ -90,6 +90,8 @@ s = json.load(open(sys.argv[1]))
 print(f"  SR {s['success']}/{s['episodes']} = {s['success_rate']:.2f}, 95% CI {s['wilson95']}")
 print(f"  stages {s['stages']}")
 print(f"  by target drawer {s['by_target_drawer']}; status {s['status']}")
+if "followed_demo_for_s" in s:
+    print(f"  seconds the live run followed the recorded demo of the same seed: {s['followed_demo_for_s']}")
 EOF
 }
 

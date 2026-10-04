@@ -138,7 +138,7 @@ def make_recording_env(env):
 
         def reset(self, **kwargs):
             obs, info = self.env.reset(**kwargs)
-            self.frames, self.max_open, self.steps = [], None, 0
+            self.frames, self.max_open, self.steps, self.qpos = [], None, 0, []
             self._capture(obs)
             return obs, info
 
@@ -152,6 +152,8 @@ def make_recording_env(env):
             return obs, reward, terminated, truncated, info
 
         def _capture(self, obs):
+            # One entry per 10 Hz policy frame, aligned with the dataset's frame_index.
+            self.qpos.append(_np(self.env.unwrapped.agent.robot.get_qpos())[0].astype(np.float64))
             if self.capture:
                 self.frames.append({c: _np(obs["sensor_data"][c]["rgb"])[0] for c in VIDEO_CAMERAS})
 
@@ -181,7 +183,7 @@ def connect_policy_server(client_module, host: str, port: int, timeout: float = 
             time.sleep(5)
 
 
-def episode_record(env, seed: int, result: dict, elapsed: float) -> dict:
+def episode_record(env, seed: int, result: dict, elapsed: float, reference=None) -> dict:
     base = env.unwrapped
     flags = {name: bool(_np(getattr(base, name))[0]) for name in (
         "closed_done", "apple_done", "wrong_drawer_touched", "sequence_violated", "apple_retention_violated")}
@@ -198,6 +200,7 @@ def episode_record(env, seed: int, result: dict, elapsed: float) -> dict:
         "final_open_amounts": [round(float(x), 4) for x in final_open],
         "max_open_amounts": [round(float(x), 4) for x in (env.max_open if env.max_open is not None else final_open)],
         "seconds": round(elapsed, 1),
+        **({"tracking": tracking(env.qpos, reference)} if reference is not None else {}),
     }
 
 
@@ -249,9 +252,11 @@ def summarize(records: list[dict]) -> dict:
         "apple_placed_and_other_drawer_opened": sum(
             r["apple_done"] and any(i != r["target_drawer"] for i in opened_after_apple(r)) for r in records),
     }
+    tracked = [r["tracking"]["followed_demo_for_s"] for r in records if "tracking" in r]
     return {
         "episodes": n,
         "success": ok,
+        **({"followed_demo_for_s": tracked} if tracked else {}),
         "success_rate": ok / n if n else 0.0,
         "wilson95": [round(lo, 4), round(hi, 4)],
         "by_target_drawer": by_drawer,
@@ -289,6 +294,42 @@ def resolve_seeds(spec: str, dataset_dir: Path) -> tuple[list[int], dict[int, in
         data = json.loads(Path(spec).read_text())
         return [int(s) for s in (data["seeds"] if isinstance(data, dict) else data)], {}
     return [int(s) for s in spec.split(",")], {}
+
+
+ARM_STATE_DIMS = [2, 4, 5, 6, 7, 8, 9]  # arm joints inside observation.state (qpos[3:])
+TRACK_ARM_RAD = 0.10   # ~6 degrees on any arm joint
+TRACK_BASE_M = 0.10    # 10 cm of base position
+
+
+def recorded_states(dataset_dir: Path, episode: int) -> tuple[np.ndarray, np.ndarray]:
+    """The recorded observation.state (qpos[3:]) and global_state (base x, y, yaw) per 10 Hz frame."""
+    import pyarrow.parquet as pq
+
+    for path in sorted((dataset_dir / "data").glob("*/*.parquet")):
+        table = pq.read_table(path, columns=["episode_index", "frame_index", "observation.state", "global_state"],
+                              filters=[("episode_index", "=", episode)]).to_pydict()
+        if table["episode_index"]:
+            order = np.argsort(table["frame_index"])
+            return (np.asarray(table["observation.state"], dtype=np.float64)[order],
+                    np.asarray(table["global_state"], dtype=np.float64)[order])
+    raise ValueError(f"Episode {episode} not found")
+
+
+def tracking(live_qpos: list, recorded: tuple[np.ndarray, np.ndarray]) -> dict:
+    """How long the live run stays on the recorded trajectory of the same seed."""
+    state, base = recorded
+    live = np.stack(live_qpos)
+    n = min(len(live), len(state))
+    arm = np.abs(live[:n, 3:][:, ARM_STATE_DIMS] - state[:n][:, ARM_STATE_DIMS]).max(axis=1)
+    drift = np.linalg.norm(live[:n, :2] - base[:n, :2], axis=1)
+    off = np.flatnonzero((arm > TRACK_ARM_RAD) | (drift > TRACK_BASE_M))
+    at = {f"{t}s": [round(float(arm[t * 10]), 3), round(float(drift[t * 10]), 3)]
+          for t in (1, 2, 5, 10, 20, 30, 45) if t * 10 < n}
+    return {
+        "followed_demo_for_s": round(float(off[0]) / 10, 1) if len(off) else round(n / 10, 1),
+        "demo_length_s": round(len(state) / 10, 1),
+        "max_arm_err_rad_and_base_err_m_at": at,
+    }
 
 
 def recorded_actions(dataset_dir: Path, episode: int) -> np.ndarray:
@@ -422,7 +463,8 @@ def main() -> None:
                 stop_on_success=True,
                 clip_actions=args.policy == "server",
             )
-            record = episode_record(env, seed, result, time.time() - start)
+            reference = recorded_states(args.dataset_dir, episode_of_seed[seed]) if seed in episode_of_seed else None
+            record = episode_record(env, seed, result, time.time() - start, reference)
             with log.open("a") as f:
                 f.write(json.dumps(record) + "\n")
             print(json.dumps(record), flush=True)
