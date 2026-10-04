@@ -6,6 +6,8 @@ OpenSameDrawer — задача на память. В начале эпизод�
 
 Цель — SR > 80% на 100 закреплённых валидационных сидах (`validation_seeds.json` набора, H4).
 
+**Запустить обучение на своей машине:** короткая пошаговая инструкция — [RUN_4XH100.md](RUN_4XH100.md).
+
 - Модель: pi0.5 из openpi (JAX), полный fine-tune от `pi05_base`.
 - Данные: [`nurtayev-d/samedrawer-1000ep`](https://huggingface.co/datasets/nurtayev-d/samedrawer-1000ep), ревизия `d126eba`. Это LeRobot v3.0: 1000 эпизодов, 560 900 кадров, 10 Гц.
 
