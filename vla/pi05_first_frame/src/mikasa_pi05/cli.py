@@ -130,6 +130,24 @@ def train(argv: list[str]) -> None:
     _openpi_script("train").main(config)
 
 
+def _warm_up(policy) -> None:
+    """Compile before accepting connections.
+
+    The server runs inference inside its event loop; a first request that compiles for
+    20-40 s leaves the client's keepalive pings unanswered and the client drops the
+    connection. A request of the real shapes compiles once here instead.
+    """
+    meta = policy.metadata
+    cameras = meta["mikasa_data"]["cameras"]
+    observation = {f"observation.images.{name}": np.zeros(shape, np.uint8) for name, shape in cameras.items()}
+    observation[meta["first_frame"]["key"]] = np.zeros(cameras[meta["first_frame"]["camera"]], np.uint8)
+    observation["observation.state"] = np.zeros(meta["mikasa_data"]["state_dim"], np.float32)
+    observation["prompt"] = "warm-up"
+    start = time.time()
+    policy.infer(observation)
+    logging.info("Compiled the policy in %.0f s", time.time() - start)
+
+
 def serve(argv: list[str]) -> None:
     from openpi.policies import policy_config
     from openpi.serving import websocket_policy_server
@@ -144,6 +162,7 @@ def serve(argv: list[str]) -> None:
     args = parser.parse_args(argv)
     config = get_config(args.config)
     policy = policy_config.create_trained_policy(config, args.checkpoint)
+    _warm_up(policy)
     logging.info("Serving %s from %s on port %d", args.config, args.checkpoint, args.port)
     server = websocket_policy_server.WebsocketPolicyServer(
         policy=policy, host=args.host, port=args.port, metadata=policy.metadata

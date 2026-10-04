@@ -359,6 +359,11 @@ def main() -> None:
         from openpi_client import websocket_client_policy
 
         host, port = args.server.rsplit(":", 1)
+        if host in ("localhost", "127.0.0.1", "::1"):
+            # websockets >= 15 routes through http(s)_proxy from the environment, local
+            # addresses included; a lab proxy refuses them and the client fails at once.
+            for name in ("no_proxy", "NO_PROXY"):
+                os.environ[name] = ",".join(filter(None, [os.environ.get(name), "localhost", "127.0.0.1", "::1"]))
         policy = FirstFramePolicy(websocket_client_policy.WebsocketClientPolicy(host, int(port)), args.first_frame)
     server_meta = policy.get_server_metadata()
 
