@@ -19,6 +19,8 @@
 #   assets     RoboCasa scenes (haosulab/RoboCasa)               -> $MS_ASSET_DIR
 #   data       nurtayev-d/samedrawer-1000ep at a pinned revision -> $SAMEDRAWER_DATASET_DIR
 #   weights    pi05_base params + PaliGemma tokenizer            -> $OPENPI_DATA_HOME
+#              from Hugging Face mirrors (pinned revisions), else from gs://; every file must
+#              match weights.sha256, the checksums of the original gs:// files
 #   vulkan     find a Vulkan driver manifest that renders on the GPU
 #   env        write $PI05_WORK/server.env (source it before every command)
 #   clean      empty the uv cache (venvs do not need it) and report disk use
@@ -47,6 +49,12 @@ HF_REVISION=d126ebae7e8aa4217c2a61a5b08214fc75f1bdac
 # sha256 of meta/info.json of the dataset that the configs and norm stats were made for.
 INFO_SHA256=975f8983ab7f7d75a3a812c4bf3701d56e3eedf4b133ba17c6d20ce0cf3d5699
 ROBOCASA_URL=https://huggingface.co/datasets/haosulab/RoboCasa/resolve/main/robocasa_dataset.zip
+# Byte-identical Hugging Face copies of gs://openpi-assets/checkpoints/pi05_base/params and
+# gs://big_vision/paligemma_tokenizer.model (verified against weights.sha256 on 2026-10-04).
+WEIGHTS_REPO=wz7in/pi05_base
+WEIGHTS_REVISION=1fff0c3949c177e314bd19622053d45be32e61a8
+TOKENIZER_REPO=leo009/paligemma_tokenizer.model
+TOKENIZER_REVISION=2506bd189b4713d798c92b6070f4177b590b4d44
 TORCH_VERSION=2.14.0
 TORCH_CU126_INDEX=https://download.pytorch.org/whl/cu126
 
@@ -87,9 +95,13 @@ step_preflight() {
   check "github.com (code)" git ls-remote https://github.com/Physical-Intelligence/openpi.git HEAD
   check "huggingface.co + its CDN (dataset)" fetch "https://huggingface.co/datasets/$HF_DATASET/resolve/$HF_REVISION/meta/tasks.parquet"
   check "huggingface.co + its CDN (RoboCasa scenes)" fetch "$ROBOCASA_URL"
-  check "storage.googleapis.com (pi05_base weights)" \
-    curl -fsS -o /dev/null --max-time 30 "https://storage.googleapis.com/storage/v1/b/openpi-assets/o?prefix=checkpoints/pi05_base/params/&maxResults=1"
-  check "storage.googleapis.com (PaliGemma tokenizer)" fetch "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model"
+  check "huggingface.co (pi05_base weights, $WEIGHTS_REPO)" fetch "https://huggingface.co/$WEIGHTS_REPO/resolve/$WEIGHTS_REVISION/params/ocdbt.process_0/d/828bee85475e37c61e1cc19e32d1c5ef"
+  check "huggingface.co (PaliGemma tokenizer, $TOKENIZER_REPO)" fetch "https://huggingface.co/$TOKENIZER_REPO/resolve/$TOKENIZER_REVISION/paligemma_tokenizer.model"
+  if fetch "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model"; then
+    echo "  ok       storage.googleapis.com (optional: original source of the weights)"
+  else
+    echo "  blocked  storage.googleapis.com (optional: the weights come from Hugging Face)"
+  fi
   local major; major="$(driver_major)"
   if [[ -n "$major" && "$major" -lt 580 ]]; then
     check "download.pytorch.org (torch for CUDA 12.6; driver $major < 580)" curl -fsS -o /dev/null --max-time 30 "$TORCH_CU126_INDEX/torch/"
@@ -208,13 +220,35 @@ step_data() {
   echo "ok: $(du -sh "$SAMEDRAWER_DATASET_DIR" | cut -f1)"
 }
 
+weights_ok() {
+  (cd "$OPENPI_DATA_HOME" && grep -v '^#' "$HERE/weights.sha256" | sha256sum -c --quiet) 2>/dev/null
+}
+
 step_weights() {
+  # openpi looks for gs://X/Y at $OPENPI_DATA_HOME/X/Y, so files placed there are used as is.
   log "pi05_base weights and tokenizer -> $OPENPI_DATA_HOME"
-  OPENPI_DATA_HOME="$OPENPI_DATA_HOME" "$OPENPI_DIR/.venv/bin/python" -c '
+  if weights_ok; then echo "already present and verified"; return; fi
+  local hf="$SIM_VENV/bin/hf"
+  mkdir -p "$OPENPI_DATA_HOME"
+  if ! { "$hf" download "$WEIGHTS_REPO" --revision "$WEIGHTS_REVISION" --include "params/*" \
+           --local-dir "$OPENPI_DATA_HOME/openpi-assets/checkpoints/pi05_base" >/dev/null \
+         || HF_HUB_DISABLE_XET=1 "$hf" download "$WEIGHTS_REPO" --revision "$WEIGHTS_REVISION" --include "params/*" \
+           --local-dir "$OPENPI_DATA_HOME/openpi-assets/checkpoints/pi05_base" >/dev/null; } \
+     || ! "$hf" download "$TOKENIZER_REPO" paligemma_tokenizer.model --revision "$TOKENIZER_REVISION" \
+           --local-dir "$OPENPI_DATA_HOME/big_vision" >/dev/null; then
+    echo "Hugging Face mirrors failed; trying the original gs:// bucket"
+    OPENPI_DATA_HOME="$OPENPI_DATA_HOME" "$OPENPI_DIR/.venv/bin/python" -c '
 from openpi.shared import download
-print(download.maybe_download("gs://openpi-assets/checkpoints/pi05_base/params", token="anon"))
-print(download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"}))
+download.maybe_download("gs://openpi-assets/checkpoints/pi05_base/params", token="anon")
+download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
 '
+  fi
+  if ! weights_ok; then
+    (cd "$OPENPI_DATA_HOME" && grep -v '^#' "$HERE/weights.sha256" | sha256sum -c) | grep -v ': OK$' >&2 || true
+    echo "the weights do not match the original pi05_base checksums" >&2
+    return 1
+  fi
+  echo "verified: $(du -sh "$OPENPI_DATA_HOME" | cut -f1)"
 }
 
 step_vulkan() {

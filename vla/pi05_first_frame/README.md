@@ -25,6 +25,7 @@ OpenSameDrawer — задача на память. В начале эпизод�
 | `scripts/debug_1xh100.sh` | весь дебаг на одной GPU одной командой, с отчётом |
 | `scripts/fix_vulkan.sh` | ищет файл драйвера Vulkan, с которым рендер идёт на NVIDIA |
 | `requirements-sim.txt`, `overrides-sim.txt` | окружение симулятора = окружение, в котором записан набор |
+| `weights.sha256` | контрольные суммы оригинальных pi05_base и токенизатора (gs://), с ними сверяются копии |
 | `tests/` | pytest для стороны openpi; сверка с LeRobot; рендер против набора; инференс на `pi05_base` |
 
 Ключевые решения:
@@ -49,7 +50,7 @@ git clone -b feat/pi05-first-frame-samedrawer https://github.com/pa40l/MIKASA-Ro
 - зеркало пакетов;
 - GitHub;
 - Hugging Face и его CDN;
-- storage.googleapis.com (веса pi0.5);
+- копии весов pi05_base и токенизатора на Hugging Face. Оригинал лежит в Google Cloud (storage.googleapis.com), который на сервере закрыт. Копии побайтно совпадают с оригиналом: при загрузке каждый файл сверяется с контрольными суммами `weights.sha256`;
 - download.pytorch.org — только если драйвер старше 580.
 
 Если какой-то адрес закрыт (`BLOCKED`), перешлите владельцу список, который скрипт напечатает в конце, и повторите `preflight`.
@@ -68,7 +69,7 @@ tail -f ~/mikasa-pi05/logs/setup.log          # выйти: Ctrl+C (устано
 - venv симулятора (~9 ГБ);
 - сцены RoboCasa (~8 ГБ);
 - набор (~14 ГБ);
-- веса pi05_base (~12 ГБ).
+- веса pi05_base (~12 ГБ) с Hugging Face (`wz7in/pi05_base`, `leo009/paligemma_tokenizer.model`) или, если там недоступно, из Google Cloud. В обоих случаях каждый файл сверяется с оригиналом.
 
 **3. Проверка сервера (~5 минут).**
 ```bash
