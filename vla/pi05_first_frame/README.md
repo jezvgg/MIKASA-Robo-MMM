@@ -22,6 +22,7 @@ OpenSameDrawer — задача на память. В начале эпизод�
 | `scripts/setup_server.sh` | установка на чистый сервер без root |
 | `scripts/check_server.sh` | проверки после установки (~5 мин) |
 | `scripts/eval_parallel.sh` | оценка на нескольких GPU: сервер политики и шард сидов на каждой |
+| `scripts/debug_1xh100.sh` | весь дебаг на одной GPU одной командой, с отчётом |
 | `scripts/fix_vulkan.sh` | ищет файл драйвера Vulkan, с которым рендер идёт на NVIDIA |
 | `requirements-sim.txt`, `overrides-sim.txt` | окружение симулятора = окружение, в котором записан набор |
 | `tests/` | pytest для стороны openpi; сверка с LeRobot; рендер против набора; инференс на `pi05_base` |
@@ -35,54 +36,100 @@ OpenSameDrawer — задача на память. В начале эпизод�
 - **Ветка начинается от `feat/same-drawer-collection` (`c64a4fd`).** Её отпечаток кода `a39d1c42…` совпадает с тем, под которым записаны набор и валидационные сиды. `eval_samedrawer.py` сверяет отпечатки кода и движка и при расхождении не запускается. Новый код лежит в `vla/`, которая в отпечаток не входит.
 - **Движок — `mani_skill==3.0.0b22` с PyPI**, а не форк `../ManiSkill` из `pyproject.toml`: данные записаны на нём (отпечаток `74ecf1d0…`).
 
-## Установка на сервере (без root)
+## Сервер лабы (gangway: 1×H100, 100 ГБ, без root, интернет по белому списку)
 
+Все команды выполняются на сервере: сначала `ssh gangway`, потом команды ниже. Длинные шаги запускаются через `nohup`, поэтому переживают разрыв ssh.
+
+**1. Код и проверка доступа (2 минуты).**
 ```bash
 git clone -b feat/pi05-first-frame-samedrawer https://github.com/pa40l/MIKASA-Robo-MMM.git ~/mikasa-pi05/MIKASA-Robo-MMM
-~/mikasa-pi05/MIKASA-Robo-MMM/vla/pi05_first_frame/scripts/setup_server.sh      # ~45 ГБ, повторный запуск безопасен
-. ~/mikasa-pi05/server.env                                                        # перед каждой командой
-$REPO_DIR/vla/pi05_first_frame/scripts/check_server.sh --base                     # все проверки, включая pi05_base
+~/mikasa-pi05/MIKASA-Robo-MMM/vla/pi05_first_frame/scripts/setup_server.sh preflight
 ```
+Скрипт проверит, открыты ли нужные адреса:
+- зеркало пакетов;
+- GitHub;
+- Hugging Face и его CDN;
+- storage.googleapis.com (веса pi0.5);
+- download.pytorch.org — только если драйвер старше 580.
 
-Что поставит скрипт:
-- uv (если его нет);
-- openpi с правкой и его venv (~12 ГБ);
-- venv симулятора (~7 ГБ);
+Если какой-то адрес закрыт (`BLOCKED`), перешлите владельцу список, который скрипт напечатает в конце, и повторите `preflight`.
+
+**2. Установка (~1 час, ~55 ГБ).**
+```bash
+mkdir -p ~/mikasa-pi05/logs
+nohup ~/mikasa-pi05/MIKASA-Robo-MMM/vla/pi05_first_frame/scripts/setup_server.sh \
+    > ~/mikasa-pi05/logs/setup.log 2>&1 < /dev/null &
+tail -f ~/mikasa-pi05/logs/setup.log          # выйти: Ctrl+C (установка продолжится)
+```
+Готово, когда в конце лога стоит `setup finished`. Если установка упала, запустите ту же команду ещё раз: готовые шаги пропускаются.
+
+Что ставится:
+- openpi с правкой и его venv (~12 ГБ). Пакеты идут через зеркало ровно тех версий, что в lock-файле openpi;
+- venv симулятора (~9 ГБ);
 - сцены RoboCasa (~8 ГБ);
 - набор (~14 ГБ);
 - веса pi05_base (~12 ГБ).
 
-Пути можно переопределить через переменные, например `PI05_WORK=/data/me/pi05`.
-
-**Не используйте переменные с префиксом `MIKASA_`:** профиль симулятора их запрещает.
-
-Если драйвер старше 580, torch для симулятора ставится в сборке под CUDA 12.6 (`2.14.0+cu126`). Обычная сборка с PyPI требует CUDA 13, а рендер передаёт картинки камер в torch прямо на GPU.
-
-## Дебаг на 1×H100
-
+**3. Проверка сервера (~5 минут).**
 ```bash
-. ~/mikasa-pi05/server.env; cd $REPO_DIR; PY=$OPENPI_DIR/.venv/bin/python
-export CUDA_VISIBLE_DEVICES=0                 # свободная карта из check_server.sh
-$PY -m mikasa_pi05 norm-stats pi05_sd_ff_4xh100   # одна статистика на все конфиги, ~1 мин
+. ~/mikasa-pi05/server.env
+$REPO_DIR/vla/pi05_first_frame/scripts/check_server.sh --base
+```
+Проверяется по порядку:
+- `qd-gpucheck`: умеет ли нода рисовать. При `wedged` попросите владельца перезапустить джобу;
+- тесты;
+- записанные эпизоды в симуляторе (должно быть 2/2);
+- совпадение рендера с набором;
+- загрузка pi05_base.
 
-# 1. Переобучение на 10 эпизодах: модель должна решить сиды этих эпизодов.
-nohup $PY -m mikasa_pi05 train pi05_sd_ff_overfit --exp-name overfit1 > $PI05_WORK/logs/overfit1.log 2>&1 &
-vla/pi05_first_frame/scripts/eval_parallel.sh pi05_sd_ff_overfit \
-    $PI05_WORK/checkpoints/pi05_sd_ff_overfit/overfit1/1999 $PI05_WORK/results/overfit1 0 --seeds train:10 --video 3
+В конце должно быть `all checks passed`.
 
-# 2. Короткий прогон на всём наборе: время шага, память, первые 20 валидационных сидов.
-nohup $PY -m mikasa_pi05 train pi05_sd_ff_1xh100 --exp-name debug1 > $PI05_WORK/logs/debug1.log 2>&1 &
-vla/pi05_first_frame/scripts/eval_parallel.sh pi05_sd_ff_1xh100 \
-    $PI05_WORK/checkpoints/pi05_sd_ff_1xh100/debug1/2999 $PI05_WORK/results/debug1 0 --max-episodes 20 --video 5
+**4. Весь дебаг одной командой (~4–6 часов).**
+```bash
+. ~/mikasa-pi05/server.env
+nohup $REPO_DIR/vla/pi05_first_frame/scripts/debug_1xh100.sh > ~/mikasa-pi05/logs/debug.log 2>&1 < /dev/null &
+tail -f ~/mikasa-pi05/logs/debug-report.txt   # короткий отчёт по ходу
+```
+Что делает скрипт:
+1. **Переобучение на 10 эпизодах** (2000 шагов), затем проверка на сидах этих же эпизодов. Модель видела их при обучении, поэтому провал здесь означает ошибку в цепочке, а не нехватку данных.
+2. **Короткое обучение на всём наборе** (3000 шагов), затем 20 валидационных сидов. Отсюда же видны время шага и потребление памяти.
+
+Если полный fine-tune не влезет в память, скрипт сам повторит с батчем 16. Если места на диске станет больше 90 ГБ, скрипт остановится сам. Если прервался, запустите заново: готовые этапы пропускаются.
+
+По окончании пришлите `~/mikasa-pi05/logs/debug-report.txt`: это короткий текст. Видео эпизодов лежат в `~/mikasa-pi05/results/*/shard-0/videos/`. Скачать их на свой компьютер:
+```bash
+rsync -av gangway:mikasa-pi05/results/ ./results/
 ```
 
-Если полный fine-tune не влезает в одну H100, уменьшите батч: `--batch-size 16`. Любое поле конфига переопределяется так же: `--num-train-steps`, `--lr-schedule.peak-lr` и т. д. wandb включается сам, если задан `WANDB_API_KEY`.
+**Диск.** На этих конфигах чекпойнт хранит только веса в bf16 и статистику: ~7 ГБ вместо ~37 ГБ (полный, с оптимизатором). Хранится только последний. Продолжить обучение с такого чекпойнта нельзя, только запускать и оценивать. Своё место: `du -sh ~`.
+
+**wandb (необязательно).** Это сайт с графиками обучения в реальном времени. Чтобы включить:
+1. Зарегистрируйтесь на wandb.ai.
+2. Скопируйте ключ со страницы wandb.ai/authorize.
+3. На сервере один раз выполните `. ~/mikasa-pi05/server.env && $OPENPI_DIR/.venv/bin/wandb login` и вставьте ключ.
+
+Дальше обучение само пишет туда графики (проект `openpi`). Ключ никому не пересылайте.
+
+**Ручной запуск по шагам** (то же, что делает `debug_1xh100.sh`):
+```bash
+. ~/mikasa-pi05/server.env; cd $REPO_DIR; PY=$OPENPI_DIR/.venv/bin/python
+$PY -m mikasa_pi05 norm-stats pi05_sd_ff_4xh100                      # одна статистика на все конфиги, ~1 мин
+$PY -m mikasa_pi05 train pi05_sd_ff_overfit --exp-name overfit1       # любое поле конфига: --batch-size 16, --num-train-steps ...
+vla/pi05_first_frame/scripts/eval_parallel.sh pi05_sd_ff_overfit \
+    $PI05_WORK/checkpoints/pi05_sd_ff_overfit/overfit1/1999 $PI05_WORK/results/overfit1 0 --seeds train:10 --video 3
+```
+
+Другие серверы: пути переопределяются переменными (`PI05_WORK=/data/me/pi05`).
+
+Не используйте переменные с префиксом `MIKASA_`: профиль симулятора их запрещает.
+
+Если драйвер старше 580, torch для симулятора ставится в сборке под CUDA 12.6 (`2.14.0+cu126`). Обычная сборка с PyPI требует CUDA 13, а рендер передаёт картинки камер в torch прямо на GPU.
 
 ## Обучение на 4×H100 и оценка
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 nohup $PY -m mikasa_pi05 train pi05_sd_ff_4xh100 --exp-name run1 \
-    > $PI05_WORK/logs/run1.log 2>&1 &            # 30k шагов, batch 128, FSDP на 4 карты; продолжить: --resume
+    > $PI05_WORK/logs/run1.log 2>&1 &            # 30k шагов, batch 128, FSDP на 4 карты; полные чекпойнты (~49 ГБ с EMA), продолжить: --resume
 vla/pi05_first_frame/scripts/eval_parallel.sh pi05_sd_ff_4xh100 \
     $PI05_WORK/checkpoints/pi05_sd_ff_4xh100/run1/29999 $PI05_WORK/results/run1-29999 0,1,2,3 --video 10
 # контроль: та же модель с чёрным кадром вместо подсказки — верный ящик должен угадываться ~1/4

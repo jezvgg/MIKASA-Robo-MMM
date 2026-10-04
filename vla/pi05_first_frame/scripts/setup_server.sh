@@ -6,19 +6,26 @@
 # First time:
 #   git clone -b feat/pi05-first-frame-samedrawer https://github.com/pa40l/MIKASA-Robo-MMM.git \
 #       ~/mikasa-pi05/MIKASA-Robo-MMM
-#   ~/mikasa-pi05/MIKASA-Robo-MMM/vla/pi05_first_frame/scripts/setup_server.sh
+#   ~/mikasa-pi05/MIKASA-Robo-MMM/vla/pi05_first_frame/scripts/setup_server.sh preflight
+#   nohup ~/mikasa-pi05/MIKASA-Robo-MMM/vla/pi05_first_frame/scripts/setup_server.sh \
+#       > ~/mikasa-pi05/setup.log 2>&1 < /dev/null &
 #
-#   repo     update this MIKASA-Robo-MMM checkout (git pull --ff-only)
-#   openpi   clone openpi at OPENPI_COMMIT, apply openpi.patch,
-#            uv sync --frozen, install mikasa_pi05                -> $OPENPI_DIR (.venv inside)
-#   sim      simulator venv: requirements-sim.txt + torch 2.14.0
-#            for this driver + openpi-client                      -> $SIM_VENV
-#   assets   RoboCasa scenes (haosulab/RoboCasa)                  -> $MS_ASSET_DIR
-#   data     nurtayev-d/samedrawer-1000ep at a pinned revision    -> $SAMEDRAWER_DATASET_DIR
-#   weights  pi05_base params + PaliGemma tokenizer               -> $OPENPI_DATA_HOME
-#   vulkan   find a Vulkan driver manifest that renders on the GPU
-#   env      write $PI05_WORK/server.env (source it before every command)
+#   preflight  GPU, driver, disk, and every download host this setup needs
+#   repo       update this MIKASA-Robo-MMM checkout (git pull --ff-only)
+#   openpi     clone openpi at OPENPI_COMMIT, apply openpi.patch, install the locked
+#              packages, install mikasa_pi05                     -> $OPENPI_DIR (.venv inside)
+#   sim        simulator venv: requirements-sim.txt + torch 2.14.0
+#              for this driver + openpi-client                   -> $SIM_VENV
+#   assets     RoboCasa scenes (haosulab/RoboCasa)               -> $MS_ASSET_DIR
+#   data       nurtayev-d/samedrawer-1000ep at a pinned revision -> $SAMEDRAWER_DATASET_DIR
+#   weights    pi05_base params + PaliGemma tokenizer            -> $OPENPI_DATA_HOME
+#   vulkan     find a Vulkan driver manifest that renders on the GPU
+#   env        write $PI05_WORK/server.env (source it before every command)
+#   clean      empty the uv cache (venvs do not need it) and report disk use
 #
+# Behind a package mirror (PIP_INDEX_URL/UV_INDEX_URL/UV_DEFAULT_INDEX not pypi.org) openpi's
+# lockfile is exported to pinned requirements and installed through the mirror, because the
+# lockfile itself points at files.pythonhosted.org.
 # Every path can be overridden by exporting the variable first (useful when parts already exist).
 set -euo pipefail
 
@@ -31,9 +38,9 @@ SIM_VENV="${SIM_VENV:-$PI05_WORK/sim-venv}"
 MS_ASSET_DIR="${MS_ASSET_DIR:-$PI05_WORK/maniskill-assets}"
 SAMEDRAWER_DATASET_DIR="${SAMEDRAWER_DATASET_DIR:-$PI05_WORK/data/samedrawer-1000ep}"
 OPENPI_DATA_HOME="${OPENPI_DATA_HOME:-$PI05_WORK/openpi-cache}"
-UV_CACHE_DIR="${UV_CACHE_DIR:-$PI05_WORK/uv-cache}"
 VULKAN_DIR="${VULKAN_DIR:-$PI05_WORK/vulkan}"
-export UV_CACHE_DIR
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$PI05_WORK/uv-cache}"
+export HF_XET_CHUNK_CACHE_SIZE_BYTES="${HF_XET_CHUNK_CACHE_SIZE_BYTES:-0}"   # no extra copy of the dataset
 
 HF_DATASET=nurtayev-d/samedrawer-1000ep
 HF_REVISION=d126ebae7e8aa4217c2a61a5b08214fc75f1bdac
@@ -41,18 +48,60 @@ HF_REVISION=d126ebae7e8aa4217c2a61a5b08214fc75f1bdac
 INFO_SHA256=975f8983ab7f7d75a3a812c4bf3701d56e3eedf4b133ba17c6d20ce0cf3d5699
 ROBOCASA_URL=https://huggingface.co/datasets/haosulab/RoboCasa/resolve/main/robocasa_dataset.zip
 TORCH_VERSION=2.14.0
+TORCH_CU126_INDEX=https://download.pytorch.org/whl/cu126
 
 log() { printf '\n== %s\n' "$*"; }
 
 need_uv() {
-  if ! command -v uv >/dev/null 2>&1; then
-    export PATH="$HOME/.local/bin:$PATH"
-  fi
+  command -v uv >/dev/null 2>&1 || export PATH="$HOME/.local/bin:$PATH"
   if ! command -v uv >/dev/null 2>&1; then
     log "installing uv into ~/.local/bin"
     curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="$HOME/.local/bin:$PATH"
   fi
+}
+
+package_index() {  # the default package index in use
+  local index="${UV_DEFAULT_INDEX:-${UV_INDEX_URL:-${PIP_INDEX_URL:-https://pypi.org/simple}}}"
+  echo "${index%/}"
+}
+
+driver_major() {
+  nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1
+}
+
+step_preflight() {
+  log "preflight"
+  nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || echo "nvidia-smi: no GPU visible"
+  python3 -V || true
+  need_uv; uv --version
+  echo "package index: $(package_index)"
+  echo "disk: $(du -sh "$HOME" 2>/dev/null | cut -f1) used in $HOME; this setup adds ~55 GB, each training checkpoint ~7 GB"
+  local blocked=()
+  ok()      { if "$@" >/dev/null 2>&1; then return 0; else return 1; fi; }
+  check()   { local name="$1"; shift; if ok "$@"; then echo "  ok       $name"; else echo "  BLOCKED  $name"; blocked+=("$name"); fi; }
+  # Any HTTP answer counts for hosts we only talk to; a proxy refusal makes curl itself fail.
+  reach()   { curl -sS -o /dev/null --max-time 30 "$1" 2>/dev/null; }
+  fetch()   { curl -fsSL -r 0-1023 -o /dev/null --max-time 60 "$1"; }
+  check "package index $(package_index)" curl -fsS -o /dev/null --max-time 30 "$(package_index)/numpy/"
+  check "github.com (code)" git ls-remote https://github.com/Physical-Intelligence/openpi.git HEAD
+  check "huggingface.co + its CDN (dataset)" fetch "https://huggingface.co/datasets/$HF_DATASET/resolve/$HF_REVISION/meta/tasks.parquet"
+  check "huggingface.co + its CDN (RoboCasa scenes)" fetch "$ROBOCASA_URL"
+  check "storage.googleapis.com (pi05_base weights)" \
+    curl -fsS -o /dev/null --max-time 30 "https://storage.googleapis.com/storage/v1/b/openpi-assets/o?prefix=checkpoints/pi05_base/params/&maxResults=1"
+  check "storage.googleapis.com (PaliGemma tokenizer)" fetch "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model"
+  local major; major="$(driver_major)"
+  if [[ -n "$major" && "$major" -lt 580 ]]; then
+    check "download.pytorch.org (torch for CUDA 12.6; driver $major < 580)" curl -fsS -o /dev/null --max-time 30 "$TORCH_CU126_INDEX/torch/"
+  fi
+  if reach https://api.wandb.ai/; then echo "  ok       api.wandb.ai (optional: training charts)"; else echo "  blocked  api.wandb.ai (optional: training charts)"; fi
+  if (( ${#blocked[@]} )); then
+    echo
+    echo "Ask the server owner to allow these downloads, then run preflight again:"
+    printf '  - %s\n' "${blocked[@]}"
+    return 1
+  fi
+  echo "all downloads reachable"
 }
 
 step_repo() {
@@ -82,13 +131,21 @@ step_openpi() {
   else
     git -C "$OPENPI_DIR" apply "$HERE/openpi.patch"
   fi
-  (cd "$OPENPI_DIR" && GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen)
+  local mode="${OPENPI_INSTALL:-}"
+  if [[ -z "$mode" ]]; then
+    [[ "$(package_index)" == *pypi.org* ]] && mode=sync || mode=export
+  fi
+  if [[ "$mode" == sync ]]; then
+    (cd "$OPENPI_DIR" && GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen)
+  else
+    echo "installing the locked versions through $(package_index)"
+    (cd "$OPENPI_DIR" \
+      && uv export --frozen --no-hashes --format requirements-txt -o requirements-locked.txt >/dev/null \
+      && { [[ -x .venv/bin/python ]] || uv venv --python 3.11 .venv; } \
+      && GIT_LFS_SKIP_SMUDGE=1 uv pip install --python .venv/bin/python -r requirements-locked.txt)
+  fi
   uv pip install --python "$OPENPI_DIR/.venv/bin/python" --no-deps -e "$HERE"
   "$OPENPI_DIR/.venv/bin/python" -c "import jax, openpi, mikasa_pi05; print('jax', jax.__version__, 'devices', jax.devices())"
-}
-
-driver_major() {
-  nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1
 }
 
 step_sim() {
@@ -98,16 +155,16 @@ step_sim() {
   # The PyPI torch 2.14.0 wheel needs CUDA 13 (driver >= 580). Older drivers get the same
   # release built for CUDA 12.6; eval_samedrawer.py accepts only that local build tag.
   # torch goes in the same resolve, so mani-skill's unpinned torch requirement cannot pull another.
-  local major
+  local major torch_args
   major="$(driver_major)"
   if [[ -n "$major" && "$major" -lt 580 ]]; then
     echo "driver $major < 580: torch $TORCH_VERSION+cu126"
-    uv pip install --python "$SIM_VENV/bin/python" -r "$HERE/requirements-sim.txt" --override "$HERE/overrides-sim.txt" "torch==$TORCH_VERSION+cu126" \
-      --index-url https://download.pytorch.org/whl/cu126 --extra-index-url https://pypi.org/simple \
-      --index-strategy unsafe-best-match
+    torch_args=("torch==$TORCH_VERSION+cu126" --index "$TORCH_CU126_INDEX" --index-strategy unsafe-best-match)
   else
-    uv pip install --python "$SIM_VENV/bin/python" -r "$HERE/requirements-sim.txt" --override "$HERE/overrides-sim.txt" "torch==$TORCH_VERSION"
+    torch_args=("torch==$TORCH_VERSION")
   fi
+  uv pip install --python "$SIM_VENV/bin/python" -r "$HERE/requirements-sim.txt" \
+    --override "$HERE/overrides-sim.txt" "${torch_args[@]}"
   if [[ -d "$OPENPI_DIR/packages/openpi-client" ]]; then
     uv pip install --python "$SIM_VENV/bin/python" --no-deps "$OPENPI_DIR/packages/openpi-client"
   else
@@ -127,7 +184,7 @@ step_assets() {
   mkdir -p "$target"
   local zip="$MS_ASSET_DIR/robocasa_dataset.zip"
   if [[ ! -f "$zip" ]]; then
-    curl -L --fail -o "$zip.partial" "$ROBOCASA_URL"
+    curl -L --fail -C - -o "$zip.partial" "$ROBOCASA_URL"
     mv "$zip.partial" "$zip"
   fi
   "$SIM_VENV/bin/python" -m zipfile -e "$zip" "$target"   # unzip may be missing without apt
@@ -137,8 +194,11 @@ step_assets() {
 
 step_data() {
   log "dataset $HF_DATASET@${HF_REVISION:0:7} -> $SAMEDRAWER_DATASET_DIR"
-  "$SIM_VENV/bin/hf" download "$HF_DATASET" --repo-type dataset --revision "$HF_REVISION" \
-    --local-dir "$SAMEDRAWER_DATASET_DIR" >/dev/null
+  local args=(download "$HF_DATASET" --repo-type dataset --revision "$HF_REVISION" --local-dir "$SAMEDRAWER_DATASET_DIR")
+  if ! "$SIM_VENV/bin/hf" "${args[@]}" >/dev/null; then
+    echo "xet transfer failed; retrying over plain HTTPS"
+    HF_HUB_DISABLE_XET=1 "$SIM_VENV/bin/hf" "${args[@]}" >/dev/null
+  fi
   local sha
   sha="$(sha256sum "$SAMEDRAWER_DATASET_DIR/meta/info.json" | cut -d' ' -f1)"
   if [[ "$sha" != "$INFO_SHA256" ]]; then
@@ -189,9 +249,17 @@ EOF
   cat "$PI05_WORK/server.env"
 }
 
+step_clean() {
+  log "clean"
+  need_uv
+  uv cache clean >/dev/null 2>&1 || true
+  echo "disk: $(du -sh "$HOME" 2>/dev/null | cut -f1) used in $HOME"
+}
+
 STEPS=("$@")
-[[ ${#STEPS[@]} -gt 0 ]] || STEPS=(repo openpi sim assets data weights vulkan env)
+[[ ${#STEPS[@]} -gt 0 ]] || STEPS=(preflight repo openpi sim assets data weights vulkan env clean)
 mkdir -p "$PI05_WORK"
 for s in "${STEPS[@]}"; do
   "step_$s"
 done
+[[ ${#STEPS[@]} -gt 1 ]] && log "setup finished: . $PI05_WORK/server.env" || true

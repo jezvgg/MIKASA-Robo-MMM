@@ -10,6 +10,13 @@ mkdir -p "$OUT"
 
 echo "== GPUs (pick free ones with CUDA_VISIBLE_DEVICES)"
 nvidia-smi --query-gpu=index,name,driver_version,memory.used,memory.total,utilization.gpu --format=csv
+if command -v qd-gpucheck >/dev/null 2>&1; then
+  echo "== qd-gpucheck (can this node render?)"
+  qd-gpucheck | tee "$OUT/qd-gpucheck.log" | grep -E '"verdict"' || true
+  if grep -q '"wedged"' "$OUT/qd-gpucheck.log"; then
+    echo "this node cannot render; ask the owner to restart the job on another node" >&2; exit 1
+  fi
+fi
 
 echo "== openpi venv: JAX"
 "$OPENPI_DIR/.venv/bin/python" -c "import jax; print(jax.__version__, jax.devices())"

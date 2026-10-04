@@ -1,11 +1,16 @@
 """Command line for the SameDrawer first-frame baseline (runs in the openpi venv).
 
     python -m mikasa_pi05 norm-stats <config>
-    python -m mikasa_pi05 train <config> --exp-name NAME [openpi TrainConfig overrides]
+    python -m mikasa_pi05 train <config> --exp-name NAME [--full-checkpoints | --params-only-checkpoints]
+                                [openpi TrainConfig overrides]
     python -m mikasa_pi05 serve <config> --checkpoint DIR [--port 8000]
 
 `train` hands the config to openpi's own scripts/train.py; `serve` is openpi's
 serve_policy with this package's configs.
+
+Params-only checkpoints (default for the dummy, overfit and 1x H100 configs) keep the
+inference weights in bfloat16 plus the norm stats: ~6.6 GB instead of ~37 GB for the full
+model with its optimizer state. They serve and evaluate like full ones but cannot --resume.
 """
 
 from __future__ import annotations
@@ -72,14 +77,56 @@ def norm_stats(argv: list[str]) -> None:
         print(f"  {key}: dims {value.mean.shape[0]}, q01==q99 at {narrow.tolist()}")
 
 
+def _wandb_logged_in() -> bool:
+    netrc = pathlib.Path.home() / ".netrc"
+    return bool(os.environ.get("WANDB_API_KEY")) or (netrc.exists() and "api.wandb.ai" in netrc.read_text())
+
+
+def _save_params_only() -> None:
+    """Make openpi's checkpoints hold only bf16 inference params and the norm stats."""
+    import jax
+    import ml_dtypes
+    from openpi.shared import normalize as _normalize
+    from openpi.training import checkpoints
+
+    def to_host_bf16(x):
+        array = np.asarray(jax.device_get(x))  # on the host: no extra GPU memory at save time
+        return array.astype(ml_dtypes.bfloat16) if np.issubdtype(array.dtype, np.floating) else array
+
+    def save_state(checkpoint_manager, state, data_loader, step):
+        def save_assets(directory):
+            data_config = data_loader.data_config()
+            if data_config.norm_stats is not None and data_config.asset_id is not None:
+                _normalize.save(directory / data_config.asset_id, data_config.norm_stats)
+
+        params = state.ema_params if state.ema_params is not None else state.params
+        checkpoint_manager.save(step, {"assets": save_assets, "params": {"params": jax.tree.map(to_host_bf16, params)}})
+
+    checkpoints.save_state = save_state
+
+
 def train(argv: list[str]) -> None:
     import tyro
 
-    from mikasa_pi05.configs import CONFIGS
+    from mikasa_pi05.configs import CONFIGS, PARAMS_ONLY_CHECKPOINTS
 
+    argv = list(argv)
+    params_only = None
+    for flag, value in (("--params-only-checkpoints", True), ("--full-checkpoints", False)):
+        if flag in argv:
+            argv.remove(flag)
+            params_only = value
     config = tyro.extras.overridable_config_cli({k: (k, v) for k, v in CONFIGS.items()}, args=argv)
-    if os.environ.get("WANDB_API_KEY") and not any("wandb-enabled" in a for a in argv):
+    if params_only is None:
+        params_only = config.name in PARAMS_ONLY_CHECKPOINTS
+    if params_only:
+        if config.resume:
+            raise SystemExit("--resume needs full checkpoints (--full-checkpoints)")
+        _save_params_only()
+    if _wandb_logged_in() and not any("wandb-enabled" in a for a in argv):
         config = dataclasses.replace(config, wandb_enabled=True)
+    logging.info("checkpoints: %s; wandb: %s", "params only (bf16)" if params_only else "full",
+                 "on" if config.wandb_enabled else "off")
     _openpi_script("train").main(config)
 
 

@@ -149,7 +149,7 @@ CONFIGS = {
         num_workers=8,
         num_train_steps=3_000,
         save_interval=1_000,
-        keep_period=1_000,
+        keep_period=None,
         ema_decay=None,
         lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=300, peak_lr=5e-5, decay_steps=3_000, decay_lr=5e-6),
     ),
@@ -161,7 +161,7 @@ CONFIGS = {
         num_workers=8,
         num_train_steps=2_000,
         save_interval=1_000,
-        keep_period=1_000,
+        keep_period=None,
         ema_decay=None,
         lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=200, peak_lr=5e-5, decay_steps=2_000, decay_lr=5e-6),
     ),
@@ -180,6 +180,10 @@ CONFIGS = {
         ),
     ),
 }
+
+
+# Configs meant for a single GPU with a small disk (lab server: 100 GB) save params-only checkpoints.
+PARAMS_ONLY_CHECKPOINTS = {"pi05_sd_ff_dummy", "pi05_sd_ff_overfit", "pi05_sd_ff_1xh100"}
 
 
 def get_config(name: str) -> _config.TrainConfig:
