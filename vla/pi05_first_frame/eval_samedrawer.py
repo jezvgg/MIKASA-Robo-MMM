@@ -3,7 +3,7 @@
 Runs in the simulator venv from the repository root:
 
     PYTHONPATH=. python vla/pi05_first_frame/eval_samedrawer.py \
-        --server localhost:8000 --out results/run1 [--seeds validation] [--shard 0/4]
+        --server 127.0.0.1:8000 --out results/run1 [--seeds validation] [--shard 0/4]
 
 Every episode: seed_everything(seed), env.reset(seed=seed); the policy wrapper keeps
 the observation returned by reset and sends that camera image as
@@ -162,6 +162,25 @@ def _np(value):
     return value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
 
 
+def connect_policy_server(client_module, host: str, port: int, timeout: float = 1800):
+    """Wait for a server that may still be loading and compiling.
+
+    openpi's client retries only on ConnectionRefusedError. `localhost` can resolve to ::1
+    first, and in a container without IPv6 that attempt fails with EAFNOSUPPORT, which
+    socket.create_connection reports instead of the IPv4 refusal; any OSError means "not
+    up yet" here. Prefer 127.0.0.1 to avoid the IPv6 attempt altogether.
+    """
+    deadline = time.time() + timeout
+    while True:
+        try:
+            return client_module.WebsocketClientPolicy(host, port)
+        except OSError as error:
+            if time.time() > deadline:
+                raise
+            print(f"waiting for the policy server at {host}:{port} ({error})", flush=True)
+            time.sleep(5)
+
+
 def episode_record(env, seed: int, result: dict, elapsed: float) -> dict:
     base = env.unwrapped
     flags = {name: bool(_np(getattr(base, name))[0]) for name in (
@@ -305,7 +324,7 @@ def environment_info() -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--server", default="localhost:8000", help="host:port of `python -m mikasa_pi05 serve`")
+    parser.add_argument("--server", default="127.0.0.1:8000", help="host:port of `python -m mikasa_pi05 serve`")
     parser.add_argument("--out", type=Path, help="results directory")
     parser.add_argument("--dataset-dir", type=Path, default=Path(os.environ.get("SAMEDRAWER_DATASET_DIR", ".")))
     parser.add_argument("--seeds", default="validation",
@@ -364,7 +383,7 @@ def main() -> None:
             # addresses included; a lab proxy refuses them and the client fails at once.
             for name in ("no_proxy", "NO_PROXY"):
                 os.environ[name] = ",".join(filter(None, [os.environ.get(name), "localhost", "127.0.0.1", "::1"]))
-        policy = FirstFramePolicy(websocket_client_policy.WebsocketClientPolicy(host, int(port)), args.first_frame)
+        policy = FirstFramePolicy(connect_policy_server(websocket_client_policy, host, int(port)), args.first_frame)
     server_meta = policy.get_server_metadata()
 
     args.out.mkdir(parents=True, exist_ok=True)

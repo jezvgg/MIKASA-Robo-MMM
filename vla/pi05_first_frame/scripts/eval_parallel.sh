@@ -30,7 +30,7 @@ done
 shards=()
 for i in "${!GPU_IDS[@]}"; do
   (cd "$REPO_DIR" && CUDA_VISIBLE_DEVICES="${GPU_IDS[$i]}" "$SIM_VENV/bin/python" -W ignore \
-    vla/pi05_first_frame/eval_samedrawer.py --server "localhost:$((8100 + i))" --shard "$i/$N" \
+    vla/pi05_first_frame/eval_samedrawer.py --server "127.0.0.1:$((8100 + i))" --shard "$i/$N" \
     --dataset-dir "$SAMEDRAWER_DATASET_DIR" --out "$OUT/shard-$i" "$@" > "$OUT/logs/eval-$i.log" 2>&1) &
   shards+=($!)
 done
