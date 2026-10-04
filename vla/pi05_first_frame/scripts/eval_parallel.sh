@@ -6,7 +6,8 @@
 #   e.g. eval_parallel.sh pi05_sd_ff_4xh100 $PI05_WORK/checkpoints/pi05_sd_ff_4xh100/run1/29999 \
 #            $PI05_WORK/results/run1-29999 0,1,2,3
 #
-# GPU i runs a server on port 8100+i and a simulator shard i/N rendering on the same GPU.
+# GPU i runs a server on port ${PORT_BASE:-8100}+i and a simulator shard i/N rendering on the same GPU.
+# SERVER_MEM_FRACTION (default 0.5) caps each server's share of its GPU; lower it next to training.
 # Shards resume from their episodes.jsonl, so an interrupted run can be restarted as is.
 set -euo pipefail
 
@@ -21,8 +22,8 @@ cleanup() { kill "${pids[@]}" 2>/dev/null || true; }
 trap cleanup EXIT
 
 for i in "${!GPU_IDS[@]}"; do
-  CUDA_VISIBLE_DEVICES="${GPU_IDS[$i]}" XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 \
-    "$OPENPI_DIR/.venv/bin/python" -m mikasa_pi05 serve "$CONFIG" --checkpoint "$CKPT" --port $((8100 + i)) \
+  CUDA_VISIBLE_DEVICES="${GPU_IDS[$i]}" XLA_PYTHON_CLIENT_MEM_FRACTION="${SERVER_MEM_FRACTION:-0.5}" \
+    "$OPENPI_DIR/.venv/bin/python" -m mikasa_pi05 serve "$CONFIG" --checkpoint "$CKPT" --port $((${PORT_BASE:-8100} + i)) \
     > "$OUT/logs/server-$i.log" 2>&1 &
   pids+=($!)
 done
@@ -30,7 +31,7 @@ done
 shards=()
 for i in "${!GPU_IDS[@]}"; do
   (cd "$REPO_DIR" && CUDA_VISIBLE_DEVICES="${GPU_IDS[$i]}" "$SIM_VENV/bin/python" -W ignore \
-    vla/pi05_first_frame/eval_samedrawer.py --server "127.0.0.1:$((8100 + i))" --shard "$i/$N" \
+    vla/pi05_first_frame/eval_samedrawer.py --server "127.0.0.1:$((${PORT_BASE:-8100} + i))" --shard "$i/$N" \
     --dataset-dir "$SAMEDRAWER_DATASET_DIR" --out "$OUT/shard-$i" "$@" > "$OUT/logs/eval-$i.log" 2>&1) &
   shards+=($!)
 done

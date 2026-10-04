@@ -14,6 +14,7 @@ import os
 import pathlib
 
 import openpi.models.pi0_config as pi0_config
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.config as _config
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
@@ -120,6 +121,9 @@ def _train_config(name: str, **kwargs) -> _config.TrainConfig:
         weight_loader=weight_loaders.CheckpointWeightLoader(BASE_WEIGHTS),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         policy_metadata=POLICY_METADATA,
+        # SigLIP stays at its pretrained weights (as in RoboMME's and the lab's pi0.5 baselines);
+        # openpi keeps frozen params in bf16 and computes no gradients or optimizer state for them.
+        freeze_filter=nnx_utils.PathRegex(".*img.*"),
         checkpoint_base_dir=str(WORK / "checkpoints"),
         wandb_enabled=False,
     )
@@ -177,8 +181,10 @@ CONFIGS = {
         fsdp_devices=4,
         num_workers=16,
         num_train_steps=30_000,
-        save_interval=2_000,
-        keep_period=5_000,
+        # A params-only snapshot every 1000 steps for the progress SR (scripts/sr_monitor.sh);
+        # the full checkpoint (optimizer state, for --resume) every FULL_CHECKPOINT_EVERY steps.
+        save_interval=1_000,
+        keep_period=None,
         ema_decay=0.999,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000, peak_lr=5e-5, decay_steps=30_000, decay_lr=5e-6
@@ -186,6 +192,10 @@ CONFIGS = {
     ),
 }
 
+
+# Steps between full checkpoints (with optimizer state) for configs that snapshot more often.
+# The dummy config uses the same scheme so the whole flow can be checked on a small GPU.
+FULL_CHECKPOINT_EVERY = {"pi05_sd_ff_4xh100": 5_000, "pi05_sd_ff_dummy": 50}
 
 # Configs meant for a single GPU with a small disk (lab server: 100 GB) save params-only checkpoints.
 PARAMS_ONLY_CHECKPOINTS = {"pi05_sd_ff_dummy", "pi05_sd_ff_overfit", "pi05_sd_ff_1xh100"}

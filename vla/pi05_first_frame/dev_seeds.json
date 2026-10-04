@@ -1,0 +1,8 @@
+{
+  "purpose": "progress SR during training (every 1000 steps); not the validation set",
+  "rule": "first 20 planner-solved seeds of the SameDrawer profile-20 holdout pool (8100000-8100050)",
+  "source": "mikasa-workspace/audits/drawer-sr-2026-09-28/drawer-holdout-p20-motion-audit.json: source_success and status=success, code signature a39d1c42",
+  "checks": "no overlap with the 1000 training episode seeds (9000000-9001771) nor with validation_seeds.json (8150000-8150123)",
+  "seeds": [8100000, 8100001, 8100003, 8100004, 8100005, 8100006, 8100007, 8100009, 8100010, 8100011,
+            8100012, 8100013, 8100014, 8100017, 8100019, 8100020, 8100022, 8100023, 8100025, 8100028]
+}

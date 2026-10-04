@@ -2,7 +2,7 @@
 
     python -m mikasa_pi05 norm-stats <config>
     python -m mikasa_pi05 train <config> --exp-name NAME [--full-checkpoints | --params-only-checkpoints]
-                                [openpi TrainConfig overrides]
+                                [--no-snapshots] [openpi TrainConfig overrides]
     python -m mikasa_pi05 serve <config> --checkpoint DIR [--port 8000]
 
 `train` hands the config to openpi's own scripts/train.py; `serve` is openpi's
@@ -82,25 +82,77 @@ def _wandb_logged_in() -> bool:
     return bool(os.environ.get("WANDB_API_KEY")) or (netrc.exists() and "api.wandb.ai" in netrc.read_text())
 
 
-def _save_params_only() -> None:
-    """Make openpi's checkpoints hold only bf16 inference params and the norm stats."""
+SNAPSHOT_KEEP = 3  # newest progress snapshots kept on disk (~6.6 GB each)
+
+
+def _install_save_state(config, *, params_only: bool, snapshots: bool, full_every: int | None) -> None:
+    """Decide what openpi's training loop writes at each save step (every config.save_interval).
+
+    params_only  the checkpoint holds bf16 inference params and the norm stats (~6.6 GB instead of
+                 ~45 GB with optimizer state); serves and evaluates the same, cannot --resume.
+    snapshots    also write such a params-only snapshot to $PI05_WORK/snapshots/<config>/<exp>/<step>
+                 at every save step, for the progress SR (scripts/sr_monitor.sh). The newest
+                 SNAPSHOT_KEEP stay on disk. With snapshots, openpi's own checkpoint is written only
+                 every `full_every` steps and at the last step (params-only mode: last step only).
+    """
+    import shutil
+
     import jax
     import ml_dtypes
+    import orbax.checkpoint as ocp
     from openpi.shared import normalize as _normalize
     from openpi.training import checkpoints
+
+    from mikasa_pi05.configs import WORK
+
+    original = checkpoints.save_state
+    last_step = config.num_train_steps - 1
+    snapshot_root = WORK / "snapshots" / config.name / config.exp_name
 
     def to_host_bf16(x):
         array = np.asarray(jax.device_get(x))  # on the host: no extra GPU memory at save time
         return array.astype(ml_dtypes.bfloat16) if np.issubdtype(array.dtype, np.floating) else array
 
-    def save_state(checkpoint_manager, state, data_loader, step):
-        def save_assets(directory):
-            data_config = data_loader.data_config()
-            if data_config.norm_stats is not None and data_config.asset_id is not None:
-                _normalize.save(directory / data_config.asset_id, data_config.norm_stats)
-
+    def inference_params(state):
         params = state.ema_params if state.ema_params is not None else state.params
-        checkpoint_manager.save(step, {"assets": save_assets, "params": {"params": jax.tree.map(to_host_bf16, params)}})
+        return jax.tree.map(to_host_bf16, params)
+
+    def save_norm_stats(directory, data_loader):
+        data_config = data_loader.data_config()
+        if data_config.norm_stats is not None and data_config.asset_id is not None:
+            _normalize.save(pathlib.Path(directory) / data_config.asset_id, data_config.norm_stats)
+
+    def write_snapshot(state, data_loader, step):
+        snapshot_root.mkdir(parents=True, exist_ok=True)
+        partial = snapshot_root / f".{step}.partial"
+        shutil.rmtree(partial, ignore_errors=True)
+        partial.mkdir()
+        with ocp.PyTreeCheckpointer() as checkpointer:
+            checkpointer.save(partial / "params", {"params": inference_params(state)})
+        save_norm_stats(partial / "assets", data_loader)
+        final = snapshot_root / str(step)
+        shutil.rmtree(final, ignore_errors=True)
+        partial.rename(final)  # the monitor only ever sees complete snapshots
+        steps = sorted(int(d.name) for d in snapshot_root.iterdir() if d.name.isdigit())
+        for old in steps[:-SNAPSHOT_KEEP]:
+            shutil.rmtree(snapshot_root / str(old), ignore_errors=True)
+        logging.info("snapshot %s", final)
+
+    def save_state(checkpoint_manager, state, data_loader, step):
+        last = step == last_step
+        if snapshots:
+            write_snapshot(state, data_loader, step)
+        if params_only:
+            if snapshots and not last:
+                return
+            checkpoint_manager.save(step, {
+                "assets": lambda directory: save_norm_stats(directory, data_loader),
+                "params": {"params": inference_params(state)},
+            })
+            return
+        if snapshots and full_every and step % full_every and not last:
+            return
+        original(checkpoint_manager, state, data_loader, step)
 
     checkpoints.save_state = save_state
 
@@ -108,7 +160,7 @@ def _save_params_only() -> None:
 def train(argv: list[str]) -> None:
     import tyro
 
-    from mikasa_pi05.configs import CONFIGS, PARAMS_ONLY_CHECKPOINTS
+    from mikasa_pi05.configs import CONFIGS, FULL_CHECKPOINT_EVERY, PARAMS_ONLY_CHECKPOINTS
 
     argv = list(argv)
     params_only = None
@@ -116,17 +168,25 @@ def train(argv: list[str]) -> None:
         if flag in argv:
             argv.remove(flag)
             params_only = value
+    snapshots = "--no-snapshots" not in argv
+    if not snapshots:
+        argv.remove("--no-snapshots")
     config = tyro.extras.overridable_config_cli({k: (k, v) for k, v in CONFIGS.items()}, args=argv)
     if params_only is None:
         params_only = config.name in PARAMS_ONLY_CHECKPOINTS
-    if params_only:
-        if config.resume:
-            raise SystemExit("--resume needs full checkpoints (--full-checkpoints)")
-        _save_params_only()
+    if params_only and config.resume:
+        raise SystemExit("--resume needs full checkpoints (--full-checkpoints)")
+    full_every = FULL_CHECKPOINT_EVERY.get(config.name)
+    snapshots = snapshots and full_every is not None
+    _install_save_state(config, params_only=params_only, snapshots=snapshots, full_every=full_every)
     if _wandb_logged_in() and not any("wandb-enabled" in a for a in argv):
         config = dataclasses.replace(config, wandb_enabled=True)
-    logging.info("checkpoints: %s; wandb: %s", "params only (bf16)" if params_only else "full",
-                 "on" if config.wandb_enabled else "off")
+    logging.info(
+        "checkpoints: %s; progress snapshots: %s; wandb: %s",
+        "params only (bf16)" if params_only else f"full every {full_every or config.save_interval} steps",
+        f"every {config.save_interval} steps" if snapshots else "off",
+        "on" if config.wandb_enabled else "off",
+    )
     _openpi_script("train").main(config)
 
 
