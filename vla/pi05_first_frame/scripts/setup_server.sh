@@ -90,7 +90,7 @@ step_preflight() {
   check()   { local name="$1"; shift; if ok "$@"; then echo "  ok       $name"; else echo "  BLOCKED  $name"; blocked+=("$name"); fi; }
   # Any HTTP answer counts for hosts we only talk to; a proxy refusal makes curl itself fail.
   reach()   { curl -sS -o /dev/null --max-time 30 "$1" 2>/dev/null; }
-  fetch()   { curl -fsSL -r 0-1023 -o /dev/null --max-time 60 "$1"; }
+  fetch()   { curl -fsSL -r 0-1023 -o /dev/null --max-time 60 "$1" 2>/dev/null; }
   check "package index $(package_index)" curl -fsS -o /dev/null --max-time 30 "$(package_index)/numpy/"
   check "github.com (code)" git ls-remote https://github.com/Physical-Intelligence/openpi.git HEAD
   check "huggingface.co + its CDN (dataset)" fetch "https://huggingface.co/datasets/$HF_DATASET/resolve/$HF_REVISION/meta/tasks.parquet"
