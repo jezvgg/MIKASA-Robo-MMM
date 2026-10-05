@@ -160,8 +160,10 @@ def _install_save_state(config, *, params_only: bool, snapshots: bool, full_ever
 def train(argv: list[str]) -> None:
     import tyro
 
+    from mikasa_pi05 import provenance
     from mikasa_pi05.configs import CONFIGS, FULL_CHECKPOINT_EVERY, PARAMS_ONLY_CHECKPOINTS
 
+    command = list(argv)
     argv = list(argv)
     params_only = None
     for flag, value in (("--params-only-checkpoints", True), ("--full-checkpoints", False)):
@@ -187,6 +189,11 @@ def train(argv: list[str]) -> None:
         f"every {config.save_interval} steps" if snapshots else "off",
         "on" if config.wandb_enabled else "off",
     )
+    provenance.install(config, argv=command, checkpoints={
+        "params_only": params_only,
+        "full_checkpoint_every": None if params_only else (full_every or config.save_interval),
+        "progress_snapshot_every": config.save_interval if snapshots else None,
+    })
     _openpi_script("train").main(config)
 
 
@@ -208,6 +215,16 @@ def _warm_up(policy) -> None:
     logging.info("Compiled the policy in %.0f s", time.time() - start)
 
 
+def _run_meta_for(checkpoint: pathlib.Path, config_name: str) -> pathlib.Path:
+    """run_meta.json of the training run a checkpoint or progress snapshot came from."""
+    from mikasa_pi05.configs import WORK
+
+    beside = checkpoint.parent / "run_meta.json"
+    if beside.exists():
+        return beside
+    return WORK / "checkpoints" / config_name / checkpoint.parent.name / "run_meta.json"
+
+
 def serve(argv: list[str]) -> None:
     from openpi.policies import policy_config
     from openpi.serving import websocket_policy_server
@@ -224,8 +241,15 @@ def serve(argv: list[str]) -> None:
     policy = policy_config.create_trained_policy(config, args.checkpoint)
     _warm_up(policy)
     logging.info("Serving %s from %s on port %d", args.config, args.checkpoint, args.port)
+    checkpoint = pathlib.Path(args.checkpoint).resolve()
+    metadata = {**policy.metadata, "checkpoint": {  # lands in every evaluation's run.json
+        "config": args.config,
+        "path": str(checkpoint),
+        "step": int(checkpoint.name) if checkpoint.name.isdigit() else None,
+        "run_meta": str(_run_meta_for(checkpoint, args.config)),
+    }}
     server = websocket_policy_server.WebsocketPolicyServer(
-        policy=policy, host=args.host, port=args.port, metadata=policy.metadata
+        policy=policy, host=args.host, port=args.port, metadata=metadata
     )
     server.serve_forever()
 

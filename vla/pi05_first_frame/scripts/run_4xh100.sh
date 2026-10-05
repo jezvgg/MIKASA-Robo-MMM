@@ -68,4 +68,6 @@ print(f"  stages {s['stages']}")
 print(f"  by target drawer {s['by_target_drawer']}")
 PY
 done
+say "paper summary: $PI05_WORK/results/$EXP-paper.md (and .json)"
+"$SIM_VENV/bin/python" "$SCRIPTS/collect_results.py" "$EXP" --config "$CONFIG" >> "$REPORT" 2>&1 || say "summary failed"
 say "finished; send $REPORT"
