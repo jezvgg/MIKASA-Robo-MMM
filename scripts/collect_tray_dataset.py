@@ -12,6 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from utils.tray_episode_checkers import (  # noqa: E402
+    CHECKER_VERSION,
+    checker_rejection,
+)
 from scripts.collect_tray_demos import (  # noqa: E402
     ENV_ID,
     MOD,
@@ -39,7 +43,16 @@ def collect_raw(seed, args):
     raw = args.out / "raw" / f"seed{seed}"
     log = args.out / "logs" / f"plan_seed{seed}.log"
     if (raw / "trajectory.h5").exists() and (raw / "trajectory.json").exists():
-        return seed, "success"
+        try:
+            rejection = checker_rejection(args.out / "trace", seed)
+        except (OSError, ValueError):
+            rejection = "checker_failed"
+        if rejection and rejection != "checker_failed":
+            shutil.rmtree(raw, ignore_errors=True)
+            return seed, rejection
+        if rejection is None:
+            return seed, "success"
+        shutil.rmtree(raw, ignore_errors=True)  # no current-version proof; re-run seed
     if raw.exists():
         shutil.rmtree(raw)
     verdict = plan_seed(seed, args, args.out / "trace", log, raw)
@@ -47,6 +60,13 @@ def collect_raw(seed, args):
         if raw.exists():
             shutil.rmtree(raw)
         return seed, verdict
+    try:
+        rejection = checker_rejection(args.out / "trace", seed)
+    except (OSError, ValueError):
+        rejection = "checker_failed"
+    if rejection:
+        shutil.rmtree(raw, ignore_errors=True)
+        return seed, rejection
     try:
         for ext in ("h5", "json"):
             matches = [p for p in raw.glob(f"*.{ext}") if p.stem != "trajectory"]
@@ -176,11 +196,28 @@ def main():
 
     summary_path = args.out / "collection_summary.json"
     existing_summary = json.loads(summary_path.read_text()) if summary_path.exists() else None
-    if existing_summary and existing_summary.get("successful_trajectories", 0) >= args.need:
+    can_resume = bool(
+        existing_summary
+        and existing_summary.get("checker_version") == CHECKER_VERSION
+        and existing_summary.get("successful_trajectories", 0) >= args.need
+    )
+    if can_resume:
+        successes = existing_summary["success_seeds"][: args.need]
+        for seed in successes:
+            try:
+                if checker_rejection(args.out / "trace", seed) is not None:
+                    can_resume = False
+                    break
+            except (OSError, ValueError):
+                can_resume = False
+                break
+    if can_resume:
         collection_summary = existing_summary
-        successes = collection_summary["success_seeds"][: args.need]
         print("RESUME_COLLECTION", len(successes), flush=True)
     else:
+        shutil.rmtree(args.out / "postpass", ignore_errors=True)
+        shutil.rmtree(args.out / "lerobot", ignore_errors=True)
+        (args.out / "postpass").mkdir(parents=True, exist_ok=True)
         verdicts = {}
         successes = []
         next_seed = args.start_seed
@@ -205,6 +242,7 @@ def main():
                 f"only collected {len(successes)}/{args.need} successful trajectories"
             )
         collection_summary = {
+            "checker_version": CHECKER_VERSION,
             "env_id": ENV_ID,
             "planner": PLANNER,
             "robot": "ds_fetch",

@@ -2442,7 +2442,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         return self.follow_forward_path_w_refinement(result, refine)
 
     def follow_forward_path_w_refinement(
-        self, result, refine: bool = False, stop_when=None
+        self, result, refine: bool = False, stop_when=None, body_hold=None
     ):
         self._reset_execution_noise()
         # K55. A plan can come back `Success` with **no knots**: the goal was already
@@ -2497,6 +2497,8 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
                 self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy()
             )
             body_action[2] = qpos_dict[f"scene-0-{self.robot.name}_torso_lift_joint"]
+            if body_hold is not None:
+                body_action[:] = body_hold
 
             base_direction = (
                 self.env_agent.base_link.pose.sp.to_transformation_matrix()[:3, 0]

@@ -19,10 +19,20 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from utils.tray_episode_checkers import (  # noqa: E402
+    CHECKER_VERSION,
+    checker_rejection,
+)
 
 ENV_ID = "MyRoboCasa_TakeItBackTray-v1"
 PLANNER = "myrobocasa_takeitback_tray_planner"
@@ -86,10 +96,18 @@ def patch_trajectory_metadata(run_dir, seed, trace_dir):
 
 def collect(seed, a):
     raw, rgb = a.out / "raw" / f"seed{seed}", a.out / "rgb" / f"seed{seed}"
+    shutil.rmtree(raw, ignore_errors=True)
     logs = a.out / "logs"
     verdict = plan_seed(seed, a, a.out / "trace", logs / f"plan_seed{seed}.log", raw)
     if verdict != "success":
         return seed, verdict
+    try:
+        rejection = checker_rejection(a.out / "trace", seed)
+    except (OSError, ValueError):
+        rejection = "checker_failed"
+    if rejection:
+        shutil.rmtree(raw, ignore_errors=True)
+        return seed, rejection
     # test_planner names the files by timestamp; replay_rgb reads trajectory.{h5,json}
     for ext in ("h5", "json"):
         (src,) = [f for f in raw.glob(f"*.{ext}") if f.stem != "trajectory"]
@@ -112,7 +130,13 @@ def validate_seed(seed, a):
         seed, a, a.out / "validation_trace",
         a.out / "logs" / f"validation_seed{seed}.log",
     )
-    return seed, verdict
+    if verdict != "success":
+        return seed, verdict
+    try:
+        rejection = checker_rejection(a.out / "validation_trace", seed)
+    except (OSError, ValueError):
+        rejection = "checker_failed"
+    return seed, rejection or verdict
 
 
 def main():
@@ -144,7 +168,8 @@ def main():
     ok = [s for s in order if verdicts.get(s) == "success"][: a.need]
     # merge_replays reads every seed* dir under --src: link only the kept ones
     keep = a.out / "rgb_keep"
-    keep.mkdir(exist_ok=True)
+    shutil.rmtree(keep, ignore_errors=True)
+    keep.mkdir()
     for s in ok:
         link = keep / f"seed{s}"
         if not link.exists():
@@ -186,6 +211,7 @@ def main():
         }
         (a.out / "validation_seeds.json").write_text(
             json.dumps({
+                "checker_version": CHECKER_VERSION,
                 "env_id": ENV_ID,
                 "planner": PLANNER,
                 "task_name": a.task_name,
@@ -198,7 +224,8 @@ def main():
         f = a.out / "vis" / f"seed{s}.json"
         if f.exists():
             vis[str(s)] = json.loads(f.read_text())["summary"]
-    summary = {"code": str(a.code), "seeds_kept": ok, "visibility": vis,
+    summary = {"checker_version": CHECKER_VERSION,
+               "code": str(a.code), "seeds_kept": ok, "visibility": vis,
                "verdicts": {str(k): v for k, v in verdicts.items()},
                "merge_rc": r1.returncode, "convert_rc": r2.returncode,
                "task_name": a.task_name, "validation": validation}

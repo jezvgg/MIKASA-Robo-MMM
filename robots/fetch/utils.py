@@ -563,6 +563,15 @@ class SapienPlannerV2(SapienPlanner):
             )
         world._place(self.robot, world._folded[world.root_folded])
 
+    def pad_move_group_qpos(self, qpos, articulation=None):
+        """Expand by joint index, not prefix: Fetch interleaves head joints."""
+        art = self.robot if articulation is None else articulation
+        if len(qpos) == art.get_move_group_qpos_dim():
+            full = art.get_qpos().copy()
+            full[list(art.get_move_group_joint_indices())] = qpos
+            qpos = full
+        return super().pad_move_group_qpos(qpos, art)
+
     # -- K53: simulator qpos <-> the planning model's ---------------------------------
 
     def fold_qpos(self, qpos):
