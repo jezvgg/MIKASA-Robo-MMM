@@ -212,7 +212,9 @@ def _warm_up(policy) -> None:
     observation["prompt"] = "warm-up"
     start = time.time()
     policy.infer(observation)
-    logging.info("Compiled the policy in %.0f s", time.time() - start)
+    from mikasa_pi05.provenance import gpu_memory
+
+    logging.info("Compiled the policy in %.0f s; GPU memory (GiB) %s", time.time() - start, gpu_memory())
 
 
 def _run_meta_for(checkpoint: pathlib.Path, config_name: str) -> pathlib.Path:

@@ -5,7 +5,7 @@
 
 Reads what the run left behind and writes $PI05_WORK/results/EXP-paper.json and EXP-paper.md:
   checkpoints/CONFIG/EXP/run_meta.json   config, commits, data, weights, hardware
-  checkpoints/CONFIG/EXP/metrics.jsonl   loss curve, wall time -> step time, GPU-hours
+  checkpoints/CONFIG/EXP/metrics.jsonl   loss curve, wall time -> step time, GPU-hours, peak GPU memory
   logs/sr-EXP.tsv                        progress SR on the dev seeds
   results/EXP-final-{reset,black}/       final SR on the validation seeds and the control
 """
@@ -48,6 +48,9 @@ def training(ckpt: Path) -> dict:
             "wall_hours_logged": round(hours, 2),
             "gpu_hours_logged": round(hours * devices, 1),
             "loss_curve": [[r["step"], r.get("loss")] for r in rows],
+            # XLA allocator, maximum over devices; absent in runs before memory logging
+            "gpu_mem_peak_gib": max((r["gpu_mem_peak_gib"] for r in rows if "gpu_mem_peak_gib" in r), default=None),
+            "gpu_mem_limit_gib": next((r["gpu_mem_limit_gib"] for r in rows if "gpu_mem_limit_gib" in r), None),
         })
     return out
 
@@ -96,6 +99,8 @@ def markdown(report: dict) -> str:
              f"| Code | MIKASA-Robo-MMM `{(code.get('repo_commit') or '?')[:10]}`, openpi `{(code.get('openpi_commit') or '?')[:10]}` + patch `{(code.get('openpi_patch_sha256') or '?')[:10]}` |",
              f"| Data | `{data.get('hf_repo')}`@`{(data.get('hf_revision') or '?')[:7]}`, {data.get('total_episodes')} episodes, {data.get('total_frames')} frames, {data.get('fps')} Hz |",
              f"| Hardware | {derived.get('devices')} x {derived.get('device_kind')} |",
+             *([f"| GPU memory | peak {t['gpu_mem_peak_gib']} GiB in use per device, of a {t.get('gpu_mem_limit_gib')} GiB JAX pool |"]
+               if t.get("gpu_mem_peak_gib") is not None else []),
              f"| Compute | {t.get('last_step')} steps logged, {t.get('median_seconds_per_step')} s/step (median), {t.get('wall_hours_logged')} h wall, {t.get('gpu_hours_logged')} GPU-h |",
              f"| Model | pi0.5 from `{(meta.get('weights') or {}).get('base')}`; images {derived.get('image_keys')} (first frame: {derived.get('first_frame_camera')}); frozen: `{derived.get('frozen')}` |",
              f"| Batch, steps | {cfg.get('batch_size')} global ({derived.get('per_device_batch')}/device), {cfg.get('num_train_steps')} steps, {derived.get('epochs')} epochs |",

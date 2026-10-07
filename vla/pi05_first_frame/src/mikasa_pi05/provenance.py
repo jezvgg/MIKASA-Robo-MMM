@@ -6,7 +6,8 @@
                                        base weights, packages, GPUs, derived numbers (epochs, ...).
                                        A resumed run adds run_meta.resume-<time>.json.
 <checkpoint dir>/metrics.jsonl         one line per logged step: step, wall time, loss, grad_norm,
-                                       param_norm (the values openpi logs), with or without wandb.
+                                       param_norm (the values openpi logs), with or without wandb,
+                                       and the GPU memory really in use (gpu_memory()).
 """
 
 from __future__ import annotations
@@ -70,6 +71,28 @@ def _gpus() -> list[str]:
     except (OSError, subprocess.SubprocessError):
         return []
     return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def gpu_memory() -> dict:
+    """GPU memory the XLA allocator really holds, in GiB, the maximum over the local devices.
+
+    nvidia-smi shows only the pool JAX preallocates (XLA_PYTHON_CLIENT_MEM_FRACTION of the card);
+    in_use is what live buffers take now, peak the most they took since the process started,
+    limit the pool size.
+    """
+    try:
+        import jax
+
+        stats = [device.memory_stats() or {} for device in jax.local_devices()]
+    except Exception:  # never let a statistic stop training or serving
+        return {}
+    out = {}
+    for key, name in (("bytes_in_use", "gpu_mem_in_use_gib"), ("peak_bytes_in_use", "gpu_mem_peak_gib"),
+                      ("bytes_limit", "gpu_mem_limit_gib")):
+        values = [s[key] for s in stats if key in s]
+        if values:
+            out[name] = round(max(values) / 2**30, 2)
+    return out
 
 
 def run_meta(config, *, argv: list[str], checkpoints: dict) -> dict:
@@ -188,6 +211,9 @@ def install(config, *, argv: list[str], checkpoints: dict) -> None:
                 except (TypeError, ValueError):
                     continue
             if scalars:
+                memory = gpu_memory()
+                scalars.update(memory)
+                data = {**dict(data), **memory}
                 with metrics.open("a") as handle:
                     handle.write(json.dumps({"step": step, "time": round(time.time(), 2), **scalars}) + "\n")
             return run_log(data, step=step, **log_kwargs)
