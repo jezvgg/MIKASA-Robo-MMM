@@ -1,4 +1,4 @@
-"""Incremental planner for ``MyRoboCasa_TakeItBackTray-v1``.
+"""Incremental planner for ``MyRoboCasa_TakeIt-v1``.
 
 Current checkpoint: waypoints 0-16.  The planner completes the carry to the
 tray, centers the held cup over it, lowers it, releases it, and verifies placement.
@@ -21,7 +21,7 @@ import torch
 from mani_skill.agents.robots import Fetch
 from mani_skill.utils.wrappers import RecordEpisode
 
-from my_scenes.my_robocasa_takeitback_tray import MyRoboCasaSceneTakeItBackTray
+from my_scenes.my_robocasa_takeit import MyRoboCasaSceneTakeIt
 from planners.takeitback_common import _tcp_to
 from robots.fetch.extand import (
     OPEN,
@@ -47,6 +47,12 @@ READY_ARM_POSTURE = np.array(
 )
 READY_ARM_RAMP_STEPS = 60
 CUP_ALIGNMENT_SCALE = 0.28
+# Candidate thresholds: 0.75, 0.90, 1.05 m; try 0.90 m first.
+CUP_DIRECT_SKIP_DISTANCE = 0.90
+CUP_DIRECT_MIN_COUNTER_GAP = 0.40
+CUP_DIRECT_MIN_FINAL_COUNTER_GAP = 0.36
+CUP_DIRECT_BASE_ADVANCE = 0.07
+CUP_DIRECT_MIN_PREGRASP_GAP = 0.04
 COUNTER_STANDOFF = 0.25
 PREGRASP_GAP = 0.12
 RETREAT_DISTANCE = 0.15
@@ -77,7 +83,7 @@ def _repair_trajectory_metadata(run_dir: Path) -> None:
 
 
 def _counter_direction_toward_cup(
-    task: MyRoboCasaSceneTakeItBackTray, agent: Fetch
+    task: MyRoboCasaSceneTakeIt, agent: Fetch
 ) -> np.ndarray:
     """Choose countertop's long axis with its sign pointing toward the cup."""
     size = np.asarray(task.counter_size[:2], dtype=float)
@@ -87,6 +93,28 @@ def _counter_direction_toward_cup(
     if np.dot(cup_xy - base_xy, axis) < 0:
         axis = -axis
     return np.r_[axis, 0.0]
+
+
+def _counter_front_geometry(task, base_xy, axis):
+    center = np.asarray(task.counter_pos[:2], dtype=float)
+    normal = np.array([-axis[1], axis[0]], dtype=float)
+    if np.dot(np.asarray(base_xy) - center, normal) < 0:
+        normal = -normal
+    half_normal = 0.5 * float(
+        abs(normal[0]) * task.counter_size[0]
+        + abs(normal[1]) * task.counter_size[1]
+    )
+    front = center + normal * half_normal
+    radius = float(getattr(task, "ROBOT_RADIUS", 0.35))
+    gap = float(np.dot(np.asarray(base_xy) - front, normal) - radius)
+    return normal, front, radius, gap
+
+
+def _use_direct_cup_skip(cup_distance, counter_gap):
+    return (
+        cup_distance <= CUP_DIRECT_SKIP_DISTANCE
+        and counter_gap >= CUP_DIRECT_MIN_COUNTER_GAP
+    )
 
 
 def _heading(agent: Fetch) -> float:
@@ -135,7 +163,7 @@ def _ramp_arm(planner, agent: Fetch, target_arm, steps=READY_ARM_RAMP_STEPS) -> 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Waypoint 0-16 planner for MyRoboCasa_TakeItBackTray-v1"
+        description="Waypoint 0-16 planner for MyRoboCasa_TakeIt-v1"
     )
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument(
@@ -495,7 +523,7 @@ def _planning_episode(
     if vis is None:
         vis = env.unwrapped.render_mode == "human"
 
-    task: MyRoboCasaSceneTakeItBackTray = env.unwrapped
+    task: MyRoboCasaSceneTakeIt = env.unwrapped
     env.reset(seed=seed, options={"reconfigure": True})
     agent: Fetch = cast(Fetch, task.agent)
     checkers = TrayEpisodeCheckers(task)
@@ -586,57 +614,92 @@ def _planning_episode(
     if not readied:
         return False
 
-    # WAYPOINT 1: face along the countertop, with forward direction toward cup.
+    # Skip the side-align route for nearby cups; face cup directly, then park safely.
     target_direction = _counter_direction_toward_cup(task, agent)
+    initial_base_xy = agent.base_link.pose.p[0].cpu().numpy()[:2]
+    initial_cup_xy = task.cup.pose.p[0].cpu().numpy()[:2]
+    initial_cup_distance = float(np.linalg.norm(initial_cup_xy - initial_base_xy))
+    _, _, _, initial_counter_gap = _counter_front_geometry(
+        task, initial_base_xy, target_direction[:2]
+    )
+    direct_cup_skip = _use_direct_cup_skip(
+        initial_cup_distance, initial_counter_gap
+    )
+    env.log_event(
+        "approach_route",
+        "Direct cup skip" if direct_cup_skip else "Counter-side approach",
+        cup_base_distance=initial_cup_distance,
+        counter_gap=initial_counter_gap,
+        direct_skip_threshold=CUP_DIRECT_SKIP_DISTANCE,
+        direct_min_counter_gap=CUP_DIRECT_MIN_COUNTER_GAP,
+    )
     before = _heading(agent)
     env.log_event(
         "waypoint",
-        "Waypoint 1: turn parallel to countertop toward cup",
-        target_direction=target_direction,
+        "Waypoint 1S: direct cup approach"
+        if direct_cup_skip
+        else "Waypoint 1: turn parallel to countertop toward cup",
+        counter_axis=target_direction,
         heading_before=before,
+        direct_cup_skip=direct_cup_skip,
     )
-    print(
-        "[WAYPOINT 1] target direction:",
-        np.round(target_direction, 3),
-        "initial heading:",
-        round(before, 4),
-    )
+    if direct_cup_skip:
+        print(
+            "[WAYPOINT 1S] direct cup approach; distance:",
+            round(initial_cup_distance, 3),
+            "heading:",
+            round(before, 4),
+        )
+    else:
+        print(
+            "[WAYPOINT 1] target direction:",
+            np.round(target_direction, 3),
+            "initial heading:",
+            round(before, 4),
+        )
 
-    result = env.log_motion(
-        "Waypoint 1 rotate",
-        planner.rotate_base_z,
-        target_direction,
-    )
-    if result == -1:
-        env.log_event("error", "Waypoint 1 rotation failed")
-        env.log_event("result", "Waypoint 1 failed", waypoint_success=False)
-        return False
-
-    planner.idle_steps(t=SETTLE_STEPS)
-    planner.planner.update_from_simulation()
-    after = _heading(agent)
-    heading_error = _heading_error(agent, target_direction)
-    if heading_error > np.deg2rad(5.0):
+    if direct_cup_skip:
         env.log_event(
-            "error",
-            "Waypoint 1 did not reach parallel heading",
+            "waypoint_complete",
+            "Waypoint 1S skipped counter-parallel turn",
+            cup_base_distance=initial_cup_distance,
+        )
+    else:
+        result = env.log_motion(
+            "Waypoint 1 rotate",
+            planner.rotate_base_z,
+            target_direction,
+        )
+        if result == -1:
+            env.log_event("error", "Waypoint 1 rotation failed")
+            env.log_event("result", "Waypoint 1 failed", waypoint_success=False)
+            return False
+
+        planner.idle_steps(t=SETTLE_STEPS)
+        planner.planner.update_from_simulation()
+        after = _heading(agent)
+        heading_error = _heading_error(agent, target_direction)
+        if heading_error > np.deg2rad(5.0):
+            env.log_event(
+                "error",
+                "Waypoint 1 did not reach parallel heading",
+                heading_after=after,
+                heading_error_deg=float(np.rad2deg(heading_error)),
+            )
+            env.log_event("result", "Waypoint 1 failed", waypoint_success=False)
+            return False
+        print(
+            "[WAYPOINT 1] final heading:",
+            round(after, 4),
+            "error_deg:",
+            round(float(np.rad2deg(heading_error)), 3),
+        )
+        env.log_event(
+            "waypoint_complete",
+            "Waypoint 1 complete",
             heading_after=after,
             heading_error_deg=float(np.rad2deg(heading_error)),
         )
-        env.log_event("result", "Waypoint 1 failed", waypoint_success=False)
-        return False
-    print(
-        "[WAYPOINT 1] final heading:",
-        round(after, 4),
-        "error_deg:",
-        round(float(np.rad2deg(heading_error)), 3),
-    )
-    env.log_event(
-        "waypoint_complete",
-        "Waypoint 1 complete",
-        heading_after=after,
-        heading_error_deg=float(np.rad2deg(heading_error)),
-    )
 
     # WAYPOINT 2: move only along the countertop until the cup is beside the
     # base, i.e. the cup-base vector is perpendicular to the drive direction.
@@ -652,37 +715,46 @@ def _planning_episode(
     drive_distance = gap_before - gap_target
     env.log_event(
         "waypoint",
-        "Waypoint 2: drive parallel to countertop to cup perpendicular",
+        "Waypoint 2S: skip side alignment for nearby cup"
+        if direct_cup_skip
+        else "Waypoint 2: drive parallel to countertop to cup perpendicular",
         along_gap_before=gap_before,
         along_gap_target=gap_target,
+        direct_cup_skip=direct_cup_skip,
     )
     print("[WAYPOINT 2] along-gap before:", round(gap_before, 4))
 
-    if drive_distance > 0.03:
-        result = env.log_motion(
-            "Waypoint 2 drive",
-            planner.drive_straight,
-            drive_distance,
-            v=0.10,
-            stop_when=lambda: along_gap() <= gap_target,
-        )
-        if result == -1:
-            env.log_event("error", "Waypoint 2 drive failed")
-            env.log_event("result", "Waypoint 2 failed", waypoint_success=False)
-            return False
+    if direct_cup_skip:
+        gap_after = abs(along_gap() - gap_target)
+        success = True
     else:
-        planner.idle_steps(t=1)
+        if drive_distance > 0.03:
+            result = env.log_motion(
+                "Waypoint 2 drive",
+                planner.drive_straight,
+                drive_distance,
+                v=0.10,
+                stop_when=lambda: along_gap() <= gap_target,
+            )
+            if result == -1:
+                env.log_event("error", "Waypoint 2 drive failed")
+                env.log_event("result", "Waypoint 2 failed", waypoint_success=False)
+                return False
+        else:
+            planner.idle_steps(t=1)
 
-    planner.idle_steps(t=SETTLE_STEPS)
-    planner.planner.update_from_simulation()
-    gap_after = abs(along_gap() - gap_target)
-    success = gap_after <= 0.06
+        planner.idle_steps(t=SETTLE_STEPS)
+        planner.planner.update_from_simulation()
+        gap_after = abs(along_gap() - gap_target)
+        success = gap_after <= 0.06
     base_xy = agent.base_link.pose.p[0].cpu().numpy()[:2]
     cup_xy = task.cup.pose.p[0].cpu().numpy()[:2]
     lateral_gap = float(np.linalg.norm(cup_xy - base_xy))
     print(
-        "[WAYPOINT 2] along-gap after:",
-        round(gap_after, 4),
+        "[WAYPOINT 2S] direct skip"
+        if direct_cup_skip
+        else "[WAYPOINT 2] along-gap after",
+        round(lateral_gap if direct_cup_skip else gap_after, 4),
         "cup-base distance:",
         round(lateral_gap, 4),
         "success:",
@@ -690,11 +762,16 @@ def _planning_episode(
     )
     env.log_event(
         "waypoint_complete" if success else "error",
-        "Waypoint 2 complete" if success else "Waypoint 2 did not reach perpendicular position",
+        "Waypoint 2S skipped; direct approach"
+        if direct_cup_skip
+        else "Waypoint 2 complete"
+        if success
+        else "Waypoint 2 did not reach perpendicular position",
         along_gap_after=abs(along_gap()),
         along_gap_error=gap_after,
         along_gap_target=gap_target,
         cup_base_distance=lateral_gap,
+        direct_cup_skip=direct_cup_skip,
     )
     if not success:
         env.log_event("result", "Waypoint 2 failed", waypoint_success=False)
@@ -788,16 +865,9 @@ def _planning_episode(
     cup_direction = agent.base_link.pose.sp.to_transformation_matrix()[:3, 0].copy()
     cup_direction[2] = 0.0
     cup_direction /= np.linalg.norm(cup_direction)
-    counter_center = np.asarray(task.counter_pos[:2], dtype=float)
-    normal = np.array([-axis[1], axis[0]], dtype=float)
-    if np.dot(base_before_park - counter_center, normal) < 0:
-        normal = -normal
-    half_normal = 0.5 * float(
-        abs(normal[0]) * task.counter_size[0]
-        + abs(normal[1]) * task.counter_size[1]
+    normal, counter_front, base_radius, counter_gap_before = (
+        _counter_front_geometry(task, base_before_park, axis)
     )
-    counter_front = counter_center + normal * half_normal
-    base_radius = float(getattr(task, "ROBOT_RADIUS", 0.35))
     desired_gap = COUNTER_STANDOFF + waypoint_offsets["wp4_standoff"]
     desired_tcp_gap = (
         PREGRASP_GAP
@@ -805,19 +875,35 @@ def _planning_episode(
         + waypoint_offsets["wp4_standoff"]
     )
     tcp_before_park = agent.tcp.pose.p[0].cpu().numpy()[:3].copy()
-    approach_distance = _pregrasp_drive_distance(
+    tcp_approach_distance = _pregrasp_drive_distance(
         cup_before, tcp_before_park, cup_direction, desired_tcp_gap
     )
     inward = -float(np.dot(normal, cup_direction[:2]))
     if inward <= 0:
         env.log_event("error", "Waypoint 4 heading does not face the counter")
         return False
-    counter_gap_before = float(
-        np.dot(base_before_park - counter_front, normal) - base_radius
-    )
-    approach_distance = min(
-        approach_distance, (counter_gap_before - desired_gap) / inward
-    )
+    safe_approach_distance = (counter_gap_before - desired_gap) / inward
+    if direct_cup_skip and safe_approach_distance < 0:
+        approach_distance = safe_approach_distance
+    elif direct_cup_skip:
+        original_pregrasp_gap = (
+            PREGRASP_GAP + waypoint_offsets["wp5_pregrasp"]
+        )
+        arm_advance_limit = max(
+            0.0, original_pregrasp_gap - CUP_DIRECT_MIN_PREGRASP_GAP - 0.01
+        )
+        counter_advance_limit = max(
+            0.0,
+            (counter_gap_before - CUP_DIRECT_MIN_FINAL_COUNTER_GAP) / inward,
+        )
+        approach_distance = min(
+            CUP_DIRECT_BASE_ADVANCE,
+            arm_advance_limit,
+            safe_approach_distance,
+            counter_advance_limit,
+        )
+    else:
+        approach_distance = min(tcp_approach_distance, safe_approach_distance)
     target_base = base_before_park + cup_direction[:2] * approach_distance
     env.log_event(
         "waypoint",
@@ -830,7 +916,9 @@ def _planning_episode(
     )
     print("[WAYPOINT 4] signed drive:", round(approach_distance, 4))
 
-    if abs(approach_distance) > 0.02:
+    drive_tolerance = 0.005 if direct_cup_skip else 0.01
+    minimum_drive = 0.005 if direct_cup_skip else 0.02
+    if abs(approach_distance) > minimum_drive:
         sign = float(np.sign(approach_distance))
         baseline_contacts = set(planner.touching_now())
         new_contacts = set()
@@ -843,7 +931,7 @@ def _planning_episode(
                     cup_direction[:2],
                 )
             )
-            return bool(new_contacts) or sign * remaining <= 0.01
+            return bool(new_contacts) or sign * remaining <= drive_tolerance
 
         result = env.log_motion(
             "Waypoint 4 signed straight drive",
@@ -865,6 +953,7 @@ def _planning_episode(
     planner.planner.update_from_simulation()
     base_xy = agent.base_link.pose.p[0].cpu().numpy()[:2]
     actual_gap = float(np.dot(base_xy - counter_front, normal) - base_radius)
+    base_travel = float(np.dot(base_xy - base_before_park, cup_direction[:2]))
     cup_after = task.cup.pose.p[0].cpu().numpy()[:3]
     tcp_after_park = agent.tcp.pose.p[0].cpu().numpy()[:3]
     parking_error = _pregrasp_drive_distance(
@@ -874,7 +963,7 @@ def _planning_episode(
     success = (
         not planner.truncated
         and actual_gap >= desired_gap - 0.03
-        and abs(parking_error) <= 0.03
+        and (direct_cup_skip or abs(parking_error) <= 0.03)
         and cup_shift <= 0.02
     )
     print(
@@ -891,7 +980,9 @@ def _planning_episode(
         actual_gap=actual_gap,
         desired_tcp_gap=desired_tcp_gap,
         parking_error=parking_error,
-        base_travel=float(np.dot(base_xy - base_before_park, cup_direction[:2])),
+        base_travel=base_travel,
+        direct_cup_skip=direct_cup_skip,
+        tcp_positioning_deferred=direct_cup_skip,
         cup_shift=cup_shift,
     )
     if not success:
@@ -907,9 +998,12 @@ def _planning_episode(
         return False
     obb = mesh.bounding_box_oriented
     cup_center = np.asarray(obb.center_mass, dtype=float)
-    pregrasp_position = cup_center - cup_direction * (
-        PREGRASP_GAP + waypoint_offsets["wp5_pregrasp"]
-    )
+    pregrasp_gap = PREGRASP_GAP + waypoint_offsets["wp5_pregrasp"]
+    if direct_cup_skip:
+        pregrasp_gap = max(
+            CUP_DIRECT_MIN_PREGRASP_GAP, pregrasp_gap - max(base_travel, 0.0)
+        )
+    pregrasp_position = cup_center - cup_direction * pregrasp_gap
     body = agent.controller.controllers["body"]
     torso_before = float(body.qpos[0][2])
     tcp_z_before = float(agent.tcp.pose.p[0][2])
@@ -963,6 +1057,8 @@ def _planning_episode(
         "waypoint",
         "Waypoint 5: straight pre-grasp with current wrist orientation",
         target_position=pregrasp_position,
+        pregrasp_gap=pregrasp_gap,
+        direct_cup_skip=direct_cup_skip,
     )
     pregrasp_result, candidate_details = _plan_straight_arm_translation(
         planner, pregrasp_position
@@ -986,8 +1082,11 @@ def _planning_episode(
     cup_shift = float(
         np.linalg.norm(task.cup.pose.p[0].cpu().numpy()[:3] - cup_before)
     )
+    min_pregrasp_distance = (
+        CUP_DIRECT_MIN_PREGRASP_GAP if direct_cup_skip else 0.10
+    )
     success = (
-        0.10 <= pregrasp_distance <= 0.16
+        min_pregrasp_distance <= pregrasp_distance <= 0.16
         and tcp_level_error <= 0.07
         and cup_shift <= 0.04
     )
@@ -1904,12 +2003,12 @@ if __name__ == "__main__":
     from mplib.pymp import set_global_seed
 
     set_global_seed(seed)
-    run_id = f"takeitback_tray_wp16_seed{seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_id = f"takeit_wp16_seed{seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir = Path(args.log_dir) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     env = gym.make(
-        "MyRoboCasa_TakeItBackTray-v1",
+        "MyRoboCasa_TakeIt-v1",
         num_envs=1,
         render_mode=None if args.no_video else args.render_mode,
         obs_mode="state" if args.no_video else "rgb",
@@ -1926,12 +2025,12 @@ if __name__ == "__main__":
         save_trajectory=True,
         save_video=False,
         source_type="motionplanning",
-        source_desc="TakeItBack tray waypoint 16 complete",
+        source_desc="TakeIt tray waypoint 16 complete",
     )
     env = PlannerLogger(
         env,
         log_dir=run_dir,
-        name=f"takeitback_tray_wp16_seed{seed}",
+        name=f"takeit_wp16_seed{seed}",
         log_freq=args.log_freq,
         run_dir=run_dir,
     )

@@ -34,8 +34,8 @@ from utils.tray_episode_checkers import (  # noqa: E402
     checker_rejection,
 )
 
-ENV_ID = "MyRoboCasa_TakeItBackTray-v1"
-PLANNER = "myrobocasa_takeitback_tray_planner"
+ENV_ID = "MyRoboCasa_TakeIt-v1"
+PLANNER = "myrobocasa_takeit_planner"
 
 
 # The cluster's ManiSkill fork imports my_scenes from inside mani_skill, so a module that imports

@@ -52,8 +52,8 @@ PLANNER_CASES = (
         True,
     ),
     PlannerCase(
-        "MyRoboCasa_TakeItBackTray-v1",
-        "myrobocasa_takeitback_tray_planner",
+        "MyRoboCasa_TakeIt-v1",
+        "myrobocasa_takeit_planner",
         "pd_joint_delta_pos",
         True,
     ),

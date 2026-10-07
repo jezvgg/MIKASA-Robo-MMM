@@ -24,7 +24,7 @@ uv run python -m planners.myrobocasa_takeitback_planner --help
 |---|---|---|
 | `MyRoboCasa-v1` | `myrobocasa_planner` | `pd_joint_pos` |
 | `MyRoboCasa_TakeItBack-v1` | `myrobocasa_takeitback_planner` | `pd_joint_delta_pos` |
-| `MyRoboCasa_TakeItBackTray-v1` | `myrobocasa_takeitback_tray_planner` | `pd_joint_pos` |
+| `MyRoboCasa_TakeIt-v1` | `myrobocasa_takeit_planner` | `pd_joint_pos` |
 | `MyRoboCasa_FridgeVeggies-v1` | `myrobocasa_fridge_veggies_planner` | `pd_joint_pos` |
 | `MikasaSeasonDish-v0` | `season_dish_planner` | `pd_joint_pos` |
 | `MikasaWaterPlants-v0` | `water_plants_planner` | `pd_joint_pos` |
@@ -41,7 +41,7 @@ uv run python -m planners.<planner_module> --seed 3 --no-video
 Например:
 
 ```bash
-uv run python -m planners.myrobocasa_takeitback_tray_planner \
+uv run python -m planners.myrobocasa_takeit_planner \
   --seed 3 --no-video --log-dir runs/planner_logs
 ```
 
@@ -71,12 +71,12 @@ uv run python -m utils.test_planner \
   --render-backend cpu
 ```
 
-Для другого задания замените `--scene` и `--planner` по таблице. Для `TakeItBackTray` используйте `--control-mode pd_joint_pos`; базовый `TakeItBack` сохраняет `pd_joint_delta_pos`:
+Для другого задания замените `--scene` и `--planner` по таблице. Для `TakeIt` используйте `--control-mode pd_joint_pos`; базовый `TakeItBack` сохраняет `pd_joint_delta_pos`:
 
 ```bash
 uv run python -m utils.test_planner \
-  --scene MyRoboCasa_TakeItBackTray-v1 \
-  --planner myrobocasa_takeitback_tray_planner \
+  --scene MyRoboCasa_TakeIt-v1 \
+  --planner myrobocasa_takeit_planner \
   --num-episodes 100 --start-seed 0 --seed-step 1 \
   --control-mode pd_joint_pos \
   --obs-mode state --sim-backend cpu --render-backend cpu
@@ -98,30 +98,30 @@ uv run python -m utils.test_planner \
 
 ```bash
 uv run python -m utils.test_planner \
-  --scene MyRoboCasa_TakeItBackTray-v1 \
-  --planner myrobocasa_takeitback_tray_planner \
+  --scene MyRoboCasa_TakeIt-v1 \
+  --planner myrobocasa_takeit_planner \
   --num-episodes 1 --start-seed 3 \
   --control-mode pd_joint_pos \
   --obs-mode state --sim-backend cpu --render-backend cpu \
-  --traj-dir runs/trajectories/takeitback_tray_seed3 \
-  --log-dir runs/traces/takeitback_tray
+  --traj-dir runs/trajectories/takeit_seed3 \
+  --log-dir runs/traces/takeit
 ```
 
 Результат:
 
 ```text
-runs/trajectories/takeitback_tray_seed3/
+runs/trajectories/takeit_seed3/
 ├── trajectory.h5       # traj_0, actions, env_states, obs, rewards/flags
 └── trajectory.json     # env config, seed, control mode, episode metadata
 
-runs/traces/takeitback_tray/seed_3/
+runs/traces/takeit/seed_3/
 ├── events.jsonl
 └── *_trajectory.csv
 ```
 
 Для 100 сидов поменяйте `--num-episodes 1` на `--num-episodes 100`; все непустые эпизоды будут `traj_0`, `traj_1`, ... в одном HDF5. `--log-dir` необязателен. `--video-dir` — отдельная запись MP4, не RGB-данные в HDF5.
 
-`MyRoboCasa_TakeItBackTray-v1` всегда записывается в `pd_joint_pos` на 20 Hz
+`MyRoboCasa_TakeIt-v1` всегда записывается в `pd_joint_pos` на 20 Hz
 (`control_timestep=0.05`). Для LeRobot 10 Hz сначала используйте
 `utils.subsample_h5 --stride 2`, затем `utils.convert_to_lerobot_stream --fps 10`;
 одного изменения `--fps` недостаточно — оно только меняет timestamps. Конвертер
@@ -140,8 +140,8 @@ runs/traces/takeitback_tray/seed_3/
 
 ```bash
 uv run python -m utils.replay_rgb \
-  runs/trajectories/takeitback_tray_seed3 \
-  --output-dir runs/trajectories/takeitback_tray_seed3_rgb \
+  runs/trajectories/takeit_seed3 \
+  --output-dir runs/trajectories/takeit_seed3_rgb \
   --episode 0 \
   --robot ds_fetch \
   --stride 10
@@ -156,7 +156,7 @@ uv run python -m utils.replay_rgb \
 ```bash
 uv run python -c \
   'import my_scenes; from mani_skill.trajectory.replay_trajectory import main, parse_args; main(parse_args())' \
-  --traj-path runs/trajectories/takeitback_tray_seed3/trajectory.h5 \
+  --traj-path runs/trajectories/takeit_seed3/trajectory.h5 \
   --use-env-states \
   --obs-mode rgb \
   --save-traj \

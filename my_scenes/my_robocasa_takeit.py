@@ -5,8 +5,8 @@ from mani_skill.utils.registration import register_env
 from .my_robocasa_takeitback import MyRoboCasaSceneTakeItBack
 
 
-@register_env("MyRoboCasa_TakeItBackTray-v1", asset_download_ids=["RoboCasa"])
-class MyRoboCasaSceneTakeItBackTray(MyRoboCasaSceneTakeItBack):
+@register_env("MyRoboCasa_TakeIt-v1", asset_download_ids=["RoboCasa"])
+class MyRoboCasaSceneTakeIt(MyRoboCasaSceneTakeItBack):
     """Place a randomly positioned cup onto a randomly positioned baking tray."""
 
     TRAY_EDGE_MARGIN = 0.02

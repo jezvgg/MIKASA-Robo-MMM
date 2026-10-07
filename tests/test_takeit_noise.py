@@ -5,7 +5,7 @@ from xml.etree import ElementTree
 import numpy as np
 import sapien
 
-from planners.myrobocasa_takeitback_tray_planner import (
+from planners.myrobocasa_takeit_planner import (
     READY_ARM_POSTURE,
     WAYPOINT_NOISE,
     _choose_shortest_safe_plan,

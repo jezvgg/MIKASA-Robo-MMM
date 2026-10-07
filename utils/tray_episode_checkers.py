@@ -2,9 +2,12 @@
 
 import numpy as np
 
-CHECKER_VERSION = 4  # bump when thresholds or interpretation changes
+CHECKER_VERSION = 5  # bump when thresholds or interpretation changes
 WRIST_180_RAD = np.deg2rad(179.0)
 TORSO_180_RAD = np.deg2rad(179.0)
+TORSO_TURN_STOP_EPS_RAD = np.deg2rad(0.05)
+# ponytail: infer boundaries from 3 stopped frames; add explicit turn markers if needed.
+TORSO_TURN_STOP_STEPS = 3
 MIN_IMPACT_IMPULSE_NS = 1e-3
 HAND_LINKS = {
     "wrist_flex_link",
@@ -38,8 +41,10 @@ class TrayEpisodeCheckers:
         qpos = task.agent.robot.get_qpos()[0].detach().cpu().numpy()
         self._last_wrist = float(qpos[self.wrist_index])
         self._last_torso_yaw = self._torso_yaw()
-        self._torso_yaw_delta = 0.0
-        self._max_torso_yaw_excursion = 0.0
+        self._torso_turn_delta = 0.0
+        self._torso_turn_direction = 0
+        self._torso_idle_steps = 0
+        self._max_torso_turn = 0.0
         self.torso_180_triggered = False
         self._wrist_delta = 0.0
         self._max_wrist_excursion = 0.0
@@ -71,12 +76,23 @@ class TrayEpisodeCheckers:
 
         torso_yaw = self._torso_yaw()
         yaw_delta = (torso_yaw - self._last_torso_yaw + np.pi) % (2 * np.pi) - np.pi
-        self._torso_yaw_delta += yaw_delta
         self._last_torso_yaw = torso_yaw
-        self._max_torso_yaw_excursion = max(
-            self._max_torso_yaw_excursion, abs(self._torso_yaw_delta)
-        )
-        self.torso_180_triggered |= self._max_torso_yaw_excursion >= TORSO_180_RAD
+        if abs(yaw_delta) <= TORSO_TURN_STOP_EPS_RAD:
+            self._torso_idle_steps += 1
+            if self._torso_idle_steps >= TORSO_TURN_STOP_STEPS:
+                self._torso_turn_delta = 0.0
+                self._torso_turn_direction = 0
+        else:
+            direction = 1 if yaw_delta > 0 else -1
+            if self._torso_turn_direction and direction != self._torso_turn_direction:
+                self._torso_turn_delta = 0.0
+            self._torso_turn_direction = direction
+            self._torso_turn_delta += yaw_delta
+            self._torso_idle_steps = 0
+            self._max_torso_turn = max(
+                self._max_torso_turn, abs(self._torso_turn_delta)
+            )
+            self.torso_180_triggered |= self._max_torso_turn >= TORSO_180_RAD
 
         step_impacts = {}
         for contact in self.task.scene.get_contacts():
@@ -125,8 +141,8 @@ class TrayEpisodeCheckers:
                 float(np.rad2deg(self._max_wrist_excursion)), 3
             ),
             "torso_180_triggered": bool(self.torso_180_triggered),
-            "torso_yaw_max_excursion_deg": round(
-                float(np.rad2deg(self._max_torso_yaw_excursion)), 3
+            "torso_yaw_max_turn_deg": round(
+                float(np.rad2deg(self._max_torso_turn)), 3
             ),
             "collision_triggered": bool(self.impacts),
             "collision_contact_frames": sum(x["frames"] for x in self.impacts.values()),

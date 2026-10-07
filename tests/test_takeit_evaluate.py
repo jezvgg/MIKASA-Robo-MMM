@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
-from my_scenes.my_robocasa_takeitback_tray import MyRoboCasaSceneTakeItBackTray
+from my_scenes.my_robocasa_takeit import MyRoboCasaSceneTakeIt
 
 
 class _Actor:
@@ -26,7 +26,7 @@ class _Scene:
 
 
 def _checker(cup, tray, force):
-    env = object.__new__(MyRoboCasaSceneTakeItBackTray)
+    env = object.__new__(MyRoboCasaSceneTakeIt)
     env.cup = _Actor(cup)
     env.tray = _Actor(tray)
     env.cup_half = [0.036, 0.036, 0.058]

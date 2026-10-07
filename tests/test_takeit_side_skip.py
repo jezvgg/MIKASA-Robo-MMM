@@ -4,7 +4,16 @@ from pathlib import Path
 
 import numpy as np
 import sapien
-from planners.myrobocasa_takeitback_tray_planner import _side_skip_goal
+from planners.myrobocasa_takeit_planner import (
+    _side_skip_goal,
+    _use_direct_cup_skip,
+)
+
+
+def test_direct_cup_skip_uses_first_distance_threshold_and_clearance_guard():
+    assert _use_direct_cup_skip(0.87, 0.42)
+    assert not _use_direct_cup_skip(0.91, 0.42)
+    assert not _use_direct_cup_skip(0.73, 0.22)
 
 
 def test_side_goal_uses_actual_grasp_without_forcing_cup_or_wrist_rotation():
@@ -21,7 +30,7 @@ def test_side_goal_uses_actual_grasp_without_forcing_cup_or_wrist_rotation():
 
 
 def test_side_skip_does_not_recheck_attached_cup_path_in_stale_original_world():
-    source = Path(__file__).parents[1] / 'planners/myrobocasa_takeitback_tray_planner.py'
+    source = Path(__file__).parents[1] / 'planners/myrobocasa_takeit_planner.py'
     tree = ast.parse(source.read_text())
     side = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_side_skip_to_tray')
     calls = {n.func.id for n in ast.walk(side) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
@@ -30,7 +39,7 @@ def test_side_skip_does_not_recheck_attached_cup_path_in_stale_original_world():
 
 
 def test_front_facing_waypoint14_has_no_direct_skip_call():
-    source = Path(__file__).parents[1] / 'planners/myrobocasa_takeitback_tray_planner.py'
+    source = Path(__file__).parents[1] / 'planners/myrobocasa_takeit_planner.py'
     tree = ast.parse(source.read_text())
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'attempt_waypoint14']
     assert len(calls) == 1 and not calls[0].args

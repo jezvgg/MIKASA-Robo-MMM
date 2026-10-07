@@ -15,7 +15,7 @@ import numpy as np
 
 from utils.dummy_policy import DummyPolicy
 
-ENV_ID = "MyRoboCasa_TakeItBackTray-v1"
+ENV_ID = "MyRoboCasa_TakeIt-v1"
 
 
 def scalar_bool(value) -> bool:

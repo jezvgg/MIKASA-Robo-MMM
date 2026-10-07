@@ -89,17 +89,53 @@ def test_wrist_checker_tracks_wrapped_roll_excursion():
     assert checks.summary()["wrist_180_triggered"]
 
 
+def _set_torso_yaw(task, degrees):
+    yaw = np.deg2rad(degrees)
+    task.agent.base_link.pose.q[0] = torch.tensor(
+        [np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)]
+    )
+
+
 def test_torso_yaw_checker_unwraps_angle_crossing():
     task = _Task()
     checks = TrayEpisodeCheckers(task)
-    for yaw in (np.deg2rad(178), np.deg2rad(-178)):
-        task.agent.base_link.pose.q[0] = torch.tensor(
-            [np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)]
-        )
+    for yaw in (178, -178):
+        _set_torso_yaw(task, yaw)
         checks.observe_step()
     result = checks.summary()
     assert result["torso_180_triggered"]
-    assert result["torso_yaw_max_excursion_deg"] == 182.0
+    assert result["torso_yaw_max_turn_deg"] == 182.0
+
+
+def test_torso_checker_resets_between_separate_turns():
+    task = _Task()
+    checks = TrayEpisodeCheckers(task)
+    _set_torso_yaw(task, 100)
+    checks.observe_step()
+    for _ in range(3):
+        checks.observe_step()
+    _set_torso_yaw(task, -160)
+    checks.observe_step()
+    assert not checks.summary()["torso_180_triggered"]
+    assert checks.summary()["torso_yaw_max_turn_deg"] == 100.0
+    _set_torso_yaw(task, -80)
+    checks.observe_step()
+    assert checks.summary()["torso_180_triggered"]
+    assert checks.summary()["torso_yaw_max_turn_deg"] == 180.0
+
+
+def test_torso_checker_resets_on_direction_reversal():
+    task = _Task()
+    checks = TrayEpisodeCheckers(task)
+    for yaw in (100, 0):
+        _set_torso_yaw(task, yaw)
+        checks.observe_step()
+    assert not checks.summary()["torso_180_triggered"]
+    assert checks.summary()["torso_yaw_max_turn_deg"] == 100.0
+    _set_torso_yaw(task, -80)
+    checks.observe_step()
+    assert checks.summary()["torso_180_triggered"]
+    assert checks.summary()["torso_yaw_max_turn_deg"] == 180.0
 
 
 def test_hand_counter_hit_flags_but_grasp_contact_does_not():
