@@ -28,8 +28,9 @@ say() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$REPORT"; }
 
 say "run $EXP: $CONFIG on GPUs $GPUS, progress SR on GPU $SR_GPU; branch $(git -C "$REPO_DIR" rev-parse --short HEAD)"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader | tee -a "$REPORT"
-if [[ ! -f "$PI05_WORK/assets/samedrawer/nurtayev-d/samedrawer-1000ep/norm_stats.json" ]]; then
-  say "norm stats: computing"; "$PY" -m mikasa_pi05 norm-stats pi05_sd_ff_4xh100 > "$LOGS/norm-stats.log" 2>&1
+stats=$("$PY" -c "from mikasa_pi05.configs import get_config; d = get_config('$CONFIG').data; print(f'{d.assets.assets_dir}/{d.repo_id}/norm_stats.json')")
+if [[ ! -f "$stats" ]]; then
+  say "norm stats: computing $stats"; "$PY" -m mikasa_pi05 norm-stats "$CONFIG" > "$LOGS/norm-stats-$CONFIG.log" 2>&1
 fi
 
 ckpt_dir="$PI05_WORK/checkpoints/$CONFIG/$EXP"

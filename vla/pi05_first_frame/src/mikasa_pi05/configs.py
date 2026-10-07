@@ -30,8 +30,11 @@ HF_REVISION = "d126ebae7e8aa4217c2a61a5b08214fc75f1bdac"
 FIRST_FRAME_CAMERA = "left_base_camera_link"
 ACTION_HORIZON = 10
 BASE_WEIGHTS = "gs://openpi-assets/checkpoints/pi05_base/params"
-# One set of norm stats over all 1000 episodes, shared by every config (also the overfit one).
+# One set of norm stats over all 1000 episodes, shared by every config with ACTION_HORIZON (also
+# the overfit one). Arm actions are deltas from the current joints, so a longer chunk has wider
+# action stats and gets its own directory (H50_NORM_STATS_DIR).
 NORM_STATS_DIR = WORK / "assets" / "samedrawer"
+H50_NORM_STATS_DIR = WORK / "assets" / "samedrawer-h50"
 
 # Must equal utils.collection.client.policy_metadata(); run_policy_episode refuses a mismatch.
 MIKASA_DATA = {
@@ -103,10 +106,10 @@ class SameDrawerDataConfig(_config.DataConfigFactory):
         )
 
 
-def _model(**kwargs) -> pi0_config.Pi0Config:
+def _model(action_horizon: int = ACTION_HORIZON, **kwargs) -> pi0_config.Pi0Config:
     return pi0_config.Pi0Config(
         pi05=True,
-        action_horizon=ACTION_HORIZON,
+        action_horizon=action_horizon,
         discrete_state_input=True,
         image_keys=sd.IMAGE_KEYS,
         **kwargs,
@@ -192,10 +195,21 @@ CONFIGS = {
     ),
 }
 
+# The 4x H100 baseline with action chunks of 50 (openpi's default horizon) instead of 10.
+# Evaluate it with --replan-steps 25: SR_EVAL_ARGS and FINAL_EVAL_ARGS of scripts/run_4xh100.sh.
+CONFIGS["pi05_sd_ff_h50_4xh100"] = dataclasses.replace(
+    CONFIGS["pi05_sd_ff_4xh100"],
+    name="pi05_sd_ff_h50_4xh100",
+    model=_model(action_horizon=50),
+    data=SameDrawerDataConfig(
+        assets=_config.AssetsConfig(assets_dir=str(H50_NORM_STATS_DIR))),
+    policy_metadata={**POLICY_METADATA, "action_horizon": 50},
+)
+
 
 # Steps between full checkpoints (with optimizer state) for configs that snapshot more often.
 # The dummy config uses the same scheme so the whole flow can be checked on a small GPU.
-FULL_CHECKPOINT_EVERY = {"pi05_sd_ff_4xh100": 5_000, "pi05_sd_ff_dummy": 50}
+FULL_CHECKPOINT_EVERY = {"pi05_sd_ff_4xh100": 5_000, "pi05_sd_ff_h50_4xh100": 5_000, "pi05_sd_ff_dummy": 50}
 
 # Configs meant for a single GPU with a small disk (lab server: 100 GB) save params-only checkpoints.
 PARAMS_ONLY_CHECKPOINTS = {"pi05_sd_ff_dummy", "pi05_sd_ff_overfit", "pi05_sd_ff_1xh100"}
