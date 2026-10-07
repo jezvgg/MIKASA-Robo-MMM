@@ -14,7 +14,11 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest"]
+openpi-eval = ["openpi-client"]
 
 [tool.uv]
 package = false
 override-dependencies = ["mplib==0.2.1; sys_platform == 'linux'"]
+
+[tool.uv.sources]
+openpi-client = { path = "third_party/openpi/packages/openpi-client" }
