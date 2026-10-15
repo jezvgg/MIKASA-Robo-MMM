@@ -13,7 +13,7 @@
 #      The model has seen these exact episodes; failing here means a pipeline bug, not capacity.
 #   2. debug (~2 h): pi05_sd_ff_1xh100 on all episodes (3k steps), then 20 validation seeds
 # A full fine-tune that runs out of GPU memory is retried once with --batch-size 16.
-# Stops before the disk passes $DISK_LIMIT_GB (default 90 of the 100 GB quota).
+# Stops before the disk passes $DISK_LIMIT_GB (default 95 of the 100 GB quota).
 # The short report to send back: $PI05_WORK/logs/debug-report.txt
 #
 # For a quick dry run of the script itself: OVERFIT_CONFIG=pi05_sd_ff_dummy DEBUG_CONFIG=pi05_sd_ff_dummy
@@ -38,8 +38,8 @@ disk_guard() {
   local used
   used=$(du -s --block-size=1G "$HOME" 2>/dev/null | cut -f1)
   say "disk: ${used} GB used in $HOME"
-  if (( used > ${DISK_LIMIT_GB:-90} )); then
-    say "STOP: over ${DISK_LIMIT_GB:-90} GB; free space before continuing (old checkpoints in $PI05_WORK/checkpoints)"
+  if (( used > ${DISK_LIMIT_GB:-95} )); then
+    say "STOP: over ${DISK_LIMIT_GB:-95} GB; free space before continuing (old checkpoints in $PI05_WORK/checkpoints)"
     exit 1
   fi
 }
