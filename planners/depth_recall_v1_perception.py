@@ -12,11 +12,18 @@ observation-only planners work:
 * **memory comes from perception**: which prop stood in which row slot is the slot nearest
   to where the prop was SEEN before it was taken, not the episode's answer.
 
+* **the map is static, the row is measured**: row and counter slot points come from
+  the scene's static geometry (the cabinet's row centre, the configured slot y's and
+  offsets, shelf and counter heights — BIMBO's rules allowed an offline map). The
+  episode shifts the whole row sideways (`row_jitter_x`, up to 4 cm); that shift is not
+  in an image observation, so the first look from the dock measures it
+  (`calibrate_row`) and every row and counter point after that carries the measured x.
+
 What is still read from the simulator, and named so it is not mistaken for honest:
 the planning world's collision geometry (mplib mirrors the whole scene, props at their
 true poses), `is_grasping` (contact forces), `hold_object_in_planner` (attaches the true
-mesh for collision checks), and the static scene map (shelf height, cabinet and counter
-footprints — BIMBO's rules allowed an offline map of static geometry).
+mesh for collision checks), and the static scene map above. Truth also goes into the
+LOGS (`pc.audit`, the row shift's error) and nowhere else.
 """
 
 from __future__ import annotations
@@ -65,6 +72,10 @@ class PropBelief:
         self.task, self.cfg, self.fit_cfg = task, task.cfg, fit_cfg
         self.say = say or (lambda message, **data: None)
         self.colors = PROP_COLORS
+        missing = [uid for uid in BASE_CAMS + (HAND_CAM,) if uid not in task._sensors]
+        if missing:
+            raise RuntimeError(f"pointcloud perception needs the cameras {missing}; the env "
+                               "was built without them (a render backend is required)")
         self.half = (task.cfg.prop_half_xy, task.cfg.prop_half_xy, task.cfg.prop_half_h)
         self.model = pc.box_model(self.half, n=fit_cfg.model_points)
         self.cutter = pc.RobotCutter(task.agent.robot)
@@ -73,6 +84,8 @@ class PropBelief:
         self.held = None             # (prop index, hand->prop sapien.Pose)
         self.search_radius = 0.10    # metres around a stand point or the last estimate
         self.looks = []              # per look: where, cams, per-prop outcome + audit
+        self.row_dx = None           # the row's measured sideways shift, once calibrated
+        self.slot_pts = None         # counter slot points the planner uses (map + row_dx)
 
     # --------------------------------------------------------------- regions --
 
@@ -90,19 +103,59 @@ class PropBelief:
         lo, hi = pos[:2] - size[:2] / 2, pos[:2] + size[:2] / 2
         return lo, hi, z0
 
+    def map_points(self):
+        """(row points (n, 3), counter slot points (4, 3)) from the STATIC map only.
+
+        The row centre x is the cabinet's exposed half (fixed per scene); the episode's
+        sideways shift is not in it, `calibrate_row` measures it.
+        """
+        cfg = self.cfg
+        x0 = float(np.asarray(self.task._row_centre_x).reshape(-1)[0])
+        zc = float(np.asarray(self.task._counter_top_z).reshape(-1)[0])
+        row = np.array([[x0, y, float(cfg.shelf_top_z)] for y in cfg.row_slots_y])
+        slots = np.array([[x0 + o, float(cfg.place_across), zc] for o in cfg.slot_x_offsets])
+        return row, slots
+
+    def calibrate_row(self, fits: dict, row_pts, slot_pts, max_shift: float = 0.06):
+        """Shift the map's row and slot points by the row's measured sideways offset.
+
+        The offset is the median over props of (estimated x - map x): accepted fits when
+        there are any, else the coarse (cluster-x) estimates. Nothing seen: no shift.
+        Returns the shifted (row_pts, slot_pts).
+        """
+        x0 = float(np.asarray(row_pts)[0, 0])
+        good = [f["x"] for f in fits.values() if f.get("accepted")]
+        coarse = [self.est[i]["x"] for i, f in fits.items() if "coarse_xy" in f and i in self.est]
+        xs, source = (good, "fits") if good else (coarse, "coarse") if coarse else ([], "none")
+        dx = float(np.clip(np.median(xs) - x0, -max_shift, max_shift)) if xs else 0.0
+        self.row_dx = dx
+        row, slots = np.array(row_pts, dtype=np.float64), np.array(slot_pts, dtype=np.float64)
+        row[:, 0] += dx
+        slots[:, 0] += dx
+        self.slot_pts = slots
+        # Truth, for the LOG only: how far the measured row x is from the episode's.
+        true_x = float(np.asarray(self.task._row_points).reshape(-1, 3)[0, 0])
+        self.say("row calibrated", dx=round(dx, 4), source=source, n=len(xs),
+                 err_mm=round((x0 + dx - true_x) * 1000, 1))
+        return row, slots
+
     # ------------------------------------------------------------------ look --
 
-    def look(self, where: str, cams, only=None, anchors=None, min_seen: int = 5) -> dict:
+    def look(self, where: str, cams, only=None, anchors=None, min_seen: int = 5,
+             trust_anchor_x: bool = True) -> dict:
         """Capture, cut, band, cluster by colour, fit; update the estimates that pass.
 
         `only` restricts the fit to these prop indices (a wrist re-fit of one prop).
-        `anchors` are the support's known stand points (the row or the counter slots —
-        static scenery, also in the policy's observation): a colour cluster of at least
+        `anchors` are the support's slot points (the row or the counter slots, from the
+        static map shifted by the measured row offset): a colour cluster of at least
         `min_seen` points is tied to the anchor nearest its centroid, ICP starts there,
         and when the fit is refused the anchor itself is kept as a COARSE estimate. Coarse
         is enough to choose and approach a prop; a grasp needs an accepted fit.
         Without anchors, ICP starts from the previous estimate or the centroid.
-        Returns {index: fit dict} for every prop tried.
+        ``trust_anchor_x=False`` (the shelf row, whose x the episode shifts): ICP starts
+        at the cluster's x and the anchor's y, and the coarse estimate is that point —
+        the cameras look along y, so the seen face's x is the prop's x.
+        Returns {index: fit dict} for every prop tried; only a fit in THIS look is fresh.
         """
         cloud = pc.capture(self.task, cams)
         extra = []
@@ -144,7 +197,11 @@ class PropBelief:
             anchor = None
             if anchors is not None:
                 a = np.asarray(anchors, dtype=np.float64)[:, :2]
-                anchor = a[int(np.argmin(np.linalg.norm(a - seen[:, :2].mean(axis=0), axis=1)))]
+                c = seen[:, :2].mean(axis=0)
+                anchor = a[int(np.argmin(np.abs(a[:, 1] - c[1]) if not trust_anchor_x
+                                         else np.linalg.norm(a - c, axis=1)))].copy()
+                if not trust_anchor_x:
+                    anchor[0] = c[0]
                 init = anchor
             elif i in self.est:
                 init = (self.est[i]["x"], self.est[i]["y"])
@@ -155,7 +212,7 @@ class PropBelief:
             elif anchor is not None:
                 self.est[i] = dict(x=float(anchor[0]), y=float(anchor[1]), z=z, yaw=0.0,
                                    where=where, coarse=True, n=fit.get("n", len(seen)))
-                fit["coarse_anchor"] = [round(float(v), 3) for v in anchor]
+                fit["coarse_xy"] = [round(float(v), 3) for v in anchor]
         self._log(where, cams, fits)
         return fits
 
@@ -170,8 +227,8 @@ class PropBelief:
                 entry.update(pc.audit(fit, self.task.props[i].pose.sp))
             if not fit.get("accepted"):
                 entry["why"] = "; ".join(fit.get("reasons", []))
-            if "coarse_anchor" in fit:
-                entry["coarse_anchor"] = fit["coarse_anchor"]
+            if "coarse_xy" in fit:
+                entry["coarse_xy"] = fit["coarse_xy"]
             out[self.task.props[i].name] = entry
         self.looks.append(dict(where=where, cams=list(cams), props=out))
         self.say("perceive", where=where, cams=list(cams), props=out)
@@ -179,10 +236,13 @@ class PropBelief:
     # ----------------------------------------------------------------- reads --
 
     def has(self, i: int, fine: bool = False) -> bool:
-        """Known at all, or (``fine``) known from an accepted fit, not just an anchor."""
+        """Known at all, or (``fine``) known from an accepted fit — not a coarse cluster
+        point and not dead reckoning from a release. A fit is not FRESH for that: a
+        caller that needs one this moment checks what its own `look` returned."""
         if self.held is not None and self.held[0] == i:
             return True
-        return i in self.est and not (fine and self.est[i].get("coarse"))
+        e = self.est.get(i)
+        return e is not None and not (fine and (e.get("coarse") or e.get("from_carry")))
 
     def pose(self, i: int) -> sapien.Pose:
         if self.held is not None and self.held[0] == i:

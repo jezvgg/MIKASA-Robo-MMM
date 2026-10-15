@@ -336,9 +336,12 @@ def grasp_ladder(env, planner, task, prop, *, where: str, lift: float = None):
             # Re-fit from the stand the grasp is made from, wrist camera first: every
             # rung, because a refused close can have moved the prop.
             i = _index(task, prop)
-            _BELIEF.look(where, (perc.HAND_CAM,) + perc.BASE_CAMS, only=[i])
-            if not _BELIEF.has(i, fine=True):
-                return fail(env, f"{where}: {prop.name} not fitted from the grasp stand"), False
+            fit = _BELIEF.look(where, (perc.HAND_CAM,) + perc.BASE_CAMS, only=[i]).get(i, {})
+            # THIS look must accept a fit: an older estimate (a dock fit, a release) is
+            # exactly what a refused close may have made wrong.
+            if not fit.get("accepted"):
+                return fail(env, f"{where}: {prop.name} not fitted from the grasp stand",
+                            why=fit.get("reasons")), False
         grasp, _pre = retr.side_grasp_pose(task, depth, lift=lift, obj=_seen(prop))
         if grasp is None:
             return fail(env, f"{where}: {prop.name} has no collision mesh"), False
@@ -643,11 +646,15 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     # of 0.942 — a lying prop — and drove the palm into it. The extraction already
     # crosses high and descends; this is the same move on the way back.
     if _BELIEF is not None:
+        # Refresh the counter estimates from here; a prop this look misses keeps the
+        # estimate its release left (dead reckoning), and the grasp ladder still demands
+        # a fresh wrist fit before closing on it.
         i = _index(task, prop)
-        _BELIEF.look("counter", perc.BASE_CAMS + (perc.HAND_CAM,),
-                     anchors=_np(task._slot_points).reshape(-1, 4, 3)[0])
-        if not _BELIEF.has(i):
-            return fail(env, f"{prop.name} not perceived on the counter"), False
+        fit = _BELIEF.look("counter", perc.BASE_CAMS + (perc.HAND_CAM,),
+                           anchors=_BELIEF.slot_pts).get(i, {})
+        say(env, "counter estimate", prop=prop.name,
+            source="fit" if fit.get("accepted") else "cluster" if "coarse_xy" in fit
+            else "release")
     p0 = _np(_seen(prop).pose.p).reshape(-1)[:3]
     moved = -1
     for torso in tuple(CROSS_SAFE_TORSO) + (None,):
@@ -927,6 +934,11 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     props = list(task.props)
     slot_pts = _np(task._slot_points).reshape(-1, 4, 3)[0]
     row_pts = _np(task._row_points).reshape(-1, task.cfg.n_props, 3)[0]
+    if _BELIEF is not None:
+        # The episode's row and slot points carry a per-episode sideways shift that no
+        # image shows; start from the static map, measure the shift at the dock.
+        row_pts, slot_pts = _BELIEF.map_points()
+        _BELIEF.slot_pts = slot_pts
     say(env, "episode", blind=bool(blind),
         slots=[round(float(v), 3) for v in slot_pts[:, 0]],
         row_x=round(float(row_pts[0][0]), 3))
@@ -963,7 +975,9 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     free = list(range(4))
     staged = {}
     # Simulator mode keeps its original rule exactly: one ordering read at the start.
-    remaining = sorted(range(len(props)), key=lambda i: float(_np(props[i].pose.p).reshape(-1)[1]))
+    # Perception mode orders by what it sees, below; no true pose enters.
+    remaining = (sorted(range(len(props)), key=lambda i: float(_np(props[i].pose.p).reshape(-1)[1]))
+                 if _BELIEF is None else list(range(len(props))))
     while remaining:
         if _BELIEF is None:
             prop_i = remaining[0]
@@ -973,11 +987,16 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
             res = gaze(row_pts, -.20)
             if res == -1 or common.stopped_by_horizon(planner):
                 return res
-            _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts)
+            fits = _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts, trust_anchor_x=False)
+            if _BELIEF.row_dx is None:
+                # First look from the dock: measure the row's sideways shift, then look
+                # again so every estimate is tied to the corrected points.
+                row_pts, slot_pts = _BELIEF.calibrate_row(fits, row_pts, slot_pts)
+                _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts, trust_anchor_x=False)
             seen = [i for i in remaining if _BELIEF.has(i)]
             if not seen:
                 return fail(env, "perceive the row", remaining=[props[i].name for i in remaining])
-            prop_i = min(seen, key=lambda i: _BELIEF.est[i]["y"])
+            prop_i = min(seen, key=lambda i: (_BELIEF.est[i]["y"], i))
             slot_seen = _BELIEF.remember_row_slot(prop_i, row_pts)
             # The row is emptied front first, so the front-most OCCUPIED slot is known; a
             # prop seen behind it means the one in front was missed, and taking the deeper

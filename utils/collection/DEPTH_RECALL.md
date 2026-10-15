@@ -222,19 +222,18 @@ utils/docker/amd64.sh python -m pytest -q utils/mikasa/test_assisted_grasp.py
 utils/docker/amd64.sh python planners/depth_recall_v1_planner.py --seed 1000 --assisted-grasp
 ```
 
-Measured 2026-10-15, CPU under amd64 emulation (`utils/docker/amd64.sh`), development
-seeds 1000–1009, the same planner with and without the flag:
+Measured 2026-10-15 on an H100 server (GPU rendering, CPU physics), development seeds
+1000–1009, the same planner with and without the flag:
 
 | | success | control steps (median) | welds made / released per episode | grasp misses |
 |---|---|---|---|---|
-| `assisted_grasp=False` | 10/10 | 3665 | — | 0 |
-| `assisted_grasp=True` | 10/10 | 3651 | 7 / 7 on every seed | 0 |
+| `assisted_grasp=False` | 10/10 | 3664 | — | 0 |
+| `assisted_grasp=True` | 10/10 | 3650 | 7 / 7 on every seed | 0 |
 
 Seven welds per episode are the planner's seven grasps (four extractions, three
 restores); each forms 0.3 s after the fingers close and goes when they open. On this
 task, where friction already holds the 4.5 cm props, the weld neither helps nor hurts
-the oracle; wall time grows about 10 % (the per-step rule). Ten seeds cannot show a rate
-below ~25 % with any confidence.
+the oracle. Ten seeds cannot show a rate below ~25 % with any confidence.
 
 ## Point-cloud perception (experimental, off by default)
 
@@ -245,37 +244,49 @@ work (`utils/mikasa/point_cloud.py`, `planners/depth_recall_v1_perception.py`):
 
 1. Depth of the two base cameras and the wrist camera is back-projected into the world;
    points inside the robot's link collision boxes (and the carried prop) are cut out.
-2. A height band over the support (shelf or counter, from the static scene) within 10 cm
-   of a known stand point (row or counter slot) is clustered on a 2 cm voxel grid; a
-   cluster is named by hue — colour is the prop's identity in this task by design.
-3. A 1500-point model of the prop is fitted by trimmed planar ICP from a 15° yaw grid,
-   started at the nearest stand point, and accepted only with inliers (8 mm) >= 0.55,
-   RMS <= 1.2 cm and no more than 30 % of the model "seen through" by a camera. A cluster
-   too small to fit keeps its stand point as a coarse estimate.
-4. From the dock the base cameras pick the front-most prop and remember the row slot it
+2. Row and counter slot points come from the static map (the cabinet's row centre, the
+   configured slot y's and offsets, shelf and counter heights). The episode shifts the
+   whole row sideways by up to 4 cm (`row_jitter_x`), which no image observation states:
+   the first look from the dock measures that shift (median x of the accepted fits) and
+   every row and counter point after it carries the measured x.
+3. A height band over the support within 10 cm of a slot point is clustered on a 2 cm
+   voxel grid; a cluster is named by hue — colour is the prop's identity in this task by
+   design.
+4. A 1500-point model of the prop is fitted by trimmed planar ICP from a 15° yaw grid,
+   started at the cluster's x and the slot's y on the shelf (the cameras look along y, so
+   the seen face's x is the prop's), at the slot point on the counter (where the planner
+   itself put the prop), and accepted only with inliers (8 mm) >= 0.55, RMS <= 1.2 cm and
+   no more than 30 % of the model "seen through" by a camera. A cluster too small to fit
+   keeps that start point as a coarse estimate.
+5. From the dock the base cameras pick the front-most prop and remember the row slot it
    was seen in; that memory, not the episode's answer, drives the restore. A prop seen
    behind an unseen front one stops the episode rather than driving into the front one.
-5. At the stand each grasp is made from, the wrist camera re-fits the prop (every rung of
-   the grasp ladder). After the grasp the prop's pose is the hand's pose times the
-   transform frozen at the grasp.
+6. At the stand each grasp is made from, the wrist camera re-fits the prop (every rung of
+   the grasp ladder), and the grasp goes ahead only if THAT look accepts a fit — an older
+   estimate is exactly what a missed close may have made wrong. After the grasp the
+   prop's pose is the hand's pose times the transform frozen at the grasp.
 
 Still read from the simulator in this mode: the planning world's collision geometry
 (mplib mirrors the scene, props at their true poses), `is_grasping`, the collision mesh
-attached by `hold_object_in_planner`, and the static scene map (shelf height, cabinet and
-counter footprints, row and counter slot points — the last two are also in the policy's
-observation). Every perception step logs its fit and, for the log only, its error
-against the true pose.
+attached by `hold_object_in_planner`, and the static scene map. Every perception step
+logs its fit and, for the log only, its error against the true pose; the row shift logs
+its error against the episode's row x.
 
-Measured 2026-10-15, CPU under amd64 emulation, development seeds 1000–1009, the same
-planner in three modes:
+Measured 2026-10-15 on an H100 server (GPU rendering, CPU physics), development seeds
+1000–1009, the same planner in three modes:
 
 | prop poses from | success | control steps (median) |
 |---|---|---|
-| simulator (`state`) | 10/10 | 3665 |
+| simulator (`state`) | 10/10 | 3664 |
 | cameras (`pointcloud`) | 10/10 | 3614 |
-| cameras + `--assisted-grasp` | 10/10 | 3603 |
+| cameras + `--assisted-grasp` | 10/10 | 3616 |
 
+The row's sideways shift measured at the dock, against the episode's: error median
+0.9 mm, worst 7.6 mm (two accepted fits on that seed) for shifts up to 4.0 cm. The base
+docks at the map's row x before the shift is known; on the seed with the full 4 cm shift
+one restore needed the sag correction and the episode ran ~230 steps longer.
 Wrist-camera re-fits before a grasp: 70 of 70 accepted per mode; position error against
-the true pose median 1.0 mm, 95th percentile 2.7 mm, worst 3.1 mm; yaw error median
-0.9°, worst 4.1°. The remembered row slots restored every prop to its own slot on all
-ten seeds. Ten seeds cannot show a failure rate below ~25 %.
+the true pose median 0.9 mm, 95th percentile 2.3 mm, worst 2.7 mm; yaw error median
+1.1°, worst 3.7°. Every counter look re-fitted the prop about to be restored (30 of 30).
+The remembered row slots restored every prop to its own slot on all ten seeds. Ten
+seeds cannot show a failure rate below ~25 %.
