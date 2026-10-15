@@ -140,3 +140,32 @@ pays FCL against the scene meshes; cuRobo's proposals need fewer starts. Its epi
 starts in every planner process (imports and one CUDA graph per variant: ~2.2 s each
 alone, tens of seconds under load); alone, one proposal call takes 3.4 ms (torso held) to
 17 ms (torso free).
+
+## Batched reachability scan (`curobo_client.scan`)
+
+BIMBO_EvoX's other use of cuRobo: one batched call answers which of many (stand, gripper
+pose) pairs the arm reaches with the torso free — a boolean mask. Take the mask to choose
+where to stand or what to reach for, never the joint solution of a pair (it may be on any
+branch; solve the motion from the current joints). Kinematics only by default, optionally
+with self-collision; the scene is the caller's to check. The server pads every call to
+1024 goals.
+
+`scripts/curobo_reach_map.py` uses it for an offline reach map from one stand (grid
+x 0.2-1.2 m ahead, y ±0.7 m, 2.5 cm steps; 9348 goals per pass), torso free, with
+self-collision:
+
+| height | side grasp (approach level from the base) | top grasp (approach down) |
+|---|---|---|
+| 0.60 m | 9 % of the grid | 73 % |
+| 0.92 m (counter top) | 48 % | 74 % |
+| 1.20 m | 50 % | 79 % |
+| 1.48 m (Depth Recall shelf) | 50 % | 70 % |
+
+A side grasp reaches about 0.8 m ahead of base_link, a top grasp about 1.1 m; at 0.6 m a
+side grasp is mostly blocked by the robot's own body. Four passes (37 392 goals) took
+68 s wall under a full machine load, 4-32 s each.
+
+Not wired into a planner's stand choice: SeasonDish grasps from where the episode puts
+the robot, and its old stand-slide stage bought nothing in a 75-seed A/B (60/75 with,
+59/75 without) — its refusals are collisions with the stove and the counter, which a
+kinematic scan does not see.

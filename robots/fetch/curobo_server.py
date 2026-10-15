@@ -26,7 +26,9 @@ the planner asks one goal at a time.
 
 Ops: ``names`` {variant} -> joint names; ``propose`` {variant, goal (4x4 in the variant's
 base frame), seed (joint values), k} -> up to k solutions seeded with ``seed``, cuRobo's
-best first, with their success flags; ``warmup`` {variants}.
+best first, with their success flags; ``scan`` {variant, goals (N 4x4 in the variant's
+base frame), coll} -> one success flag and solution per goal, batched by `SCAN_BATCH`
+(BIMBO_EvoX's reachability scan: take the mask, never the branch); ``warmup`` {variants}.
 """
 
 from __future__ import annotations
@@ -48,6 +50,9 @@ OUTSIDE = {"torso_lift_link": {"base_link", "r_wheel_link", "l_wheel_link", "est
                                "laser_link", "torso_fixed_link"}}
 VARIANTS = {"torso_arm": ("base_link", ROOTS), "arm": ("torso_lift_link", ROOTS + ("torso_lift_joint",))}
 NUM_SEEDS = 32
+#: Batch of the scan solver: cuRobo pads every call to it (CUDA graphs), so 10 goals cost
+#: what 1024 do; without self-collision a full batch takes ~8 ms on an H100.
+SCAN_BATCH = 1024
 
 
 def build_configs(urdf: Path, out: Path) -> dict:
@@ -129,16 +134,46 @@ class Solvers:
     def __init__(self, paths: dict):
         self.paths, self.ik = paths, {}
 
-    def get(self, variant: str, coll: bool = True):
-        key = (variant, coll)
+    def get(self, variant: str, coll: bool = True, batch: int = 1):
+        key = (variant, coll, batch)
         if key not in self.ik:
             from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
 
             self.ik[key] = InverseKinematics(InverseKinematicsCfg.create(
-                robot=str(self.paths[variant]), num_seeds=NUM_SEEDS, max_batch_size=1,
+                robot=str(self.paths[variant]), num_seeds=NUM_SEEDS, max_batch_size=batch,
                 self_collision_check=coll, load_collision_spheres=coll,
                 position_tolerance=0.002, orientation_tolerance=0.02))
         return self.ik[key]
+
+    def scan(self, variant: str, goals, coll: bool = False) -> dict:
+        """One success flag (and solution) per goal, in batches of `SCAN_BATCH`."""
+        import numpy as np
+        import torch
+        from curobo.types import GoalToolPose, Pose
+
+        ik = self.get(variant, coll, SCAN_BATCH)
+        G = np.asarray(goals, dtype=np.float64).reshape(-1, 4, 4)
+        dof = len(ik.joint_names)
+        ok_all, q_all, ms = [], [], 0.0
+        for start in range(0, len(G), SCAN_BATCH):
+            T = G[start:start + SCAN_BATCH]
+            m = len(T)
+            if m < SCAN_BATCH:
+                T = np.concatenate([T, np.repeat(T[-1:], SCAN_BATCH - m, axis=0)])
+            quat = np.stack([_wxyz(R) for R in T[:, :3, :3]])
+            pose = Pose(position=torch.tensor(T[:, :3, 3], dtype=torch.float32, device="cuda"),
+                        quaternion=torch.tensor(quat, dtype=torch.float32, device="cuda"))
+            ik.reset_seed()
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            r = ik.solve_pose(GoalToolPose.from_poses({ik.tool_frames[0]: pose}, num_goalset=1))
+            torch.cuda.synchronize()
+            ms += (time.perf_counter() - t0) * 1e3
+            ok_all.append(r.success.reshape(SCAN_BATCH, -1)[:m, 0].cpu().numpy().astype(bool))
+            q_all.append(r.solution.reshape(SCAN_BATCH, -1, dof)[:m, 0].double().cpu().numpy())
+        ok = np.concatenate(ok_all) if ok_all else np.zeros(0, bool)
+        q = np.concatenate(q_all) if q_all else np.zeros((0, dof))
+        return dict(names=list(ik.joint_names), ok=ok.tolist(), q=q.tolist(), ms=ms)
 
     def propose(self, variant: str, goal, seed, k: int, coll: bool = True) -> dict:
         import numpy as np
@@ -212,6 +247,8 @@ def handle(solvers: "Solvers", req: dict) -> dict:
             reply = dict(names=list(solvers.get(a["variant"], coll).joint_names))
         elif op == "propose":
             reply = solvers.propose(a["variant"], a["goal"], a["seed"], int(a.get("k", NUM_SEEDS)), coll)
+        elif op == "scan":
+            reply = solvers.scan(a["variant"], a["goals"], a.get("coll", False))
         elif op == "warmup":
             for v in a.get("variants", list(VARIANTS)):
                 ik = solvers.get(v, coll)

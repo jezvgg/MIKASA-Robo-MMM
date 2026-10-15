@@ -175,3 +175,35 @@ def propose(planner, goal_pose, start_qpos, mask) -> list:
         starts.append(full)
     STATS["proposals"] += len(starts)
     return starts
+
+
+def stand_matrix(x: float, y: float, yaw: float) -> np.ndarray:
+    """base_link on the floor at (x, y) facing ``yaw`` (the root joints' pose), as a 4x4."""
+    T = np.eye(4)
+    c, s_ = np.cos(yaw), np.sin(yaw)
+    T[:2, :2] = [[c, -s_], [s_, c]]
+    T[:2, 3] = (x, y)
+    return T
+
+
+def scan(goals_world, stands, *, coll: bool = False):
+    """Which (stand, goal) pairs the arm reaches with the torso free: a ``(len(stands),
+    len(goals))`` boolean mask from ONE batched cuRobo call (plus its solutions).
+
+    ``goals_world`` are gripper_link poses (N, 4, 4) in the world; ``stands`` (M, 3) are
+    base poses (x, y, yaw). Kinematics only (and self-collision with ``coll``): the scene is
+    the caller's to check. BIMBO_EvoX's rule applies: use the mask to choose WHERE to stand
+    or WHAT to reach for; never move to a scan solution, it may be on any branch — solve
+    the motion from the current joints.
+    """
+    G = np.asarray(goals_world, dtype=np.float64).reshape(-1, 4, 4)
+    S = np.asarray(stands, dtype=np.float64).reshape(-1, 3)
+    rel = np.stack([np.linalg.inv(stand_matrix(*st)) @ G for st in S])          # (M, N, 4, 4)
+    t0 = time.perf_counter()
+    r = server().call("scan", variant="torso_arm", goals=rel.reshape(-1, 16).tolist(), coll=bool(coll))
+    STATS["calls"] += 1
+    STATS["server_ms"] += r["ms"]
+    STATS["wall_ms"] += (time.perf_counter() - t0) * 1e3
+    ok = np.asarray(r["ok"], dtype=bool).reshape(len(S), len(G))
+    q = np.asarray(r["q"], dtype=np.float64).reshape(len(S), len(G), -1)
+    return ok, q
