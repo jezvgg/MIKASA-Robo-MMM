@@ -223,17 +223,17 @@ utils/docker/amd64.sh python planners/depth_recall_v1_planner.py --seed 1000 --a
 ```
 
 Measured 2026-10-15 on an H100 server (GPU rendering, CPU physics), development seeds
-1000–1009, the same planner with and without the flag:
+1000–1099, the same planner with and without the flag:
 
-| | success | control steps (median) | welds made / released per episode | grasp misses |
+| | success (95 % interval) | control steps (median) | welds made / released per episode | grasp misses |
 |---|---|---|---|---|
-| `assisted_grasp=False` | 10/10 | 3664 | — | 0 |
-| `assisted_grasp=True` | 10/10 | 3650 | 7 / 7 on every seed | 0 |
+| `assisted_grasp=False` | 100/100 (96–100 %) | 3662 | — | 0 |
+| `assisted_grasp=True` | 100/100 (96–100 %) | 3662 | 7 / 7 on every seed | 0 |
 
 Seven welds per episode are the planner's seven grasps (four extractions, three
 restores); each forms 0.3 s after the fingers close and goes when they open. On this
 task, where friction already holds the 4.5 cm props, the weld neither helps nor hurts
-the oracle. Ten seeds cannot show a rate below ~25 % with any confidence.
+the oracle.
 
 ## Point-cloud perception (experimental, off by default)
 
@@ -247,8 +247,9 @@ work (`utils/mikasa/point_cloud.py`, `planners/depth_recall_v1_perception.py`):
 2. Row and counter slot points come from the static map (the cabinet's row centre, the
    configured slot y's and offsets, shelf and counter heights). The episode shifts the
    whole row sideways by up to 4 cm (`row_jitter_x`), which no image observation states:
-   the first look from the dock measures that shift (median x of the accepted fits) and
-   every row and counter point after it carries the measured x.
+   the first look from the dock measures that shift (median x of the accepted fits),
+   the base re-docks on the measured row when it is more than 1 cm off, and every row
+   and counter point after it carries the measured x.
 3. A height band over the support within 10 cm of a slot point is clustered on a 2 cm
    voxel grid; a cluster is named by hue — colour is the prop's identity in this task by
    design.
@@ -273,20 +274,23 @@ logs its fit and, for the log only, its error against the true pose; the row shi
 its error against the episode's row x.
 
 Measured 2026-10-15 on an H100 server (GPU rendering, CPU physics), development seeds
-1000–1009, the same planner in three modes:
+1000–1099, the same planner in three modes:
 
-| prop poses from | success | control steps (median) |
+| prop poses from | success (95 % interval) | control steps (median) |
 |---|---|---|
-| simulator (`state`) | 10/10 | 3664 |
-| cameras (`pointcloud`) | 10/10 | 3614 |
-| cameras + `--assisted-grasp` | 10/10 | 3616 |
+| simulator (`state`) | 100/100 (96–100 %) | 3662 |
+| cameras (`pointcloud`) | 99/100 (95–100 %) | 3767 |
+| cameras + `--assisted-grasp` | 100/100 (96–100 %) | 3772 |
 
 The row's sideways shift measured at the dock, against the episode's: error median
-0.9 mm, worst 7.6 mm (two accepted fits on that seed) for shifts up to 4.0 cm. The base
-docks at the map's row x before the shift is known; on the seed with the full 4 cm shift
-one restore needed the sag correction and the episode ran ~230 steps longer.
-Wrist-camera re-fits before a grasp: 70 of 70 accepted per mode; position error against
-the true pose median 0.9 mm, 95th percentile 2.3 mm, worst 2.7 mm; yaw error median
-1.1°, worst 3.7°. Every counter look re-fitted the prop about to be restored (30 of 30).
-The remembered row slots restored every prop to its own slot on all ten seeds. Ten
-seeds cannot show a failure rate below ~25 %.
+0.4 mm, 95th percentile 4.2 mm, worst 10.6 mm, for shifts up to 4 cm. Wrist-camera
+re-fits before a grasp: 697 of 699 and 700 of 700 accepted; position error against the
+true pose median 1.0 mm, 95th percentile 2.4 mm, worst 3.6 mm; yaw error median 1.0°,
+worst 7.0°. The camera modes run ~100 steps longer: the re-dock and the extra looks.
+
+The one failure (seed 1070) is a planner motion, not a fit: the arm's move into the
+counter grasp posture knocked the target prop onto its side, and the wrist camera then
+refused, rightly, to fit an upright prop to a lying one. Before the re-dock the camera
+modes scored 98/100 and 99/100; all three failures were a counter grasp stroke, made
+from a stance up to 4 cm aside of the simulator mode's, knocking the neighbouring prop
+over (traced by replaying the seeds with the true poses logged).
