@@ -109,13 +109,13 @@ def ag_env():
     env.close()
 
 
-def _action(env, gripper, torso_delta=0.0):
+def _action(env, gripper, torso_delta=0.0, yaw_rate=0.0):
     """ds_fetch pd_joint_pos: [arm 7, gripper 1, head pan, head tilt, torso, forward, yaw]."""
     ctrls = env.unwrapped.agent.controller.controllers
     arm = ctrls["arm"].qpos[0].cpu().numpy()
     body = ctrls["body"].qpos[0].cpu().numpy().copy()
     body[-1] += torso_delta
-    return np.hstack([arm, [gripper], body, [0.0, 0.0]]).astype(np.float32)
+    return np.hstack([arm, [gripper], body, [0.0, yaw_rate]]).astype(np.float32)
 
 
 def _torso_room(env):
@@ -178,6 +178,31 @@ def test_weld_follows_the_hand_then_lets_go_on_open(ag_env):
     assert float(task.props[0].pose.p[0, 2]) < z_release - 0.05, "released prop should fall"
 
 
+def _angle_deg(a, b) -> float:
+    """Rotation between two sapien poses' orientations, degrees."""
+    w = abs(float((a.inv() * b).q[0]))
+    return float(np.degrees(2 * np.arccos(min(1.0, w))))
+
+
+def test_weld_holds_orientation_when_the_hand_turns(ag_env):
+    """A weld locks rotation too. Turning the base swings the hand about the vertical;
+    a joint that locked only translation would leave the prop facing the old way
+    (the first version did: its cone limit did not lock the swing axes)."""
+    task = ag_env.unwrapped
+    ag_env.reset(seed=0)
+    ag_env.step(_action(ag_env, -1.0))
+    _float_prop_at_hand(task, 0)
+    task._ag.attach(0)
+    before, hand0 = _rel(task, 0), task._ag.hand.pose.sp
+    for _ in range(15):
+        ag_env.step(_action(ag_env, -1.0, yaw_rate=0.6))
+    turned = _angle_deg(hand0, task._ag.hand.pose.sp)
+    assert turned > 10, f"the hand turned only {turned:.1f} deg"
+    drift = _angle_deg(before, _rel(task, 0))
+    assert drift < 1.0, f"the hand turned {turned:.1f} deg, the prop lagged {drift:.1f} deg"
+    assert np.linalg.norm(_rel(task, 0).p - before.p) < 2e-3, "the weld slipped"
+
+
 def test_checkpoint_keeps_the_weld(ag_env):
     task = ag_env.unwrapped
     ag_env.reset(seed=0)
@@ -191,6 +216,35 @@ def test_checkpoint_keeps_the_weld(ag_env):
     task.set_state_dict(state)
     assert task._ag.held_index() == 1
     assert np.allclose(task._ag.rel_pose, np.asarray(state["ag_rel_pose"]).reshape(-1), atol=1e-6)
+
+
+def _enabled(task):
+    return [i for i, c in enumerate(task._ag._drives) if c.is_enabled]
+
+
+def test_a_state_without_the_rule_drops_the_weld(ag_env):
+    """`env.set_state` restores actors and articulations only; the old weld must not
+    survive it and drag the restored prop to the hand."""
+    task = ag_env.unwrapped
+    ag_env.reset(seed=0)
+    state = {k: v for k, v in task.get_state_dict().items() if not k.startswith("ag_")}
+    ag_env.step(_action(ag_env, -1.0))
+    _float_prop_at_hand(task, 0)
+    task._ag.attach(0)
+    assert _enabled(task) == [0]
+    task.set_state_dict(state)
+    assert task._ag.held_index() == -1 and _enabled(task) == []
+
+
+def test_attach_replaces_the_previous_weld(ag_env):
+    task = ag_env.unwrapped
+    ag_env.reset(seed=0)
+    ag_env.step(_action(ag_env, -1.0))
+    _float_prop_at_hand(task, 0)
+    task._ag.attach(0)
+    _float_prop_at_hand(task, 1, ahead=0.20)
+    task._ag.attach(1)
+    assert task._ag.held_index() == 1 and _enabled(task) == [1]
 
 
 def test_closing_on_a_prop_attaches_by_the_rule(ag_env):

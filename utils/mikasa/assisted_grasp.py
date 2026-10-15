@@ -16,10 +16,13 @@ as both implement it:
 * **release** — the moment the gripper stops applying; a new grasp is refused for
   ``release_s`` (1/30 s).
 
-Here the joint is a ``PhysxDriveComponent`` with every limit at zero, created once per
-object when the task is built and toggled with ``enable``/``disable``. Measured on
-mani_skill 3.0.1, CPU: an object welded 13 cm from the hand followed it with 0.0 mm
-drift and fell when the drive was disabled. CPU simulation only (one env): under GPU
+Here the joint is a ``PhysxDriveComponent`` created once per object when the task is
+built and toggled with ``enable``/``disable``: its x/y/z and twist limits at zero lock
+the position and one axis of rotation, and a stiff slerp drive to the identity locks the
+other two (a zero cone limit does NOT: with it alone a hand turned 76.6 deg and the
+welded prop did not turn at all). Measured on mani_skill 3.0.0b22, CPU: a welded prop
+follows the hand in position and orientation and falls when the drive is disabled
+(``test_assisted_grasp.py``). CPU simulation only (one env): under GPU
 simulation the drives would have to exist before ``gpu_init`` and toggling them there is
 untested, so the constructor refuses.
 
@@ -59,6 +62,10 @@ class AssistedGraspConfig:
     7.6 cm apart), so the first ~1.5 cm of every ray is finger."""
     max_ray_skips: int = 64
     "Upper bound on robot shapes skipped per ray (64 x 2 mm covers the 10 cm opening)."
+    weld_stiffness: float = 1e6
+    "N m/rad of the slerp drive that holds the welded orientation."
+    weld_damping: float = 1e4
+    "N m s/rad of the same drive."
 
 
 class GraspWindow:
@@ -184,7 +191,10 @@ class AssistedGrasp:
             for set_limit in (component.set_limit_x, component.set_limit_y, component.set_limit_z):
                 set_limit(0, 0)
             component.set_limit_twist(0, 0)
-            component.set_limit_cone(0, 0)
+            # The swing axes: a cone limit does not lock them on a drive, a stiff slerp
+            # drive to the identity does.
+            component.set_drive_property_slerp(self.cfg.weld_stiffness, self.cfg.weld_damping)
+            component.set_drive_target(sapien.Pose())
             component.disable()
             self._drives.append(component)
         self.rel_pose = np.zeros(7, dtype=np.float32)
@@ -214,6 +224,13 @@ class AssistedGrasp:
         import sapien
 
         if "ag_window" not in state:
+            # A state saved without the rule (e.g. `env.set_state` of actors and
+            # articulations only): no weld survives it, or the old one would yank the
+            # restored prop to the hand on the next step.
+            for component in self._drives:
+                component.disable()
+            self.window.reset()
+            self.rel_pose[:] = 0.0
             return
         window = np.asarray(state["ag_window"]).reshape(-1)[:4]
         self.window.load(window)
@@ -308,6 +325,8 @@ class AssistedGrasp:
 
         The rule still governs the release: with the gripper commanded open, the next
         physics step lets go."""
+        for component in self._drives:
+            component.disable()
         self.window.reset()
         self.window.held = int(i)
         self._attach_here(int(i))
