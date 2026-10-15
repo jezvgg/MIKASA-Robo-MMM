@@ -1117,7 +1117,14 @@ if __name__ == "__main__":
                     help="weld props to the hand by OmniGibson's rule (changes the physics)")
     ap.add_argument("--perception", choices=("state", "pointcloud"), default="state",
                     help="where prop poses come from: the simulator, or the robot's cameras")
+    ap.add_argument("--ik-starts", choices=("random", "fixed"), default=None,
+                    help="IK restarts: mplib's random draws, or a fixed table (robots/fetch/ik_backend.py)")
+    ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None,
+                    help="IK proposals from mplib alone, or from cuRobo (needs MIKASA_CUROBO_PY)")
     args = ap.parse_args()
+    for flag, var in ((args.ik_starts, "MIKASA_IK_STARTS"), (args.ik_backend, "MIKASA_IK_BACKEND")):
+        if flag is not None:
+            os.environ[var] = flag
     e = gym.make("MikasaDepthRecall-v1", num_envs=1, robot_uids="ds_fetch",
                  control_mode="pd_joint_pos", obs_mode="state", sim_backend="cpu",
                  assisted_grasp=args.assisted_grasp)
