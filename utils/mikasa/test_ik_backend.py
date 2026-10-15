@@ -45,6 +45,10 @@ def planner():
         solver = common.default_planner_factory(env, False, False)
     except Exception as exc:  # no RoboCasa assets, no mplib build, ...
         pytest.skip(f"the Fetch planner cannot be built here: {exc!r}")
+    # The simulator's posture, as the planners pass it. Not `planner.robot.get_qpos()`:
+    # mplib leaves its model at the last configuration it checked, joints wrapped.
+    sim = env.unwrapped.agent.robot.get_qpos().cpu().numpy()[0]
+    solver.planner._test_q0 = np.asarray(solver.planner.fold_qpos(sim), dtype=np.float64)
     yield solver.planner
     env.close()
 
@@ -58,7 +62,7 @@ def _col(names, suffix):
 def _problem(p, seed=0):
     """(goal pose, start qpos, mask holding all but the arm, target arm joints)."""
     names = list(p.user_joint_names)
-    q0 = np.asarray(p.robot.get_qpos(), dtype=np.float64)
+    q0 = p._test_q0.copy()
     arm = [_col(names, j) for j in ARM]
     rng = np.random.default_rng(seed)
     move = p.move_group_joint_indices
@@ -121,6 +125,7 @@ def test_fixed_starts_repeat_and_leave_mplib_rng_alone(planner, monkeypatch):
     untouched = planner.pinocchio_model.get_random_configuration()
     assert np.array_equal(after, untouched), "fixed starts drew from mplib's generator"
     mplib.set_global_seed(123)                       # a different generator state changes nothing
+    planner.__dict__.pop("_mikasa_ik_requests", None)   # a new episode: the request is new again
     second = planner.IK(goal, q0, mask, n_init_qpos=12)
     assert first[0] == "Success" and second[0] == "Success"
     assert len(first[1]) == len(second[1])
@@ -171,3 +176,62 @@ def test_curobo_client_frames_and_seed_on_a_stub(planner, monkeypatch, tmp_path)
         return (np.asarray(d) + np.pi) % (2 * np.pi) - np.pi
 
     assert min(np.linalg.norm(turn(g[arm] - target_arm)) for g in goals) < 0.1
+
+
+def test_fixed_starts_retry_takes_the_next_block(planner, monkeypatch):
+    from robots.fetch import ik_backend
+
+    monkeypatch.setenv("MIKASA_IK_STARTS", "fixed")
+    planner.__dict__.pop("_mikasa_ik_requests", None)
+    goal, q0, mask, _ = _problem(planner, seed=3)
+    assert ik_backend.retry_index(planner, goal, q0, mask) == 0
+    assert ik_backend.retry_index(planner, goal, q0, mask) == 1
+    a, b = ik_backend.fixed_starts(planner, 5, 0), ik_backend.fixed_starts(planner, 5, 1)
+    assert not np.allclose(a, b)
+    assert np.array_equal(ik_backend.fixed_starts(planner, 5, 1), b)
+
+
+def test_curobo_client_on_a_shared_socket(planner, monkeypatch, tmp_path):
+    """The shared-server path: connect to a socket instead of starting a process."""
+    import socket
+    import threading
+
+    from robots.fetch import curobo_client
+
+    goal, q0, mask, target_arm = _problem(planner, seed=2)
+    path = tmp_path / "curobo.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen()
+    asked = []
+
+    def serve():
+        conn, _ = srv.accept()
+        with conn, conn.makefile("r") as rd, conn.makefile("w") as wr:
+            wr.write("CUROBO " + json.dumps({"id": 0, "ready": True}) + "\n")
+            wr.flush()
+            for line in rd:
+                req = json.loads(line)
+                asked.append(req["op"])
+                out = {"id": req["id"], "names": list(ARM)}
+                if req["op"] == "propose":
+                    out.update(q=[[float(v) for v in target_arm]], ok=[True], ms=1.0)
+                wr.write("CUROBO " + json.dumps(out) + "\n")
+                wr.flush()
+
+    threading.Thread(target=serve, daemon=True).start()
+    monkeypatch.setenv("MIKASA_IK_BACKEND", "curobo")
+    monkeypatch.delenv("MIKASA_IK_STARTS", raising=False)
+    monkeypatch.delenv("MIKASA_CUROBO_PY", raising=False)
+    monkeypatch.setenv("MIKASA_CUROBO_SOCKET", str(path))
+    curobo_client._SERVER.clear()
+    try:
+        status, goals = planner.IK(goal, q0, mask, n_init_qpos=4)
+    finally:
+        s = curobo_client._SERVER.pop("s", None)
+        if s is not None:
+            s.close()
+        curobo_client._SERVER.clear()
+        srv.close()
+    assert asked == ["names", "propose"]
+    assert status == "Success" and goals

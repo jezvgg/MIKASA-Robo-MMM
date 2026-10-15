@@ -1,8 +1,13 @@
 """cuRobo IK proposals for ds_fetch, served over a pipe. Runs under cuRobo's OWN venv.
 
     <curobo venv>/bin/python curobo_server.py --urdf robots/fetch/fetch.urdf [--cache DIR]
+    <curobo venv>/bin/python curobo_server.py --urdf ... --socket PATH     # shared, long-lived
 
-Started by `curobo_client.py`; never imported by the simulator's venv (cuRobo pins its own
+Started by `curobo_client.py` (one per planner process, over a pipe), or once by hand
+with ``--socket``: then every planner process that sets ``MIKASA_CUROBO_SOCKET`` connects
+to it, and the start-up (importing torch and cuRobo, recording a CUDA graph per variant)
+is paid once instead of per episode. Requests from all connections run one at a time.
+Never imported by the simulator's venv (cuRobo pins its own
 torch, warp and numpy, and switches TF32 on globally). Requests and replies are JSON
 lines; replies carry the prefix ``CUROBO `` so cuRobo's own prints cannot be mistaken
 for one.
@@ -180,42 +185,88 @@ def _wxyz(R):
     return q / np.linalg.norm(q)
 
 
+def serve(solvers: "Solvers", lines, out, hello: dict, lock=None) -> None:
+    """Answer JSON requests from ``lines`` on ``out`` until the input ends."""
+    import contextlib
+
+    out.write(PREFIX + json.dumps(hello) + "\n")
+    out.flush()
+    for line in lines:
+        if not line.strip():
+            continue
+        req = json.loads(line)
+        with lock if lock is not None else contextlib.nullcontext():
+            reply = handle(solvers, req)
+        out.write(PREFIX + json.dumps(reply) + "\n")
+        out.flush()
+
+
+def handle(solvers: "Solvers", req: dict) -> dict:
+    """One request -> its reply; an error is reported to the client, the server stays up."""
+    import numpy as np
+
+    try:
+        op, a = req["op"], req.get("args", {})
+        coll = a.get("coll", True)
+        if op == "names":
+            reply = dict(names=list(solvers.get(a["variant"], coll).joint_names))
+        elif op == "propose":
+            reply = solvers.propose(a["variant"], a["goal"], a["seed"], int(a.get("k", NUM_SEEDS)), coll)
+        elif op == "warmup":
+            for v in a.get("variants", list(VARIANTS)):
+                ik = solvers.get(v, coll)
+                solvers.propose(v, np.eye(4).tolist(), [0.0] * len(ik.joint_names), 4, coll)
+            reply = dict(ok=True)
+        else:
+            raise ValueError(f"unknown op {op!r}")
+    except Exception as exc:
+        reply = dict(error=f"{type(exc).__name__}: {exc}")
+    reply["id"] = req.get("id")
+    return reply
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--urdf", type=Path, required=True)
     ap.add_argument("--cache", type=Path, default=Path.home() / ".cache" / "mikasa-curobo")
+    ap.add_argument("--socket", type=Path, help="serve many clients on this Unix socket")
     args = ap.parse_args()
     urdf = args.urdf.resolve()
     digest = hashlib.sha256(urdf.read_bytes()).hexdigest()[:16]
     solvers = Solvers(build_configs(urdf, args.cache / digest))
     no_grad_graph_replays()
-    out = sys.stdout
-    out.write(PREFIX + json.dumps({"id": 0, "ready": True, "cache": str(args.cache / digest)}) + "\n")
-    out.flush()
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        req = json.loads(line)
-        try:
-            op, a = req["op"], req.get("args", {})
-            if op == "names":
-                reply = dict(names=list(solvers.get(a["variant"], a.get("coll", True)).joint_names))
-            elif op == "propose":
-                reply = solvers.propose(a["variant"], a["goal"], a["seed"], int(a.get("k", NUM_SEEDS)),
-                                        a.get("coll", True))
-            elif op == "warmup":
-                for v in a.get("variants", list(VARIANTS)):
-                    ik = solvers.get(v, a.get("coll", True))
-                    import numpy as np
-                    solvers.propose(v, np.eye(4).tolist(), [0.0] * len(ik.joint_names), 4, a.get("coll", True))
-                reply = dict(ok=True)
-            else:
-                raise ValueError(f"unknown op {op!r}")
-            reply["id"] = req.get("id")
-        except Exception as exc:  # the client decides; the server stays up
-            reply = dict(id=req.get("id"), error=f"{type(exc).__name__}: {exc}")
-        out.write(PREFIX + json.dumps(reply) + "\n")
-        out.flush()
+    hello = {"id": 0, "ready": True, "cache": str(args.cache / digest)}
+    if args.socket is None:
+        serve(solvers, sys.stdin, sys.stdout, hello)
+        return
+    import socket
+    import threading
+
+    handle(solvers, {"op": "warmup", "args": {}})          # record the graphs before anyone waits
+    lock = threading.Lock()
+    path = args.socket.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.unlink()
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen()
+    print(f"curobo server listening on {path}", file=sys.stderr, flush=True)
+
+    def client(conn):
+        with conn, conn.makefile("r") as rd, conn.makefile("w") as wr:
+            try:
+                serve(solvers, rd, wr, hello, lock)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    try:
+        while True:
+            conn, _ = srv.accept()
+            threading.Thread(target=client, args=(conn,), daemon=True).start()
+    finally:
+        srv.close()
+        path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

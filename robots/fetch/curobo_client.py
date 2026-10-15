@@ -9,8 +9,11 @@ Frames: mplib's goal is in the planning model's frame; the server's variants are
 at base_link (torso free) or torso_lift_link (torso held, i.e. masked by the caller), so
 the goal is re-expressed in that link's frame from mplib's own FK at the start qpos.
 
-``MIKASA_CUROBO_SEEDS`` (default 32) is how many proposals one call asks for; failures
-of the server are raised, never silently replaced by mplib.
+``MIKASA_CUROBO_SOCKET`` names a shared server started once with ``--socket`` (see
+`curobo_server.py`): the client connects to it instead of starting its own, so the
+start-up is not paid per episode. ``MIKASA_CUROBO_SEEDS`` (default 32) is how many
+proposals one call asks for; failures of the server are raised, never silently replaced
+by mplib.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ from queue import Empty, Queue
 import numpy as np
 
 PY_ENV, SEEDS_ENV, CACHE_ENV = "MIKASA_CUROBO_PY", "MIKASA_CUROBO_SEEDS", "MIKASA_CUROBO_CACHE"
-SERVER_ENV = "MIKASA_CUROBO_SERVER"
+SERVER_ENV, SOCKET_ENV = "MIKASA_CUROBO_SERVER", "MIKASA_CUROBO_SOCKET"
 PREFIX = "CUROBO "
 TIMEOUT_S = float(os.environ.get("MIKASA_CUROBO_TIMEOUT_S", "900"))   # cold start builds the model
 ARM = ("shoulder_pan_joint", "shoulder_lift_joint", "upperarm_roll_joint", "elbow_flex_joint",
@@ -38,19 +41,20 @@ STATS = dict(calls=0, proposals=0, server_ms=0.0, wall_ms=0.0, start_s=None)
 
 
 class _Server:
-    def __init__(self, python: str):
-        here = Path(__file__).resolve().parent
-        script = os.environ.get(SERVER_ENV) or str(here / "curobo_server.py")    # a stub in tests
-        cmd = [python, "-u", script, "--urdf", str(here / "fetch.urdf")]
-        if os.environ.get(CACHE_ENV):
-            cmd += ["--cache", os.environ[CACHE_ENV]]
-        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH")}
-        env["PYTHONNOUSERSITE"] = "1"
+    def __init__(self, python: str | None, socket_path: str | None = None):
         t0 = time.perf_counter()
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-                                     env=env, start_new_session=True)
         self.lines: Queue = Queue()
         self.next_id = 1
+        self.proc = self.sock = None
+        if socket_path:
+            import socket
+
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.connect(socket_path)
+            self.reader, self.writer = self.sock.makefile("r"), self.sock.makefile("w")
+        else:
+            self._spawn(python)
+            self.reader, self.writer = self.proc.stdout, self.proc.stdin
         threading.Thread(target=self._pump, daemon=True).start()
         ready = self._read()
         if not ready.get("ready"):
@@ -58,8 +62,19 @@ class _Server:
         STATS["start_s"] = round(time.perf_counter() - t0, 1)
         atexit.register(self.close)
 
+    def _spawn(self, python: str):
+        here = Path(__file__).resolve().parent
+        script = os.environ.get(SERVER_ENV) or str(here / "curobo_server.py")    # a stub in tests
+        cmd = [python, "-u", script, "--urdf", str(here / "fetch.urdf")]
+        if os.environ.get(CACHE_ENV):
+            cmd += ["--cache", os.environ[CACHE_ENV]]
+        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH")}
+        env["PYTHONNOUSERSITE"] = "1"
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                     env=env, start_new_session=True)
+
     def _pump(self):
-        for line in self.proc.stdout:
+        for line in self.reader:
             if line.startswith(PREFIX):
                 self.lines.put(line[len(PREFIX):])
         self.lines.put("")
@@ -70,19 +85,23 @@ class _Server:
         except Empty:
             raise RuntimeError(f"curobo server: no reply in {TIMEOUT_S:.0f} s") from None
         if not line:
-            raise RuntimeError(f"curobo server exited (rc={self.proc.poll()})")
+            raise RuntimeError("curobo server closed the connection" if self.sock else
+                               f"curobo server exited (rc={self.proc.poll()})")
         return json.loads(line)
 
     def call(self, op: str, **args) -> dict:
         rid, self.next_id = self.next_id, self.next_id + 1
-        self.proc.stdin.write(json.dumps(dict(id=rid, op=op, args=args)) + "\n")
-        self.proc.stdin.flush()
+        self.writer.write(json.dumps(dict(id=rid, op=op, args=args)) + "\n")
+        self.writer.flush()
         reply = self._read()
         if "error" in reply:
             raise RuntimeError(f"curobo server: {reply['error']}")
         return reply
 
     def close(self):
+        if self.sock is not None:          # a shared server stays up for the next client
+            self.sock.close()
+            return
         if self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -93,10 +112,11 @@ class _Server:
 
 def server() -> _Server:
     if "s" not in _SERVER:
-        python = os.environ.get(PY_ENV)
-        if not python:
-            raise RuntimeError(f"MIKASA_IK_BACKEND=curobo needs {PY_ENV}: the python of a venv with cuRobo")
-        _SERVER["s"] = _Server(python)
+        python, sock = os.environ.get(PY_ENV), os.environ.get(SOCKET_ENV)
+        if not python and not sock:
+            raise RuntimeError(f"MIKASA_IK_BACKEND=curobo needs {SOCKET_ENV} (a shared server) or "
+                               f"{PY_ENV} (the python of a venv with cuRobo)")
+        _SERVER["s"] = _Server(python, sock)
         atexit.register(_report)
     return _SERVER["s"]
 
