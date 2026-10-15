@@ -185,3 +185,50 @@ Those failures and their diagnostic trajectories remain in the attempt logs;
 they were not discarded from the reported SR. Staging area was sufficient in all
 100 development cases, so this release keeps the countertop and slot spacing.
 Historical 197/200 results using a modified robot are not current qualification.
+
+## Assisted grasp (experimental, off by default)
+
+`MikasaDepthRecall-v1` accepts `assisted_grasp=True`. The prop is then welded to the
+hand by OmniGibson's assisted-grasp rule, the one BEHAVIOR's own evaluator runs and
+BIMBO_EvoX reproduced (`utils/mikasa/assisted_grasp.py`):
+
+- the gripper is commanded anywhere below fully open;
+- both fingers touch the prop and at least one of four rays between the finger pads
+  hits it first (a closed hand pushing from outside touches without a ray hit and never
+  attaches); the nearest such prop is the candidate;
+- the same candidate for 0.3 s of physics steps — then a fixed PhysX drive joins hand
+  and prop at their current relative pose;
+- the weld goes the moment the gripper is commanded fully open; a new one is refused
+  for 1/30 s.
+
+The rule runs in `_after_simulation_step`, i.e. on every 100 Hz physics step. The
+drives are made once per build and only enabled or disabled; the weld state is part of
+`get_state_dict`. CPU simulation, one env only.
+
+**It changes the task.** Friction lets a prop slip; the weld does not. Demos recorded
+with it and policies evaluated on them belong to a different variant, and both sides
+must run with the same setting. Nothing above under "Qualified implementation" was
+measured with it; the default (`False`) keeps that behaviour.
+
+Enable it with `gym.make("MikasaDepthRecall-v1", ..., assisted_grasp=True)`, the
+planner's `--assisted-grasp`, or `"assisted_grasp": true` in a profile's `env_kwargs`.
+On a Mac, run under amd64 emulation (mplib has no macOS wheels):
+
+```
+utils/docker/amd64.sh python -m pytest -q utils/mikasa/test_assisted_grasp.py
+utils/docker/amd64.sh python planners/depth_recall_v1_planner.py --seed 1000 --assisted-grasp
+```
+
+Measured 2026-10-15, CPU under amd64 emulation (`utils/docker/amd64.sh`), development
+seeds 1000–1009, the same planner with and without the flag:
+
+| | success | control steps (median) | welds made / released per episode | grasp misses |
+|---|---|---|---|---|
+| `assisted_grasp=False` | 10/10 | 3665 | — | 0 |
+| `assisted_grasp=True` | 10/10 | 3651 | 7 / 7 on every seed | 0 |
+
+Seven welds per episode are the planner's seven grasps (four extractions, three
+restores); each forms 0.3 s after the fingers close and goes when they open. On this
+task, where friction already holds the 4.5 cm props, the weld neither helps nor hurts
+the oracle; wall time grows about 10 % (the per-step rule). Ten seeds cannot show a rate
+below ~25 % with any confidence.

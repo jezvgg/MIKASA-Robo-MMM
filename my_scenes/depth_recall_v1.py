@@ -35,6 +35,7 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneBuilder
 from mani_skill.utils.structs import Pose
 
+from utils.mikasa.assisted_grasp import AssistedGrasp
 from utils.robocasa_utils import parking_pose, require_get_fixture, restore_task_tensor
 
 #: Everything `get_state_dict` adds beyond sim state. All of it is task MEMORY or a
@@ -254,9 +255,15 @@ class DepthRecallV1Task(BaseEnv):
 
     cfg = DepthRecallV1Config()
 
-    def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0, **kwargs):
+    def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0,
+                 assisted_grasp: bool = False, **kwargs):
+        """``assisted_grasp=True`` welds a prop to the hand by OmniGibson's rule
+        (`utils/mikasa/assisted_grasp.py`). Off by default: it changes the physics, so
+        demos and evaluations made with it are a different task and must say so."""
         self.cfg.validate()
         self.scene_idx = scene_idx
+        self.assisted_grasp = bool(assisted_grasp)
+        self._ag = None
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     # ---------------------------------------------------------------- sensors --
@@ -394,9 +401,15 @@ class DepthRecallV1Task(BaseEnv):
         # `evaluate()` runs at t=0 inside reset() and is called out of band by the
         # diagnose scripts; a counter that advanced on every call would be wrong twice.
         self.last_eval_step = torch.full((n,), -1, dtype=torch.int32, device=dev)
+        # The props and the agent exist now; the drives are made once per build.
+        self._ag = AssistedGrasp(self, self.props) if self.assisted_grasp else None
         return super()._after_reconfigure(options)
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        # Release any weld BEFORE the props are posed: an enabled drive would pull the
+        # freshly spawned prop back to the hand on the first physics step.
+        if self._ag is not None:
+            self._ag.reset()
         with torch.device(self.device):
             b = len(env_idx)
             self.scene_builder.initialize(env_idx)
@@ -490,6 +503,12 @@ class DepthRecallV1Task(BaseEnv):
         q[env_idx, 2] = math.radians(self.cfg.start_yaw_deg) + jx[:, 2] * self.cfg.start_jitter_yaw
         self.agent.robot.set_qpos(q[env_idx])
         self.agent.robot.set_qvel(torch.zeros_like(q[env_idx]))
+
+    def _after_simulation_step(self):
+        # The rule runs on every physics step, as OmniGibson's does: contacts and rays
+        # after the step, the weld switched before the next one.
+        if self._ag is not None:
+            self._ag.after_substep()
 
     # --------------------------------------------------------------- evaluate --
 
@@ -591,7 +610,14 @@ class DepthRecallV1Task(BaseEnv):
         self.last_eval_step = torch.where(advance, step, self.last_eval_step)
         self.succeeded = self.succeeded | (self.arrangement_hold >= cfg.hold_steps)
 
+        extra = {}
+        ag = getattr(self, "_ag", None)
+        if ag is not None:
+            # Which prop is welded to the hand, -1 for none. Not an observation.
+            extra["ag_held"] = torch.full((n,), ag.held_index(), dtype=torch.long,
+                                          device=pos.device)
         return {
+            **extra,
             # Keep historical completion separate from a valid final arrangement.
             "success": raw & (self.arrangement_hold >= cfg.hold_steps),
             "success_once": self.succeeded,
@@ -664,6 +690,10 @@ class DepthRecallV1Task(BaseEnv):
             state[key] = getattr(self, key).clone()
         state["row_points"] = self._row_points.reshape(self.num_envs, -1).clone()
         state["slot_points"] = self._slot_points.reshape(self.num_envs, -1).clone()
+        if self._ag is not None:
+            # Which prop is welded and where: without it a restored checkpoint drops a
+            # held prop the moment physics resumes.
+            state.update(self._ag.state_dict())
         return state
 
     def set_state_dict(self, state: dict, env_idx: torch.Tensor = None):
@@ -682,3 +712,5 @@ class DepthRecallV1Task(BaseEnv):
                 flat = restore_task_tensor(
                     getattr(self, attr).reshape(self.num_envs, -1), state[key], self.device)
                 setattr(self, attr, flat.reshape(getattr(self, attr).shape))
+        if self._ag is not None:
+            self._ag.load_state_dict(state)

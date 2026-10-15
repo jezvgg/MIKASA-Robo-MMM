@@ -975,9 +975,17 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--blind", action="store_true")
     ap.add_argument("--no-video", action="store_true")
+    ap.add_argument("--assisted-grasp", action="store_true",
+                    help="weld props to the hand by OmniGibson's rule (changes the physics)")
     args = ap.parse_args()
     e = gym.make("MikasaDepthRecall-v1", num_envs=1, robot_uids="ds_fetch",
-                 control_mode="pd_joint_pos", obs_mode="state", sim_backend="cpu")
+                 control_mode="pd_joint_pos", obs_mode="state", sim_backend="cpu",
+                 assisted_grasp=args.assisted_grasp)
     out = solve(e, seed=args.seed, blind=args.blind)
     print("no_plan" if isinstance(out, int) else f"success={_b(out[-1], 'success')}")
+    ag = getattr(e.unwrapped, "_ag", None)
+    if ag is not None:
+        kinds = [k for _, k, _ in ag.events]
+        print(f"assisted_grasp establish={kinds.count('establish')} "
+              f"release={kinds.count('release')} events={ag.events}")
     e.close()
