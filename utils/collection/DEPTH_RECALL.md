@@ -201,6 +201,9 @@ BIMBO_EvoX reproduced (`utils/mikasa/assisted_grasp.py`):
 - the weld goes the moment the gripper is commanded fully open; a new one is refused
   for 1/30 s.
 
+How close this is to OmniGibson's own code, point by point, and what differs:
+`utils/mikasa/ASSISTED_GRASP_FIDELITY.md`.
+
 The rule runs in `_after_simulation_step`, i.e. on every 100 Hz physics step. The
 drives are made once per build and only enabled or disabled; the weld state is part of
 `get_state_dict`. CPU simulation, one env only.
@@ -232,3 +235,47 @@ restores); each forms 0.3 s after the fingers close and goes when they open. On 
 task, where friction already holds the 4.5 cm props, the weld neither helps nor hurts
 the oracle; wall time grows about 10 % (the per-step rule). Ten seeds cannot show a rate
 below ~25 % with any confidence.
+
+## Point-cloud perception (experimental, off by default)
+
+`planners/depth_recall_v1_planner.py --perception pointcloud` (or
+`solve(..., perception="pointcloud")`) makes every prop pose the planner acts on an
+estimate from the robot's own cameras, the way BIMBO_EvoX's observation-only planners
+work (`utils/mikasa/point_cloud.py`, `planners/depth_recall_v1_perception.py`):
+
+1. Depth of the two base cameras and the wrist camera is back-projected into the world;
+   points inside the robot's link collision boxes (and the carried prop) are cut out.
+2. A height band over the support (shelf or counter, from the static scene) within 10 cm
+   of a known stand point (row or counter slot) is clustered on a 2 cm voxel grid; a
+   cluster is named by hue — colour is the prop's identity in this task by design.
+3. A 1500-point model of the prop is fitted by trimmed planar ICP from a 15° yaw grid,
+   started at the nearest stand point, and accepted only with inliers (8 mm) >= 0.55,
+   RMS <= 1.2 cm and no more than 30 % of the model "seen through" by a camera. A cluster
+   too small to fit keeps its stand point as a coarse estimate.
+4. From the dock the base cameras pick the front-most prop and remember the row slot it
+   was seen in; that memory, not the episode's answer, drives the restore. A prop seen
+   behind an unseen front one stops the episode rather than driving into the front one.
+5. At the stand each grasp is made from, the wrist camera re-fits the prop (every rung of
+   the grasp ladder). After the grasp the prop's pose is the hand's pose times the
+   transform frozen at the grasp.
+
+Still read from the simulator in this mode: the planning world's collision geometry
+(mplib mirrors the scene, props at their true poses), `is_grasping`, the collision mesh
+attached by `hold_object_in_planner`, and the static scene map (shelf height, cabinet and
+counter footprints, row and counter slot points — the last two are also in the policy's
+observation). Every perception step logs its fit and, for the log only, its error
+against the true pose.
+
+Measured 2026-10-15, CPU under amd64 emulation, development seeds 1000–1009, the same
+planner in three modes:
+
+| prop poses from | success | control steps (median) |
+|---|---|---|
+| simulator (`state`) | 10/10 | 3665 |
+| cameras (`pointcloud`) | 10/10 | 3614 |
+| cameras + `--assisted-grasp` | 10/10 | 3603 |
+
+Wrist-camera re-fits before a grasp: 70 of 70 accepted per mode; position error against
+the true pose median 1.0 mm, 95th percentile 2.7 mm, worst 3.1 mm; yaw error median
+0.9°, worst 4.1°. The remembered row slots restored every prop to its own slot on all
+ten seeds. Ten seeds cannot show a failure rate below ~25 %.
