@@ -49,6 +49,20 @@ WHO = "depth_recall_v1_planner"
 #: built from its own cameras (`depth_recall_v1_perception`). None = read the simulator.
 _BELIEF = None
 
+#: Joint-space step (move-group norm, rad) at which every joint line this planner executes
+#: is collision-checked. `plan_qpos_line`'s 0.1 is up to ~8 cm of hand travel on an
+#: outstretched arm, more than a 4.5 cm prop: on seeds 1070 and 1092 (2026-10-15) a line
+#: accepted at 0.1 put a finger through the counter prop it was reaching for, and the prop
+#: fell over (a 0.01 check refuses the same line).
+READY_LINE_STEP = 0.01
+
+
+def _ready_by_line(*args, **kwargs):
+    """`retr.ready_by_line` with every line checked at `READY_LINE_STEP`."""
+    kwargs.setdefault("line_step", READY_LINE_STEP)
+    return retr.ready_by_line(*args, **kwargs)
+
+
 #: Perception mode re-docks when the measured row is further than this from the map's
 #: row: the dock's own waypoint noise is 5 mm, the row shift up to 4 cm.
 REDOCK_MIN_M = 0.01
@@ -202,7 +216,7 @@ def roll_rank(task):
     Returns a callable for `ready_by_line(rank=)`.
 
     Example:
-        >>> res = retr.ready_by_line(..., rank=roll_rank(task))   # doctest: +SKIP
+        >>> res = _ready_by_line(..., rank=roll_rank(task))   # doctest: +SKIP
     """
     amap = task.agent.robot.active_joints_map
     idx = []
@@ -507,7 +521,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         if noise is not None:
             ready = noise.pose(f"shelf approach {prop.name}", ready, (True, False, True))
         say(env, "ready posture", prop=prop.name, drive=round(drive, 3), lift=lift)
-        res = retr.ready_by_line(env, planner, task, ready, drive=drive, grasp=grasp,
+        res = _ready_by_line(env, planner, task, ready, drive=drive, grasp=grasp,
                                  label=f"ready posture ({prop.name}, lift {lift})",
                                  touch_needle=prop.name, rank=roll_rank(task))
         if res != -1 and common.stopped_by_horizon(planner):
@@ -606,7 +620,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         # A joint LINE to the nearest IK branch, not a screw: this is the longest
         # Cartesian stroke of the episode and `plan_screw` is a least-norm Jacobian walk
         # that spreads it over every joint, which is the arm rotation the owner saw.
-        res = retr.ready_by_line(env, planner, task, across, drive=0.0, grasp=across,
+        res = _ready_by_line(env, planner, task, across, drive=0.0, grasp=across,
                                  label=f"across to the slot ({prop.name}, torso {torso})",
                                  slack=(0.0, 0.0, -0.005), touch_needle=None,
                                  rank=roll_rank(task))
@@ -694,7 +708,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         say(env, "across to the prop's column", prop=prop.name, torso=torso,
             dx=round(float(p0[0]) - float(tcp0.p[0]), 3),
             tcp_z=round(float(tcp0.p[2]), 3))
-        moved = retr.ready_by_line(env, planner, task, over, drive=0.0, grasp=over,
+        moved = _ready_by_line(env, planner, task, over, drive=0.0, grasp=over,
                                    label=f"across to {prop.name}'s column (torso {torso})",
                                    slack=(0.0, 0.0, -0.005), touch_needle=None,
                                    rank=roll_rank(task))
@@ -743,7 +757,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
                     grasp, pre = retr.side_grasp_pose(task, depth, lift=lift, obj=_seen(prop))
                     if grasp is None:
                         return fail(env, f"{prop.name} has no collision mesh"), False
-                    res = retr.ready_by_line(
+                    res = _ready_by_line(
                         env, planner, task, pre, drive=0.0, grasp=grasp,
                         label=f"grasp posture ({prop.name}, torso {torso}, lift {lift}, "
                               f"depth {depth})",
@@ -813,7 +827,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         entry=[round(float(v), 3) for v in entry.p])
     # The held prop stays in the planning world for the descent pre-check: it is exactly
     # what must not hit the shelf.
-    res = retr.ready_by_line(env, planner, task, ready, drive=drive, grasp=entry,
+    res = _ready_by_line(env, planner, task, ready, drive=drive, grasp=entry,
                              label=f"entry posture ({prop.name})",
                              slack=sp.PLACE_PROBE_SLACK, touch_needle=None)
     if res != -1 and common.stopped_by_horizon(planner):

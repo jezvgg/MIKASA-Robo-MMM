@@ -286,19 +286,19 @@ Measured 2026-10-15 on an H100 server (GPU rendering, CPU physics), development 
 | prop poses from | success (95 % interval) | control steps (median) |
 |---|---|---|
 | simulator (`state`) | 100/100 (96–100 %) | 3662 |
-| cameras (`pointcloud`) | 98/100 (93–99 %) | 3766 |
+| cameras (`pointcloud`) | 100/100 (96–100 %) | 3766 |
 | cameras + `--assisted-grasp` | 100/100 (96–100 %) | 3769 |
 
 The row's sideways shift measured at the dock, against the episode's: error median
 0.4 mm, 95th percentile 4.2 mm, worst 10.6 mm, for shifts up to 4 cm. Wrist-camera
-re-fits before a grasp: 694 of 698 and 700 of 700 accepted; position error against the
-true pose median 1.0 mm, 95th percentile 2.3 mm, worst 3.6 mm; yaw error median 1.0°,
+re-fits before a grasp: 700 of 700 accepted in both camera modes; position error against
+the true pose median 1.0 mm, 95th percentile 2.3 mm, worst 3.6 mm; yaw error median 1.0°,
 worst 7.0°. The camera modes run ~100 steps longer: the re-dock and the extra looks.
 
-Both failures (seeds 1070, 1092) are a planner motion, not a fit: on the way into the
-counter grasp posture the arm knocked the prop onto its side (traced on 1070 by
-replaying it with the true poses logged; 1092 shows the same refusals), and the wrist
-camera then refused, rightly, to fit an upright prop to a lying one. With the simulator's
-prop poses in the planning world instead of the belief's the same mode scored 99/100
-(1070 only); before the re-dock, 98/100 and 99/100, every failure a counter grasp stroke
-from a stance up to 4 cm aside knocking the neighbouring prop over.
+The joint lines the planner executes are collision-checked every 0.01 rad
+(`READY_LINE_STEP`). At `plan_qpos_line`'s default 0.1 rad, up to ~8 cm of hand travel on
+an outstretched arm, two camera-mode episodes (seeds 1070, 1092) ran a line that put a
+finger through the counter prop it was reaching for; the prop fell over and the wrist
+camera then refused, rightly, to fit an upright prop to a lying one (traced by replaying
+both seeds with every accepted line re-checked at 0.01 rad). With the dense check all
+four modes pass 100/100.
