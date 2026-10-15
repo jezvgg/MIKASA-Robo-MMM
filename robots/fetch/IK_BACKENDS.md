@@ -106,6 +106,20 @@ not in the repository); the modes of one table ran interleaved under the same lo
 generator elsewhere; the nearest-to-start solution changed (> 0.1 rad) on 14 of 102
 calls with random starts and on 0 of 102 with fixed starts.
 
+**Depth Recall over 100 seeds**, simulator poses: the arm configuration at every
+successful grasp, grouped into branches (same branch if no joint differs by more than
+1 rad, angles modulo 2*pi) per grasp kind:
+
+| IK starts | episodes | grasps in the dominant branch of their kind | shelf grasps | first counter grasp |
+|---|---|---|---|---|
+| mplib, random | 100/100 | 92.3 % | one branch | 61 % in the largest of 5 |
+| fixed | 96/100 | 92.8 % | one branch | 66 % in the largest of 7 |
+
+On this task the branch variety between episodes comes from the geometry (which counter
+slot, which prop), not from the generator, and fixed starts lost four episodes, all at
+the entry posture into the shelf, where their set held no solution whose line and screw
+plan. Keep them off for Depth Recall.
+
 **SeasonDish** (the planning-bound task), 30 seeds per mode:
 
 | IK | episodes | IK calls per episode | IK calls succeeding | episode, median | episode, mean | RRT runs |
