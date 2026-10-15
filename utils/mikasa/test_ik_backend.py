@@ -235,3 +235,49 @@ def test_curobo_client_on_a_shared_socket(planner, monkeypatch, tmp_path):
         srv.close()
     assert asked == ["names", "propose"]
     assert status == "Success" and goals
+
+
+def test_scan_sends_goals_in_each_stands_frame_and_shapes_the_mask(monkeypatch, tmp_path):
+    """No simulator: the scan's frames and mask layout against a stand-in socket server."""
+    import socket
+    import threading
+
+    from robots.fetch import curobo_client
+
+    path = tmp_path / "scan.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen()
+    seen = {}
+
+    def serve():
+        conn, _ = srv.accept()
+        with conn, conn.makefile("r") as rd, conn.makefile("w") as wr:
+            wr.write("CUROBO " + json.dumps({"id": 0, "ready": True}) + "\n")
+            wr.flush()
+            for line in rd:
+                req = json.loads(line)
+                goals = np.asarray(req["args"]["goals"]).reshape(-1, 4, 4)
+                seen["goals"] = goals
+                ok = (goals[:, 0, 3] > 0).tolist()          # "reachable" = in front of the stand
+                out = {"id": req["id"], "ok": ok, "q": [[0.0] * 8 for _ in ok], "names": [], "ms": 1.0}
+                wr.write("CUROBO " + json.dumps(out) + "\n")
+                wr.flush()
+
+    threading.Thread(target=serve, daemon=True).start()
+    monkeypatch.setenv("MIKASA_CUROBO_SOCKET", str(path))
+    curobo_client._SERVER.clear()
+    goal = np.eye(4)
+    goal[:3, 3] = [1.0, 0.0, 0.9]
+    stands = [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (1.0, -1.0, np.pi / 2)]
+    try:
+        ok, q = curobo_client.scan([goal], stands)
+    finally:
+        s = curobo_client._SERVER.pop("s", None)
+        if s is not None:
+            s.close()
+        curobo_client._SERVER.clear()
+        srv.close()
+    assert ok.shape == (3, 1) and q.shape == (3, 1, 8)
+    assert ok[:, 0].tolist() == [True, False, True]          # behind the second stand; ahead of the third
+    assert np.allclose(seen["goals"][2][:3, 3], [1.0, 0.0, 0.9])   # stand 3 faces +y from (1, -1)
