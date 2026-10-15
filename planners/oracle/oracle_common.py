@@ -860,7 +860,7 @@ def planning_budget(seconds):
 
 
 def hold_object_in_planner(env, planner, task, obj, held: bool, who: str = "oracle",
-                           extra_touch=()) -> None:
+                           extra_touch=(), pose=None) -> None:
     """Tell the planning world that `obj` is (or no longer is) part of the hand.
 
     Without this, the first emulated burner run died one step into the drive:
@@ -890,6 +890,8 @@ def hold_object_in_planner(env, planner, task, obj, held: bool, who: str = "orac
         who: the oracle's tag, for the trace.
         extra_touch: link-name stems (e.g. "shoulder_lift") whose contact with the held
             object is allowed in the model, on top of the whole hand.
+        pose: gripper_link -> object to attach at (an mplib.Pose); None reads it from the
+            simulator, as before. A perception-only planner passes its own estimate.
 
     Example:
         >>> hold_object_in_planner(env, planner, task, task.cup, held=True, who="burner_planner")  # doctest: +SKIP
@@ -919,7 +921,7 @@ def hold_object_in_planner(env, planner, task, obj, held: bool, who: str = "orac
         # in the model though the object is held). Allowed for this attachment only.
         touch += [l for l in robot.links
                   if any(k in l.name for k in extra_touch) and l not in touch]
-        attach_object(world, entity, robot, link, touch_links=touch)
+        attach_object(world, entity, robot, link, pose=pose, touch_links=touch)
         planner.planner.update_from_simulation()  # the transform at the hand's true configuration
         say(env, who, "object attached to gripper_link in the planning world",
             touch_links=[l.name.split("_", 1)[-1] for l in touch])

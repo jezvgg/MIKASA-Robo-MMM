@@ -54,6 +54,21 @@ _BELIEF = None
 REDOCK_MIN_M = 0.01
 
 
+def _grasping(task, prop) -> bool:
+    """Is ``prop`` in the hand? Contact forces in simulator mode; in perception mode the
+    finger encoders (`PropBelief.fingers_holding`), as a robot would tell."""
+    if _BELIEF is None:
+        return bool(task.agent.is_grasping(prop).any())
+    return _BELIEF.fingers_holding()
+
+
+def _hold(env, planner, task, prop, held: bool) -> None:
+    """`common.hold_object_in_planner`; in perception mode the prop is attached at the
+    transform the belief has (the grasp's estimate), not the simulator's."""
+    pose = _BELIEF.link_to_prop(_index(task, prop)) if (_BELIEF is not None and held) else None
+    common.hold_object_in_planner(env, planner, task, prop, held=held, who=WHO, pose=pose)
+
+
 def _seen(prop):
     """What a pose is computed from: the prop itself, or its perceived stand-in."""
     return prop if _BELIEF is None else _BELIEF.proxy(prop)
@@ -371,7 +386,7 @@ def grasp_ladder(env, planner, task, prop, *, where: str, lift: float = None):
         res = planner.close_gripper(t=12)
         if res != -1 and common.stopped_by_horizon(planner):
             return res, False
-        if bool(task.agent.is_grasping(prop).any()):
+        if _grasping(task, prop):
             say(env, f"{where}: in the gripper", prop=prop.name, depth=depth,
                 tilt=round(common._tilt_deg(prop.pose.sp.q), 1))
             if _BELIEF is not None:
@@ -404,7 +419,7 @@ def release_and_clear(env, planner, task, prop, place):
         _BELIEF.release(_index(task, prop), where="released")
     if res != -1 and common.stopped_by_horizon(planner):
         return res
-    common.hold_object_in_planner(env, planner, task, prop, held=False, who=WHO)
+    _hold(env, planner, task, prop, held=False)
     say(env, "released", prop=prop.name,
         at=[round(float(v), 3) for v in _np(prop.pose.p).reshape(-1)[:3]],
         tilt=round(common._tilt_deg(prop.pose.sp.q), 1))
@@ -516,7 +531,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     res, ok = grasp_ladder(env, planner, task, prop, where="shelf", lift=chosen_lift)
     if not ok:
         return res, False
-    common.hold_object_in_planner(env, planner, task, prop, held=True, who=WHO)
+    _hold(env, planner, task, prop, held=True)
 
     tcp = task.agent.tcp.pose.sp
     others = row_neighbours(task, prop)
@@ -535,7 +550,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         return res, False
     if res == -1:
         return fail(env, f"unshelve {prop.name}"), False
-    if not bool(task.agent.is_grasping(prop).any()):
+    if not _grasping(task, prop):
         say(env, f"MISSED: {prop.name} left the gripper at the unshelve")
         return res, False
     planner.planner.update_from_simulation()
@@ -550,7 +565,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         return res, False
     if res == -1:
         return fail(env, "carry out of the cabinet"), False
-    if not bool(task.agent.is_grasping(prop).any()):
+    if not _grasping(task, prop):
         say(env, f"MISSED: {prop.name} left the gripper on the way out")
         return res, False
     planner.planner.update_from_simulation()
@@ -606,7 +621,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     if not crossed:
         return fail(env, f"cross to the slot column for {prop.name}",
                     rungs=list(CROSS_TORSO_RUNGS)), False
-    if not bool(task.agent.is_grasping(prop).any()):
+    if not _grasping(task, prop):
         say(env, f"MISSED: {prop.name} left the gripper crossing to the slot")
         return res, False
     planner.planner.update_from_simulation()
@@ -617,7 +632,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         if common.stopped_by_horizon(planner):
             return res, False
         say(env, "torso down", torso=torso)
-    if not bool(task.agent.is_grasping(prop).any()):
+    if not _grasping(task, prop):
         say(env, f"MISSED: {prop.name} left the gripper on the way down")
         return res, False
 
@@ -758,7 +773,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         return fail(env, f"take {prop.name} off the counter",
                     torsos=list(COUNTER_GRASP_TORSO_RUNGS),
                     lifts=list(GRASP_LIFTS)), False
-    common.hold_object_in_planner(env, planner, task, prop, held=True, who=WHO)
+    _hold(env, planner, task, prop, held=True)
 
     tcp = task.agent.tcp.pose.sp
     up = sapien.Pose(p=[tcp.p[0], tcp.p[1], tcp.p[2] + UNSHELVE_DZ], q=tcp.q)
@@ -781,7 +796,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     if common.stopped_by_horizon(planner):
         return res, False
     say(env, "torso up", tilt=round(common._tilt_deg(prop.pose.sp.q), 1))
-    if not bool(task.agent.is_grasping(prop).any()):
+    if not _grasping(task, prop):
         say(env, f"MISSED: {prop.name} left the gripper on the way up")
         return res, False
 
@@ -837,7 +852,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         return res, False
     if res == -1:
         return fail(env, "drive into the cabinet, loaded"), False
-    if not bool(task.agent.is_grasping(prop).any()):
+    if not _grasping(task, prop):
         say(env, f"MISSED: {prop.name} left the gripper on the way in")
         return res, False
     planner.planner.update_from_simulation()
@@ -924,6 +939,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     _BELIEF = (perc.PropBelief(task, lambda message, **data: say(env, message, **data))
                if perception == "pointcloud" else None)
     planner = planner_factory(env, debug, vis)
+    if _BELIEF is not None:
+        _BELIEF.bind_world(planner)
     noise = WaypointNoise((0 if seed is None else int(seed)) + 200003
                           if noise_seed is None else noise_seed, noise_m,
                           lambda message, **data: say(env, message, **data))

@@ -267,11 +267,18 @@ work (`utils/mikasa/point_cloud.py`, `planners/depth_recall_v1_perception.py`):
    estimate is exactly what a missed close may have made wrong. After the grasp the
    prop's pose is the hand's pose times the transform frozen at the grasp.
 
-Still read from the simulator in this mode: the planning world's collision geometry
-(mplib mirrors the scene, props at their true poses), `is_grasping`, the collision mesh
-attached by `hold_object_in_planner`, and the static scene map. Every perception step
-logs its fit and, for the log only, its error against the true pose; the row shift logs
-its error against the episode's row x.
+7. The planning world is the belief's, BIMBO_EvoX's fair rule (an offline map of the
+   static scene plus the objects as seen): mplib keeps the fixtures and the robot, but
+   after every sync each prop stands where perception put it (one not seen yet is
+   parked out of reach), and a held prop is attached at the transform frozen at the
+   grasp, never re-read from the simulator.
+8. Holding is felt: the gripper commanded shut and both finger encoders stopped apart,
+   not contact forces.
+
+Still read from the simulator in this mode: the static scene map (fixtures, their
+footprints and heights, the props' known size). Every perception step logs its fit and,
+for the log only, its error against the true pose; the row shift logs its error against
+the episode's row x.
 
 Measured 2026-10-15 on an H100 server (GPU rendering, CPU physics), development seeds
 1000–1099, the same planner in three modes:
@@ -279,18 +286,19 @@ Measured 2026-10-15 on an H100 server (GPU rendering, CPU physics), development 
 | prop poses from | success (95 % interval) | control steps (median) |
 |---|---|---|
 | simulator (`state`) | 100/100 (96–100 %) | 3662 |
-| cameras (`pointcloud`) | 99/100 (95–100 %) | 3767 |
-| cameras + `--assisted-grasp` | 100/100 (96–100 %) | 3772 |
+| cameras (`pointcloud`) | 98/100 (93–99 %) | 3766 |
+| cameras + `--assisted-grasp` | 100/100 (96–100 %) | 3769 |
 
 The row's sideways shift measured at the dock, against the episode's: error median
 0.4 mm, 95th percentile 4.2 mm, worst 10.6 mm, for shifts up to 4 cm. Wrist-camera
-re-fits before a grasp: 697 of 699 and 700 of 700 accepted; position error against the
-true pose median 1.0 mm, 95th percentile 2.4 mm, worst 3.6 mm; yaw error median 1.0°,
+re-fits before a grasp: 694 of 698 and 700 of 700 accepted; position error against the
+true pose median 1.0 mm, 95th percentile 2.3 mm, worst 3.6 mm; yaw error median 1.0°,
 worst 7.0°. The camera modes run ~100 steps longer: the re-dock and the extra looks.
 
-The one failure (seed 1070) is a planner motion, not a fit: the arm's move into the
-counter grasp posture knocked the target prop onto its side, and the wrist camera then
-refused, rightly, to fit an upright prop to a lying one. Before the re-dock the camera
-modes scored 98/100 and 99/100; all three failures were a counter grasp stroke, made
-from a stance up to 4 cm aside of the simulator mode's, knocking the neighbouring prop
-over (traced by replaying the seeds with the true poses logged).
+Both failures (seeds 1070, 1092) are a planner motion, not a fit: on the way into the
+counter grasp posture the arm knocked the prop onto its side (traced on 1070 by
+replaying it with the true poses logged; 1092 shows the same refusals), and the wrist
+camera then refused, rightly, to fit an upright prop to a lying one. With the simulator's
+prop poses in the planning world instead of the belief's the same mode scored 99/100
+(1070 only); before the re-dock, 98/100 and 99/100, every failure a counter grasp stroke
+from a stance up to 4 cm aside knocking the neighbouring prop over.

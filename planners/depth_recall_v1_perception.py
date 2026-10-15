@@ -19,11 +19,17 @@ observation-only planners work:
   in an image observation, so the first look from the dock measures it
   (`calibrate_row`) and every row and counter point after that carries the measured x.
 
-What is still read from the simulator, and named so it is not mistaken for honest:
-the planning world's collision geometry (mplib mirrors the whole scene, props at their
-true poses), `is_grasping` (contact forces), `hold_object_in_planner` (attaches the true
-mesh for collision checks), and the static scene map above. Truth also goes into the
-LOGS (`pc.audit`, the row shift's error) and nowhere else.
+* **the planning world is the belief's** (`bind_world`): mplib's collision world keeps
+  the static scene (the map) and the robot, but every prop in it stands where perception
+  put it — a prop not seen yet is parked out of reach — and a held prop rides on the
+  hand at the transform frozen at the grasp, never re-read from the simulator. This is
+  BIMBO_EvoX's fair rule: an offline map of static geometry plus the objects as seen;
+* **holding is felt, not read**: `fingers_holding` is the finger encoders — both fingers
+  stopped apart while the gripper is commanded closed — not contact forces.
+
+What is still read from the simulator: the static scene map above (fixtures, their
+footprints and heights, the props' known size). Truth also goes into the LOGS
+(`pc.audit`, the row shift's error) and nowhere else.
 """
 
 from __future__ import annotations
@@ -267,6 +273,63 @@ class PropBelief:
             self.est[i] = dict(x=float(p.p[0]), y=float(p.p[1]), z=float(p.p[2]), yaw=yaw,
                                where=where, from_carry=True)
             self.held = None
+
+    # ------------------------------------------------------ planning world --
+
+    #: Where an unseen prop waits in the planning world: far below the floor.
+    PARKED = sapien.Pose([0.0, 0.0, -10.0])
+
+    def bind_world(self, solver) -> None:
+        """Make the solver's mplib planning world follow the belief, not the simulator.
+
+        mplib re-reads every free actor's pose from the simulator on each sync; after
+        each sync the props are put back where the belief has them (unseen: parked out of
+        reach), and an attached (held) prop keeps the transform it was attached with
+        instead of the simulator's.
+        """
+        from robots.fetch.utils import FCLObject, convert_object_name
+
+        world = solver.planner.planning_world
+        original = world.update_from_simulation
+        names = [convert_object_name(p._objs[0]) for p in self.task.props]
+
+        def sync(*, update_attached_object: bool = True):
+            original(update_attached_object=False)
+            for i, name in enumerate(names):
+                if world.get_attached_object(name):
+                    continue
+                obj = world.get_object(name)
+                if obj is None:          # taken out for a touchable stroke
+                    continue
+                pose = self.pose(i) if self.has(i) else self.PARKED
+                world.add_object(FCLObject(name, pose, obj.shapes, obj.shape_poses))
+
+        world.update_from_simulation = sync
+        self.world_names = names
+        sync()
+
+    def link_to_prop(self, i: int):
+        """gripper_link -> prop from the robot's own link pose and the belief (an mplib.Pose)."""
+        import mplib
+
+        link = next(l for l in self.task.agent.robot.get_links() if l.name.endswith("gripper_link"))
+        rel = link.pose.sp.inv() * self.pose(i)
+        return mplib.Pose(rel.p, rel.q)
+
+    def fingers_holding(self, lo: float = 0.004, hi: float = 0.048) -> bool:
+        """The gripper is commanded shut and both finger joints stopped apart (an object
+        between them) — the command and the encoders, not contact forces. Shut on
+        nothing the fingers reach 0; open they sit at 0.05; the rest pose's 0.015 is not
+        a grasp because nothing commanded the close."""
+        ctrl = self.task.agent.controller.controllers["gripper"]
+        target = getattr(ctrl, "_target_qpos", None)
+        if target is None or float(np.asarray(target.cpu() if hasattr(target, "cpu") else target).min()) \
+                > float(np.min(np.asarray(ctrl.config.lower))) + 0.005:
+            return False
+        names = [j.name for j in self.task.agent.robot.get_active_joints()]
+        q = np.asarray(self.task.agent.robot.get_qpos().cpu().numpy()).reshape(-1)
+        gaps = [float(q[names.index(n)]) for n in ("r_gripper_finger_joint", "l_gripper_finger_joint")]
+        return all(lo < g < hi for g in gaps)
 
     def remember_row_slot(self, i: int, row_pts) -> int:
         e = self.est[i]
