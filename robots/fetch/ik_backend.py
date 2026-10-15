@@ -10,13 +10,12 @@ site picks them up without new arguments:
     happened before, and a refused call shifts every later plan (jezvgg/ManiSkill#6).
     ``fixed`` runs the same loop (same CLIK, joint-limit wrap, FCL check, threshold and
     0.1 rad de-duplication) from the current joints and then from a table of starts
-    fixed per planner (half placed around the current posture, half over the whole joint
-    range), and mplib's generator is never touched.
-    The first time a request is asked it gets block 0 of the table, so the same
-    situation gets the same answer; asking the SAME request again in the episode (the
-    planners' retries, which counted on randomness) gets the next fixed block, so a
-    retry explores instead of repeating a refused answer (measured on SeasonDish: one
-    table for every retry made episodes 4x longer). b1k_rl_guys' controllers and
+    seeded by the request itself (half placed around the current posture, half over the
+    whole joint range), and mplib's generator is never touched: the same situation gets
+    the same answer, different requests get different starts as mplib's draws would.
+    Asking the SAME request again in an episode (the planners' retries, which counted on
+    randomness) gets the next block, so a retry explores instead of repeating a refused
+    answer (measured on SeasonDish: one table for every retry made episodes 4x longer). b1k_rl_guys' controllers and
     BIMBO_EvoX's ArmServo use fixed starts the same way, current joints first.
 
 ``MIKASA_IK_BACKEND=curobo``
@@ -58,21 +57,19 @@ def is_default() -> bool:
     return starts_mode() == "random" and backend() == "mplib"
 
 
-def fixed_starts(planner, n: int, block: int = 0) -> np.ndarray:
-    """``n`` configurations inside the planner's joint limits; block ``k`` is always the same.
+def fixed_starts(planner, n: int, block: int = 0, request: int = 0) -> np.ndarray:
+    """``n`` configurations inside the planner's joint limits, a pure function of
+    (``request``, ``block``): the same request and retry always get the same rows.
 
-    Cached on the planner. Revolute limits wider than one turn are sampled over one
-    turn (the wrap maps the rest onto it); masked joints are overwritten by the caller.
+    Revolute limits wider than one turn are sampled over one turn (the wrap maps the
+    rest onto it); masked joints are overwritten by the caller.
     """
-    cache = planner.__dict__.setdefault("_mikasa_fixed_starts", {})
-    if (n, block) not in cache:
-        lim = np.asarray(planner.joint_limits, dtype=np.float64).reshape(-1, 2)
-        lo, hi = lim[:, 0].copy(), lim[:, 1].copy()
-        wide = (hi - lo) > 2 * np.pi
-        hi[wide] = lo[wide] + 2 * np.pi
-        rng = np.random.default_rng([FIXED_STARTS_SEED, int(block)])
-        cache[(n, block)] = rng.uniform(lo, hi, size=(n, len(lo)))
-    return cache[(n, block)]
+    lim = np.asarray(planner.joint_limits, dtype=np.float64).reshape(-1, 2)
+    lo, hi = lim[:, 0].copy(), lim[:, 1].copy()
+    wide = (hi - lo) > 2 * np.pi
+    hi[wide] = lo[wide] + 2 * np.pi
+    rng = np.random.default_rng([FIXED_STARTS_SEED, int(request), int(block)])
+    return rng.uniform(lo, hi, size=(n, len(lo)))
 
 
 #: Fractions of each joint's range (one turn at most) for the starts placed around the
@@ -80,14 +77,14 @@ def fixed_starts(planner, n: int, block: int = 0) -> np.ndarray:
 LOCAL_SPREADS = (0.05, 0.1, 0.2)
 
 
-def starts_around(planner, start_qpos, n: int, block: int = 0) -> list:
+def starts_around(planner, start_qpos, n: int, block: int = 0, request: int = 0) -> list:
     """``n`` fixed starts: half around ``start_qpos`` (deterministic offsets, a few
     spreads), half from the whole-range table. Solutions near the current posture are
     the ones a nearest-first caller takes and a joint line reaches; the whole-range half
     keeps the other branches reachable. b1k_rl_guys starts from the current joints and
     from postures near rest for the same reason."""
     n_local = n // 2
-    table = fixed_starts(planner, n, block)
+    table = fixed_starts(planner, n, block, request)
     lim = np.asarray(planner.joint_limits, dtype=np.float64).reshape(-1, 2)
     lo, hi = lim[:, 0], lim[:, 1]
     span = np.minimum(hi - lo, 2 * np.pi)
@@ -99,19 +96,28 @@ def starts_around(planner, start_qpos, n: int, block: int = 0) -> list:
     return out + list(table[n_local:])
 
 
-def retry_index(planner, goal_pose, start_qpos, mask) -> int:
-    """How many times this exact request (goal to 1 mm / 0.01, start to 1e-3, mask) was
-    asked before on this planner; counts it. Retries of a refused request get the next
-    block of fixed starts instead of the same answer."""
+def request_and_retry(planner, goal_pose, start_qpos, mask) -> tuple:
+    """(request id, retry index): the id is a hash of the request (goal to 1 mm / 0.01,
+    start to 1e-3, mask) that seeds its starts — different requests get different starts,
+    as mplib's draws would, the same request always the same; the retry index counts how
+    often it was asked before on this planner, so a retry takes the next block."""
+    import hashlib
+
     q = np.asarray(goal_pose.q, dtype=np.float64).reshape(-1)
     q = q if q[0] >= 0 else -q
-    key = (tuple(np.round(np.asarray(goal_pose.p, dtype=np.float64).reshape(-1), 3)), tuple(np.round(q, 2)),
-           tuple(np.round(np.asarray(start_qpos, dtype=np.float64), 3)),
-           tuple(bool(m) for m in (mask if mask is not None else ())))
+    parts = (np.round(np.asarray(goal_pose.p, dtype=np.float64).reshape(-1), 3), np.round(q, 2),
+             np.round(np.asarray(start_qpos, dtype=np.float64), 3))
+    m = np.asarray(mask if mask is not None else (), dtype=bool)
+    digest = hashlib.sha256(b"".join((np.asarray(x) + 0.0).tobytes() for x in parts) + m.tobytes()).digest()
+    request = int.from_bytes(digest[:8], "little")
     seen = planner.__dict__.setdefault("_mikasa_ik_requests", {})
-    k = seen.get(key, 0)
-    seen[key] = k + 1
-    return k
+    k = seen.get(request, 0)
+    seen[request] = k + 1
+    return request, k
+
+
+def retry_index(planner, goal_pose, start_qpos, mask) -> int:
+    return request_and_retry(planner, goal_pose, start_qpos, mask)[1]
 
 
 def solve_from_starts(planner, goal_pose, start_qpos, mask, starts, threshold: float,
@@ -166,13 +172,13 @@ def ik(planner, goal_pose, start_qpos, mask=None, *, n_init_qpos: int = 20, thre
         seeds = curobo_client.propose(planner, goal_pose, start_qpos, mask)
         starts = list(seeds)
         if starts_mode() == "fixed":       # cuRobo first, then the fixed table as before
-            block = retry_index(planner, goal_pose, start_qpos, mask)
-            starts += starts_around(planner, start_qpos, max(n_init_qpos - 1, 0), block)
+            request, block = request_and_retry(planner, goal_pose, start_qpos, mask)
+            starts += starts_around(planner, start_qpos, max(n_init_qpos - 1, 0), block, request)
         status, goals = solve_from_starts(planner, goal_pose, start_qpos, mask, [start_qpos] + starts,
                                           threshold, verbose)
     else:
-        block = retry_index(planner, goal_pose, start_qpos, mask)
-        starts = [start_qpos] + starts_around(planner, start_qpos, max(n_init_qpos - 1, 0), block)
+        request, block = request_and_retry(planner, goal_pose, start_qpos, mask)
+        starts = [start_qpos] + starts_around(planner, start_qpos, max(n_init_qpos - 1, 0), block, request)
         status, goals = solve_from_starts(planner, goal_pose, start_qpos, mask, starts, threshold, verbose)
     if goals is not None and return_closest:
         move = planner.move_group_joint_indices
