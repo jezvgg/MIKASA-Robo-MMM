@@ -49,6 +49,10 @@ WHO = "depth_recall_v1_planner"
 #: built from its own cameras (`depth_recall_v1_perception`). None = read the simulator.
 _BELIEF = None
 
+#: Perception mode re-docks when the measured row is further than this from the map's
+#: row: the dock's own waypoint noise is 5 mm, the row shift up to 4 cm.
+REDOCK_MIN_M = 0.01
+
 
 def _seen(prop):
     """What a pose is computed from: the prop itself, or its perceived stand-in."""
@@ -989,9 +993,23 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                 return res
             fits = _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts, trust_anchor_x=False)
             if _BELIEF.row_dx is None:
-                # First look from the dock: measure the row's sideways shift, then look
-                # again so every estimate is tied to the corrected points.
+                # First look from the dock: measure the row's sideways shift, move the base
+                # onto the measured row when the map's dock is off by more than
+                # `REDOCK_MIN_M`, then look again so every estimate is tied to the
+                # corrected points. Without the move the arm reaches the counter from up
+                # to 4 cm aside of where the simulator mode stands; measured 2026-10-15 on
+                # 100 seeds, that path knocked a neighbouring counter prop over on 2.
                 row_pts, slot_pts = _BELIEF.calibrate_row(fits, row_pts, slot_pts)
+                if abs(_BELIEF.row_dx) > REDOCK_MIN_M:
+                    res = dock_at(env, planner, task, float(row_pts[0][0]),
+                                  stage="re-dock at the measured row", noise=noise)
+                    if res != -1 and common.stopped_by_horizon(planner):
+                        return res
+                    if res == -1:
+                        return fail(env, "re-dock at the measured row")
+                    res = gaze(row_pts, -.20)
+                    if res == -1 or common.stopped_by_horizon(planner):
+                        return res
                 _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts, trust_anchor_x=False)
             seen = [i for i in remaining if _BELIEF.has(i)]
             if not seen:
