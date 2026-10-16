@@ -98,6 +98,14 @@ HOLD_STEPS = 4
 "Controls the swing's last target is held with the base still before the release (BIMBO's door_hold)."
 CLEAR_M = _f("MIKASA_BD_CLEAR_M", 0.15)
 CLEAR_LIFT_M = _f("MIKASA_BD_CLEAR_LIFT_M", 0.0)
+CLEAR_LIFT_OFF = _f("MIKASA_BD_CLEAR_LIFT_OFF", 0.0)
+"""Share of the outward normal added to the in-plane slide off the bar. 0: measured 2026-10-16
+(seeds 0-1, 0.25): moving outward the INNER pad (between bar and face) carries the bar out and
+opens the leaf (+0.01..+0.017 rad), and it leaves the hand on the face's outer side, where the
+tuck's joint line swept a finger through the leaf (seed 0, knot 4/23)."""
+LOWER_M = _f("MIKASA_BD_LOWER_M", 0.30)
+"""How far `lower_the_hand` drops the open hand: from bar height (1.59) to under the open
+leaf's bottom edge (1.391, `stow_hand`), so no joint line from there can sweep the leaf."""
 CLEAR_MAX_STEPS = 50
 CLEAR_LEAF_TOL = 0.03
 "Rad: a clear that moves the leaf more than this stops where it is."
@@ -387,11 +395,12 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         trace="[i, sw, rad, hand, perr, rerr, v, w, a_x, a_y] " + str(trace[-16:]),
         **({"door_tail": [round(v, 3) for v in hist[-20:]]} if reason != "target" else {}))
 
-    # -- door_hold: the last goal held with the base still -----------------------------------
-    for _ in range(HOLD_STEPS):
-        res, _, _, _ = drv.step(goal)
-        if common.stopped_by_horizon(planner):
-            return res
+    # -- door_hold: the arm relaxes to where it stands, the weld holds the door --------------
+    # The servo's command runs ahead of the measured joints while it pulls (ARM_LEAD_MAX); let
+    # go of that pull before the fingers open, or the arm springs back as the weld lets go.
+    res = planner.idle_steps(t=HOLD_STEPS)
+    if common.stopped_by_horizon(planner):
+        return res
     planner.planner.update_from_simulation()
 
     if record is not None:
@@ -431,11 +440,12 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     r_bar = max(float(np.linalg.norm(bar0 - anchor_xy)), 1e-6)
     edge0 = anchor_xy + (bar0 - anchor_xy) * (1.0 + LEAF_EDGE_PAST_BAR / r_bar)
     leaf_a, leaf_b = ds.leaf_segment(anchor_xy, edge0, s * rad_rel)   # turned from shut
-    d, rule = ds.clear_direction(T[:3, 2], n)
+    d, rule = ds.clear_direction(T[:3, 2], n, lift_off=CLEAR_LIFT_OFF)
     lift = np.array([0.0, 0.0, CLEAR_LIFT_M])
     end = T[:3, 3] + CLEAR_M * d + lift
     if not ds.path_keeps_off(T[:2, 3], end[:2], leaf_a, leaf_b):
-        d2, rule2 = ds.clear_direction(T[:3, 2], n, min_off=2.0)     # force the in-plane slide
+        d2, rule2 = ds.clear_direction(T[:3, 2], n, min_off=2.0,       # force the in-plane slide
+                                       lift_off=CLEAR_LIFT_OFF)
         end2 = T[:3, 3] + CLEAR_M * d2 + lift
         if ds.path_keeps_off(T[:2, 3], end2[:2], leaf_a, leaf_b):
             d, rule, end = d2, rule2, end2
@@ -467,4 +477,36 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         _ex = _T(_end)[:3, 0]
         record["base_xy_end"] = _np(_end.p).reshape(-1)[:2].astype(np.float64).copy()
         record["base_yaw_end"] = float(np.arctan2(float(_ex[1]), float(_ex[0])))
+    return res
+
+
+def lower_the_hand(env, planner, task, *, door, dz: float = LOWER_M):
+    """Drop the open hand straight down by `dz` with the base still (servoed, unplanned).
+
+    For a joint line that a hand standing beside the open leaf would sweep through it (the
+    tuck before the can approach): after the clear the hand stands just past the leaf's free
+    edge at bar height, and from under the leaf's bottom edge no arm motion reaches the leaf.
+    Watched by the leaf's angle like the clear. Returns the last 5-tuple, or -1 if no step was
+    taken."""
+    try:
+        servo = HandServo(task)
+    except Exception as exc:
+        say(env, "lower the hand: no kinematic model", why=f"{type(exc).__name__}"[:80])
+        return -1
+    drv = _Driver(planner, task, servo, _torso(task))
+    T = _T(task.agent.tcp.pose.sp)
+    goal = T.copy()
+    goal[2, 3] = T[2, 3] - float(dz)
+    rad0 = float(crp.door_rad_now(task, door))
+    res, moved, k = -1, 0.0, 0
+    for k in range(CLEAR_MAX_STEPS):
+        res, dp, _, _ = drv.step(goal)
+        if common.stopped_by_horizon(planner):
+            return res
+        moved = float(crp.door_rad_now(task, door)) - rad0
+        if abs(moved) > CLEAR_LEAF_TOL or float(np.linalg.norm(dp)) < 0.01:
+            break
+    planner.planner.update_from_simulation()
+    say(env, "lowered the open hand", dz=round(float(dz), 3), steps=k + 1,
+        z=round(float(_T(task.agent.tcp.pose.sp)[2, 3]), 3), leaf_moved=round(moved, 4))
     return res

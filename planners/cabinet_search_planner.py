@@ -1360,6 +1360,19 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
             planner.planner.update_from_simulation()
             r = plan_joints(env, planner, task, tuck,
                             label="tuck after finding the can", tries=1, line_only=True)
+            if r == -1 and door_mode(task) == "bimbo":
+                # The servoed swing leaves the arm in another joint configuration than the
+                # shipped arc pull, and from beside the open leaf the line to the tuck can
+                # sweep it (seed 0, finger <-> leaf at knot 4/23). From under the leaf's
+                # bottom edge it cannot.
+                r = _bimbo.lower_the_hand(env, planner, task, door=door)
+                if r != -1:
+                    res = r
+                    if common.stopped_by_horizon(planner):
+                        return res
+                    planner.planner.update_from_simulation()
+                    r = plan_joints(env, planner, task, tuck, label="tuck after finding the can "
+                                    "(hand under the leaf)", tries=1, line_only=True)
             if r == -1:
                 say(env, "MISSED: cannot clear the door for the can approach")
                 return res
