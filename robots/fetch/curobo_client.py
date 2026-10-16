@@ -14,6 +14,17 @@ the goal is re-expressed in that link's frame from mplib's own FK at the start q
 start-up is not paid per episode. ``MIKASA_CUROBO_SEEDS`` (default 32) is how many
 proposals one call asks for; failures of the server are raised, never silently replaced
 by mplib.
+
+Two of BIMBO_EvoX's guards (skills/gpu-ik/gpu_ik.py, tasks/62_halve_an_egg/.../ik.py):
+
+* ``MIKASA_CUROBO_MAX_JUMP`` (rad, default 1.2, 0 = off): a proposal whose largest joint
+  change from the current joints exceeds it is on another branch and is dropped; the
+  rest go nearest first. A start on another branch makes CLIK land there, and the
+  planner's joint line then sweeps the arm across the workspace or falls back to RRT.
+  The current joints themselves are always tried first (`ik_backend.ik`).
+* ``scan(..., verify=True)``: every hit is re-checked in float64 against the URDF
+  (`urdf_fk`), pose within ``VERIFY_TOL`` and joints within their limits; a claim that
+  does not hold is dropped and counted in ``STATS["verify_dropped"]``.
 """
 
 from __future__ import annotations
@@ -30,14 +41,21 @@ from queue import Empty, Queue
 
 import numpy as np
 
+from robots.fetch.urdf_fk import pose_error
+
 PY_ENV, SEEDS_ENV, CACHE_ENV = "MIKASA_CUROBO_PY", "MIKASA_CUROBO_SEEDS", "MIKASA_CUROBO_CACHE"
 SERVER_ENV, SOCKET_ENV = "MIKASA_CUROBO_SERVER", "MIKASA_CUROBO_SOCKET"
+MAX_JUMP_ENV = "MIKASA_CUROBO_MAX_JUMP"
+#: BIMBO_EvoX's tolerance for its float64 re-check: metres, radians.
+VERIFY_TOL = (0.005, 0.05)
 PREFIX = "CUROBO "
 TIMEOUT_S = float(os.environ.get("MIKASA_CUROBO_TIMEOUT_S", "900"))   # cold start builds the model
 ARM = ("shoulder_pan_joint", "shoulder_lift_joint", "upperarm_roll_joint", "elbow_flex_joint",
        "forearm_roll_joint", "wrist_flex_joint", "wrist_roll_joint")
 _SERVER = {}
-STATS = dict(calls=0, proposals=0, server_ms=0.0, wall_ms=0.0, start_s=None)
+STATS = dict(calls=0, proposals=0, server_ms=0.0, wall_ms=0.0, start_s=None,
+             jump_dropped=0, verify_checked=0, verify_dropped=0)
+_CHAINS = {}
 
 
 class _Server:
@@ -124,8 +142,66 @@ def server() -> _Server:
 def _report():
     if STATS["calls"]:
         print(f"[curobo_client] calls={STATS['calls']} proposals={STATS['proposals']} "
-              f"server_ms={STATS['server_ms']:.0f} wall_ms={STATS['wall_ms']:.0f} start_s={STATS['start_s']}",
+              f"jump_dropped={STATS['jump_dropped']} server_ms={STATS['server_ms']:.0f} "
+              f"wall_ms={STATS['wall_ms']:.0f} start_s={STATS['start_s']}",
               file=sys.stderr, flush=True)
+
+
+def max_jump() -> float:
+    v = float(os.environ.get(MAX_JUMP_ENV, "1.2"))
+    if v < 0:
+        raise ValueError(f"{MAX_JUMP_ENV}={v}: expected >= 0 (0 = off)")
+    return v
+
+
+def near_first(q: np.ndarray, ok: np.ndarray, seed: np.ndarray, jump: float) -> tuple:
+    """(rows to try, how many solved rows the jump dropped).
+
+    Solved rows within ``jump`` of ``seed`` (largest single-joint change), nearest first by
+    L2; with none solved, the first four rows as plain starts, under the same jump rule.
+    ``jump`` 0 keeps every row.
+    """
+    d = np.linalg.norm(q - seed, axis=1)
+    far = np.abs(q - seed).max(axis=1) > jump if jump > 0 else np.zeros(len(q), bool)
+    solved = np.flatnonzero(ok)
+    keep = [int(i) for i in solved[np.argsort(d[solved], kind="stable")] if not far[i]]
+    if len(solved):
+        return keep, int(len(solved) - len(keep))
+    return [i for i in range(min(4, len(q))) if not far[i]], 0
+
+
+def chain(base: str = "base_link"):
+    """The URDF chain from ``base`` to gripper_link, parsed once."""
+    if base not in _CHAINS:
+        from robots.fetch.urdf_fk import Chain
+
+        _CHAINS[base] = Chain(Path(__file__).resolve().parent / "fetch.urdf", base, "gripper_link")
+    return _CHAINS[base]
+
+
+def verify(goals: np.ndarray, q: np.ndarray, ok: np.ndarray, names, tol=VERIFY_TOL,
+           base: str = "base_link") -> np.ndarray:
+    """``ok`` with every claim dropped that float64 FK of the URDF does not confirm.
+
+    ``goals`` (..., 4, 4) gripper_link poses in ``base``'s frame, ``q`` (..., len(names))
+    the solutions, ``ok`` the solver's flags; returns a new mask of the same shape.
+    """
+    ok = np.asarray(ok, dtype=bool).copy()
+    hits = np.flatnonzero(ok.reshape(-1))
+    if len(hits) == 0:
+        return ok
+    c = chain(base)
+    Q = np.asarray(q, dtype=np.float64).reshape(-1, len(names))[hits]
+    G = np.asarray(goals, dtype=np.float64).reshape(-1, 4, 4)[hits]
+    pos, rot = pose_error(c.fk_many(Q, names), G)
+    lo, hi = c.limits(names)
+    inside = np.all((Q >= lo - 1e-6) & (Q <= hi + 1e-6), axis=1)
+    good = (pos < tol[0]) & (rot < tol[1]) & inside
+    flat = ok.reshape(-1)
+    flat[hits[~good]] = False
+    STATS["verify_checked"] += int(len(hits))
+    STATS["verify_dropped"] += int((~good).sum())
+    return flat.reshape(ok.shape)
 
 
 def _matrix(pose) -> np.ndarray:
@@ -167,7 +243,9 @@ def propose(planner, goal_pose, start_qpos, mask) -> list:
     STATS["server_ms"] += r["ms"]
     STATS["wall_ms"] += (time.perf_counter() - t0) * 1e3
     q, ok = np.asarray(r["q"], dtype=np.float64), np.asarray(r["ok"], dtype=bool)
-    order = list(np.flatnonzero(ok)) or list(range(min(4, len(q))))    # nothing solved: still try the best few
+    seed = np.asarray([float(start_qpos[c]) for c in cols], dtype=np.float64)
+    order, dropped = near_first(q, ok, seed, max_jump())
+    STATS["jump_dropped"] += dropped
     starts = []
     for i in order:
         full = np.asarray(start_qpos, dtype=np.float64).copy()
@@ -186,7 +264,7 @@ def stand_matrix(x: float, y: float, yaw: float) -> np.ndarray:
     return T
 
 
-def scan(goals_world, stands, *, coll: bool = False):
+def scan(goals_world, stands, *, coll: bool = False, verify_hits: bool = True, tol=VERIFY_TOL):
     """Which (stand, goal) pairs the arm reaches with the torso free: a ``(len(stands),
     len(goals))`` boolean mask from ONE batched cuRobo call (plus its solutions).
 
@@ -194,7 +272,8 @@ def scan(goals_world, stands, *, coll: bool = False):
     base poses (x, y, yaw). Kinematics only (and self-collision with ``coll``): the scene is
     the caller's to check. BIMBO_EvoX's rule applies: use the mask to choose WHERE to stand
     or WHAT to reach for; never move to a scan solution, it may be on any branch — solve
-    the motion from the current joints.
+    the motion from the current joints. ``verify_hits`` (BIMBO's ``verify=True``) keeps
+    a hit only if float64 FK of the URDF confirms it (`verify`).
     """
     G = np.asarray(goals_world, dtype=np.float64).reshape(-1, 4, 4)
     S = np.asarray(stands, dtype=np.float64).reshape(-1, 3)
@@ -206,4 +285,6 @@ def scan(goals_world, stands, *, coll: bool = False):
     STATS["wall_ms"] += (time.perf_counter() - t0) * 1e3
     ok = np.asarray(r["ok"], dtype=bool).reshape(len(S), len(G))
     q = np.asarray(r["q"], dtype=np.float64).reshape(len(S), len(G), -1)
+    if verify_hits:
+        ok = verify(rel, q, ok, r["names"], tol)
     return ok, q

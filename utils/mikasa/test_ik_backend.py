@@ -7,6 +7,7 @@ Needs mplib, mani_skill and the RoboCasa assets (the planner container); skipped
 """
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -51,6 +52,20 @@ def planner():
     solver.planner._test_q0 = np.asarray(solver.planner.fold_qpos(sim), dtype=np.float64)
     yield solver.planner
     env.close()
+
+
+def _socket_path(tmp_path, request):
+    """A Unix socket path under the 107-byte limit: pytest's tmp_path is often longer."""
+    import os
+    import shutil
+    import tempfile
+
+    path = tmp_path / "s.sock"
+    if len(str(path)) < 100:
+        return path
+    short = tempfile.mkdtemp(prefix="sk", dir=os.path.expanduser("~"))
+    request.addfinalizer(lambda: shutil.rmtree(short, ignore_errors=True))
+    return Path(short) / "s.sock"
 
 
 def _col(names, suffix):
@@ -191,7 +206,7 @@ def test_fixed_starts_retry_takes_the_next_block(planner, monkeypatch):
     assert np.array_equal(ik_backend.fixed_starts(planner, 5, 1), b)
 
 
-def test_curobo_client_on_a_shared_socket(planner, monkeypatch, tmp_path):
+def test_curobo_client_on_a_shared_socket(planner, monkeypatch, tmp_path, request):
     """The shared-server path: connect to a socket instead of starting a process."""
     import socket
     import threading
@@ -199,7 +214,7 @@ def test_curobo_client_on_a_shared_socket(planner, monkeypatch, tmp_path):
     from robots.fetch import curobo_client
 
     goal, q0, mask, target_arm = _problem(planner, seed=2)
-    path = tmp_path / "curobo.sock"
+    path = _socket_path(tmp_path, request)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(str(path))
     srv.listen()
@@ -237,14 +252,14 @@ def test_curobo_client_on_a_shared_socket(planner, monkeypatch, tmp_path):
     assert status == "Success" and goals
 
 
-def test_scan_sends_goals_in_each_stands_frame_and_shapes_the_mask(monkeypatch, tmp_path):
+def test_scan_sends_goals_in_each_stands_frame_and_shapes_the_mask(monkeypatch, tmp_path, request):
     """No simulator: the scan's frames and mask layout against a stand-in socket server."""
     import socket
     import threading
 
     from robots.fetch import curobo_client
 
-    path = tmp_path / "scan.sock"
+    path = _socket_path(tmp_path, request)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(str(path))
     srv.listen()
@@ -271,7 +286,7 @@ def test_scan_sends_goals_in_each_stands_frame_and_shapes_the_mask(monkeypatch, 
     goal[:3, 3] = [1.0, 0.0, 0.9]
     stands = [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (1.0, -1.0, np.pi / 2)]
     try:
-        ok, q = curobo_client.scan([goal], stands)
+        ok, q = curobo_client.scan([goal], stands, verify_hits=False)   # the stand-in's q is not a solution
     finally:
         s = curobo_client._SERVER.pop("s", None)
         if s is not None:
@@ -281,3 +296,59 @@ def test_scan_sends_goals_in_each_stands_frame_and_shapes_the_mask(monkeypatch, 
     assert ok.shape == (3, 1) and q.shape == (3, 1, 8)
     assert ok[:, 0].tolist() == [True, False, True]          # behind the second stand; ahead of the third
     assert np.allclose(seen["goals"][2][:3, 3], [1.0, 0.0, 0.9])   # stand 3 faces +y from (1, -1)
+
+
+def test_near_first_drops_far_branches_and_orders_nearest():
+    """BIMBO_EvoX's jump rule on cuRobo's proposals: no simulator, no server."""
+    from robots.fetch.curobo_client import near_first
+
+    seed = np.zeros(3)
+    q = np.array([[0.5, 0.0, 0.0], [0.1, 0.0, 0.0], [1.5, 0.0, 0.0], [0.0, 0.3, 0.3]])
+    ok = np.array([True, True, True, False])
+    assert near_first(q, ok, seed, 1.2) == ([1, 0], 1)           # 1.5 rad on one joint: another branch
+    assert near_first(q, ok, seed, 0.0) == ([1, 0, 2], 0)        # 0 = off
+    assert near_first(q, np.zeros(4, bool), seed, 1.2) == ([0, 1, 3], 0)   # nothing solved: plain starts
+
+
+def test_scan_verify_keeps_true_hits_and_drops_false_ones():
+    """The float64 re-check against the URDF: a true hit stays, a pose 2 cm off and a joint
+    past its limit go, a miss stays a miss."""
+    from robots.fetch import curobo_client
+
+    c = curobo_client.chain()
+    names = list(c.joint_names)
+    assert names[0] == "torso_lift_joint" and len(names) == 8
+    lo, hi = c.limits(names)
+    rng = np.random.default_rng(0)
+    Q = rng.uniform(np.maximum(lo, -3.0), np.minimum(hi, 3.0), size=(4, len(names)))
+    goals = c.fk_many(Q, names)
+    goals[1, 0, 3] += 0.02
+    Q[2, 0] = hi[0] + 0.05
+    goals[2] = c.fk_many(Q[2:3], names)[0]
+    ok = np.array([True, True, True, False])
+    before = curobo_client.STATS["verify_dropped"]
+    out = curobo_client.verify(goals, Q, ok, names)
+    assert out.tolist() == [True, False, False, False]
+    assert curobo_client.STATS["verify_dropped"] - before == 2
+
+
+def test_urdf_fk_matches_the_planners_model(planner):
+    """`urdf_fk` against mplib's pinocchio model of the same URDF, base_link -> gripper_link."""
+    from robots.fetch import curobo_client
+
+    c = curobo_client.chain()
+    names = list(planner.user_joint_names)
+    links = list(planner.link_name_2_idx)
+    grip = planner.link_name_2_idx[links[_col(links, "gripper_link")]]
+    base = planner.link_name_2_idx[links[_col(links, "base_link")]]
+    lo, hi = c.limits(c.joint_names)
+    rng = np.random.default_rng(1)
+    for _ in range(5):
+        q = planner._test_q0.copy()
+        vals = rng.uniform(np.maximum(lo, -3.0), np.minimum(hi, 3.0))
+        for n, v in zip(c.joint_names, vals):
+            q[_col(names, n)] = v
+        planner.pinocchio_model.compute_forward_kinematics(q)
+        T = (np.linalg.inv(curobo_client._matrix(planner.pinocchio_model.get_link_pose(base)))
+             @ curobo_client._matrix(planner.pinocchio_model.get_link_pose(grip)))
+        assert np.allclose(c.fk(dict(zip(c.joint_names, vals))), T, atol=1e-6)
