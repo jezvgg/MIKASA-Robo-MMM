@@ -2247,8 +2247,13 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
 
 def ready_by_line(env, planner, task, ready, *, drive: float, grasp,
                   label: str = "ready posture", slack=None,
-                  touch_needle: str | None = "cup", rank=None):
-    """Choose an IK goal whose arm line, base drive, and grasp screw all plan."""
+                  touch_needle: str | None = "cup", rank=None, line_step: float = 0.1):
+    """Choose an IK goal whose arm line, base drive, and grasp screw all plan.
+
+    ``line_step`` is the joint-space step (move-group norm, rad) at which the arm line and
+    the drive sweep are collision-checked; 0.1 is `plan_qpos_line`'s own default, which
+    near a small object can step over it (Depth Recall passes 0.01).
+    """
     import mplib
     from robots.fetch.utils import goal_order, unwrap_toward
 
@@ -2279,7 +2284,7 @@ def ready_by_line(env, planner, task, ready, *, drive: float, grasp,
             if j not in root and j < 13:
                 full[j] = float(g[j])
         try:
-            line = p.plan_qpos_line(full, cur, time_step=dt, ref_yaw=float(cur[2]))
+            line = p.plan_qpos_line(full, cur, time_step=dt, qpos_step=line_step, ref_yaw=float(cur[2]))
         except RuntimeError as exc:
             line = {"status": f"mplib raised: {exc}"}
         if line.get("status") != "Success" or len(np.asarray(line.get("position", []))) < 2:
@@ -2290,7 +2295,8 @@ def ready_by_line(env, planner, task, ready, *, drive: float, grasp,
             driven[0] += float(drive) * float(heading[0])
             driven[1] += float(drive) * float(heading[1])
             try:
-                sweep = p.plan_qpos_line(driven, full, time_step=dt, ref_yaw=float(cur[2]))
+                sweep = p.plan_qpos_line(driven, full, time_step=dt, qpos_step=line_step,
+                                         ref_yaw=float(cur[2]))
             except RuntimeError as exc:
                 sweep = {"status": f"mplib raised: {exc}"}
             if sweep.get("status") != "Success":

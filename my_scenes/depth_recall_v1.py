@@ -1,36 +1,24 @@
-"""MikasaDepthRecall-v1: take the deepest prop out, stage the row on the COUNTER, put it back.
+"""MikasaDepthRecall-v1: retrieve the deepest prop and restore its three blockers.
 
-The owner's rewrite of `MikasaDepthRecall-v0`, 2026-09-09: build it on the retrieval
-straight flow, stage the removed props on FOUR counter slots instead of inside the
-cabinet, let the slot be drawn at RANDOM so the row cannot be restored by queue order,
-and return everything except the last prop taken out, which is the one the chore asked
-for. The design blank is `docs/task-designs/H-depthrecall-v1.md`.
+Four coloured props occupy a seeded front-to-back permutation on a cabinet shelf.
+The counter carries four pads, one in each prop's colour, and the episode shuffles
+which counter slot each colour's pad lies on. The props are cleared onto their own
+pads, the one from the deepest position stays there, and the others go back to their
+original places. Every restored prop must previously have stood on its own pad, and a
+prop released on another colour's pad voids the episode (`wrong_pad`).
 
-**What the rewrite is for.** v0 staged the removed props on a fixed line inside the
-cabinet and recorded the cost with open eyes: "the agent's own staging layout can
-encode the answer (a LIFO/queue convention solves the restore without internal
-memory)". That convention is learnable in the weights, so v0's blind floor was an
-oracle-relative control rather than a bound. Drawing the counter slot per episode makes
-the staged arrangement statistically independent of the row's order, and a fixed rule
-stops working: to put a prop back you have to remember where it came from.
+The answer is the association between prop identity and original depth. It is
+available while the shelf is being emptied and excluded from policy observations
+once the props are staged. The pads fix WHERE each prop is staged (by colour, drawn
+per episode, independent of the row order), so the staging layout cannot encode the
+order: what is on the counter says nothing about where each prop came from.
+The 1/6 guessing reference is conditional on the three blockers and a uniformly
+shuffled restore assignment, not a universal memoryless-policy bound.
 
-**The chore.** By default four props stand one behind another on the shelf, front to deep. The
-front one hides the others, so the arrangement is not visible at t=0 and is learned by
-taking the row apart. Each prop that comes out is stood on one of four counter slots,
-drawn. The DEEPEST prop is the target: it stays on the counter. The other three go back
-into their OWN row slots — and physics settles the order, since nothing can be placed
-behind an occupied slot.
-
-**Reachability is why the slots sit WEST of the row** (measured 2026-09-10, and this is
-a task definition, not a tuning knob): with the base docked at the object's own x, the
-arm places into the SHELF up to 36 cm toward larger x (5/5) but is refused past 6 cm
-toward smaller x, because the closed left door walls off that side; on the COUNTER,
-placing up to 30 cm toward smaller x is 5/5. So an extraction docks at the row and
-reaches west onto the counter, a restore docks at the slot and reaches east into the
-row, and the base only ever moves with an EMPTY hand. No transit carries a prop.
-
-Conventions: `docs/writing-tasks.md`, AGENTS.md "Writing a memory task". Where this
-departs from `template_task.py` the comment says why.
+The four counter slots are spaced wider than the original 12 cm pitch; the pitch and
+its reach evidence are on `slot_x_offsets`. Collection uses the unmodified master
+DSFetch; historical reachability results from a different robot are not qualification
+of this configuration.
 """
 
 from __future__ import annotations
@@ -50,35 +38,41 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneBuilder
 from mani_skill.utils.structs import Pose
 
+from utils.mikasa.assisted_grasp import AssistedGrasp
 from utils.robocasa_utils import parking_pose, require_get_fixture, restore_task_tensor
 
 #: Everything `get_state_dict` adds beyond sim state. All of it is task MEMORY or a
 #: latch; every entry is rank <= 2 (`flatten_state_dict` ends in `torch.hstack`).
 TASK_STATE_KEYS = (
-    "original_slots", "left_slot", "restored", "was_lifted",
+    "original_slots", "left_slot", "restored", "was_lifted", "staged",
     "wrong_assign", "target_returned", "two_in_slot", "succeeded",
-    "arrangement_hold", "last_eval_step",
+    "arrangement_hold", "last_eval_step", "pad_slots", "wrong_pad",
 )
 
 INSTRUCTIONS = (
-    "Take the props out of the cabinet onto the counter, keep the one from the "
-    "back, and put the others back where they stood.",
-    "Clear the row of props onto the counter slots, keep the one that stood at the "
-    "back, and return every other prop to the shelf spot it came from.",
-    "Empty the shelf row onto the counter, hold on to the prop from the deepest "
-    "spot, and put the rest back exactly where each of them was.",
+    "Take the props out of the cabinet onto the counter pads of their own colour, "
+    "keep the one from the back, and put the others back where they stood.",
+    "Clear the row of props onto the matching coloured pads on the counter, keep the "
+    "one that stood at the back, and return every other prop to the shelf spot it "
+    "came from.",
+    "Empty the shelf row onto the counter, each prop on the pad of its colour, hold on "
+    "to the prop from the deepest spot, and put the rest back exactly where each of "
+    "them was.",
 )
 
-#: The four staging slots' marker colour and plate size. Decoration with a job: the
-#: slots are where the chore says to put things, and a viewer (or a policy reading
-#: pixels) cannot see a coordinate. Kinematic and collision-free — `hide_visual`
-#: asserts no collision shapes and the pose setter asserts a non-static body under GPU
-#: sim, which is the pair of constraints every marker in this package is built to.
-SLOT_MARKER_COLOR = (0.95, 0.85, 0.1, 1.0)
-SLOT_MARKER_HALF = (0.038, 0.038, 0.002)
+#: The staging pads' plate size. One pad per prop, in that prop's colour; the episode
+#: draws which counter slot each pad lies on. Decoration with a job: the pads are where
+#: the chore says to put each prop, and a viewer (or a policy reading pixels) cannot
+#: see a coordinate. Kinematic and collision-free — `hide_visual` asserts no collision
+#: shapes and the pose setter asserts a non-static body under GPU sim, which is the pair
+#: of constraints every marker in this package is built to. 9 cm across: wider than a
+#: prop (4.5 cm) by a finger's clearance a side, so the colour shows around a standing
+#: prop from the head cameras.
+PAD_HALF = (0.045, 0.045, 0.002)
 
 #: Fixed identity palette — a prop cannot be recoloured per episode, so colour IS
-#: identity and the episode's ticket permutes which SLOT each colour occupies.
+#: identity and the episode's ticket permutes which SLOT each colour occupies. The pads
+#: use the same colours: pad c belongs to prop c.
 PROP_COLORS = (
     (1.0, 0.1, 0.1, 1.0),   # red
     (0.1, 0.8, 0.1, 1.0),   # green
@@ -152,22 +146,35 @@ class DepthRecallV1Config:
     "Row x: jitter about the exposed half's centre -> x in [2.46, 2.54]."
 
     # -- the four counter slots ------------------------------------------------
-    slot_x_offsets: tuple = (-0.36, -0.24, -0.12, 0.0)
+    slot_x_offsets: tuple = (-0.54, -0.36, -0.18, 0.0)
     """Where the four staging slots sit along the counter, relative to the ROW's x.
 
-    West of the row, evenly spaced by 12 cm, for two measured reasons. West, because
-    the restore places into the shelf from a dock at the slot and that reach only
-    exists toward LARGER x (the closed left door refuses the other way past 6 cm).
-    12 cm, because a prop is 4.5 cm across and the pads open to 10 cm, so a narrower
-    pitch leaves less than the ~2.8 cm a side the fingers need."""
-    place_across: float = -0.525
-    "World y of the slots: the open-sky counter band, the retrieval family's own."
+    West of the row, evenly spaced by 18 cm (the owner, 2026-10-16: wider than the
+    original 12 cm). West, because east of the row the open right door hangs over the
+    counter's last 25 cm. 18 cm, because that is what the arm reaches from the ONE dock:
+    cuRobo's scan of the planner's own poses (`scripts/dr_pad_reach.py`, every grasp
+    lift, the row's +-4 cm jitter, self-collision, hits re-checked in float64) at the
+    pads' y (`place_across`) reaches 64 cm west for the restore grasp and, with the
+    extraction carrying the prop back to the dock line
+    (`depth_recall_v1_planner.carry_out`), 60 cm for the place; 54 cm keeps 6 cm of that
+    in hand. The old carry (back only until the prop is over the pads' line) placed no
+    further than 44 cm. With pads 18 cm apart a prop is on one pad or none
+    (`slot_radius`)."""
+    place_across: float = -0.56
+    """World y of the pads: the open-sky counter band, 3.5 cm nearer the robot than the
+    retrieval family's -0.525. Measured 2026-10-16 by the same scan as `slot_x_offsets`:
+    the cross to a pad 54 cm west plans at two of the three torso rungs from every row
+    slot at -0.56, at one rung for the deepest slot at -0.525; the counter's front edge
+    is at -0.65, the pad's at -0.605."""
     slot_radius: float = 0.08
-    "How close to a slot point a prop must stand to count as IN that slot."
+    """How close to a pad's centre a prop must stand to count as ON that pad. Half the
+    narrowest pitch at most, so a prop is on one pad or none."""
 
     # -- what counts as standing, and what voids the episode -------------------
     slot_xy_tol: float = 0.035
     "How far (xy) a prop may sit off a ROW slot and still count as in it."
+    upright_tilt_deg: float = 15.0
+    "Maximum lean from vertical for a standing prop, in degrees."
     upright_tol: float = 0.015
     """A standing prop's centre sits `prop_half_h` above its surface; a tipped 12 cm
     prop's centre drops ~3.5 cm, far outside this."""
@@ -188,7 +195,7 @@ class DepthRecallV1Config:
     settle_ang_speed: float = 0.2
     leave_tol: float = 0.06
     """A movable counts as having LEFT its row slot once its xy runs this far from the
-    slot point. Success requires BOTH movables to have left and come back, so
+    slot point. Success requires all three blockers to have left and come back, so
     "reach past the row without touching it" cannot be credited as a restore."""
 
     def validate(self) -> None:
@@ -230,16 +237,26 @@ class DepthRecallV1Config:
                 "slots closer than 10 cm: a 4.5 cm prop plus the ~2.8 cm a side the "
                 "pads need does not fit between them"
             )
+            assert b - a >= 2 * self.slot_radius, (
+                "pads closer than twice `slot_radius`: one prop could count as standing "
+                "on two pads, its own and a wrong one"
+            )
+            assert b - a >= 2 * PAD_HALF[0] + 0.02, "the pads would touch"
         assert max(offs) <= 0.0, (
-            "a slot east of the row makes its restore place toward SMALLER x, which "
-            "the closed left door refuses past 6 cm (measured 2026-09-10)"
+            "a slot east of the row is under the open right door, which hangs over the "
+            "counter's last 25 cm"
         )
-        assert min(offs) >= -0.36, "measured lateral reach runs out past 36 cm"
+        assert min(offs) >= -0.54, (
+            "the place's reach from the dock line runs out at 60 cm west of the row "
+            "(cuRobo scan 2026-10-16, kinematics + self-collision, before the scene's "
+            "own collisions): keep at least 6 cm of it"
+        )
         assert self.hold_steps > 0
         assert self.hold_steps * 2 < self.horizon, (
             "the hold must fit after the work with room to spare"
         )
         assert 0 < self.slot_xy_tol < 2 * self.prop_half_xy
+        assert 0 < self.upright_tilt_deg <= 45.0
         assert 0 < self.upright_tol < self.prop_half_h / 2
         assert self.slot_xy_tol < self.leave_tol <= 0.10
         assert self.slot_radius > 2 * self.prop_half_xy
@@ -266,9 +283,15 @@ class DepthRecallV1Task(BaseEnv):
 
     cfg = DepthRecallV1Config()
 
-    def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0, **kwargs):
+    def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0,
+                 assisted_grasp: bool = False, **kwargs):
+        """``assisted_grasp=True`` welds a prop to the hand by OmniGibson's rule
+        (`utils/mikasa/assisted_grasp.py`). Off by default: it changes the physics, so
+        demos and evaluations made with it are a different task and must say so."""
         self.cfg.validate()
         self.scene_idx = scene_idx
+        self.assisted_grasp = bool(assisted_grasp)
+        self._ag = None
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     # ---------------------------------------------------------------- sensors --
@@ -280,10 +303,13 @@ class DepthRecallV1Task(BaseEnv):
 
     @property
     def _default_human_render_camera_configs(self):
-        # The row, the four slots and the robot in one frame. The slots run 36 cm west
-        # of the row, so the eye sits west of v0's and looks along the counter.
-        pose = sapien_utils.look_at(eye=[2.05, -2.75, 2.05], target=[2.30, -0.40, 1.25])
-        return CameraConfig("render_camera", pose, 512, 512, 1.2, 0.01, 100)
+        # Two views, side by side in a recorded clip. From behind: the robot, the row and
+        # the counter. From the west, along the counter: the four pads and the row in the
+        # open cabinet, which the robot's own body hides from behind while it works.
+        pose = sapien_utils.look_at(eye=[1.95, -2.80, 2.05], target=[2.22, -0.40, 1.20])
+        side = sapien_utils.look_at(eye=[1.30, -1.70, 1.90], target=[2.35, -0.35, 1.20])
+        return [CameraConfig("render_camera", pose, 512, 512, 1.2, 0.01, 100),
+                CameraConfig("render_camera_side", side, 512, 512, 1.2, 0.01, 100)]
 
     # ------------------------------------------------------------------- load --
 
@@ -344,18 +370,18 @@ class DepthRecallV1Task(BaseEnv):
             for i in range(self.cfg.n_props)
         ]
 
-        # One flat plate per staging slot, drawn on the counter.
-        self.slot_markers = [
+        # One flat pad per prop, in that prop's colour; the episode puts each on a slot.
+        self.pads = [
             actors.build_box(
                 self.scene,
-                half_sizes=list(SLOT_MARKER_HALF),
-                color=list(SLOT_MARKER_COLOR),
-                name=f"slot_marker_{k}",
+                half_sizes=list(PAD_HALF),
+                color=list(PROP_COLORS[c]),
+                name=f"pad_{c}",
                 body_type="kinematic",
                 add_collision=False,
-                initial_pose=sapien.Pose(p=[2.30 - 0.12 * k, -0.525, 0.93]),
+                initial_pose=sapien.Pose(p=[2.30 - 0.18 * c, -0.525, 0.93]),
             )
-            for k in range(4)
+            for c in range(self.cfg.n_props)
         ]
 
         counter_tops = np.array(
@@ -379,16 +405,13 @@ class DepthRecallV1Task(BaseEnv):
                 float(pos[0] + size[0] / 2.0) - self.cfg.row_margin_x)
 
     def _fix_ds_fetch_collision_bits(self):
-        """Restore the wheel/base exemption `scene_builder.py:490` skips for our uid."""
-        if self.robot_uids == "fetch" or self.agent is None:
+        """RoboCasa wheel/base exclusions; preserve arm, head and finger contacts."""
+        if self.robot_uids != "ds_fetch" or self.agent is None:
             return
-        for link in self.agent.robot.links:
-            for body in link._bodies:
-                for shape in body.get_collision_shapes():
-                    groups = shape.get_collision_groups()
-                    for bit in range(25, 30):
-                        groups[2] |= 1 << bit
-                    shape.set_collision_groups(groups)
+        for link in (self.agent.l_wheel_link, self.agent.r_wheel_link):
+            for bit in range(25, 31):
+                link.set_collision_group_bit(group=2, bit_idx=bit, bit=1)
+        self.agent.base_link.set_collision_group_bit(group=2, bit_idx=31, bit=1)
 
     # ------------------------------------------------------------- initialize --
 
@@ -400,6 +423,11 @@ class DepthRecallV1Task(BaseEnv):
         self.left_slot = torch.zeros((n, k), dtype=torch.bool, device=dev)
         self.restored = torch.zeros((n, k), dtype=torch.bool, device=dev)
         self.was_lifted = torch.zeros((n, k), dtype=torch.bool, device=dev)
+        self.staged = torch.zeros((n, k), dtype=torch.bool, device=dev)
+        # Which counter slot each colour's pad lies on, drawn per episode; and the latch
+        # for a prop released on a pad that is not its own.
+        self.pad_slots = torch.zeros((n, k), dtype=torch.long, device=dev)
+        self.wrong_pad = torch.zeros(n, dtype=torch.bool, device=dev)
         self.wrong_assign = torch.zeros(n, dtype=torch.bool, device=dev)
         self.target_returned = torch.zeros(n, dtype=torch.bool, device=dev)
         self.two_in_slot = torch.zeros(n, dtype=torch.bool, device=dev)
@@ -408,9 +436,15 @@ class DepthRecallV1Task(BaseEnv):
         # `evaluate()` runs at t=0 inside reset() and is called out of band by the
         # diagnose scripts; a counter that advanced on every call would be wrong twice.
         self.last_eval_step = torch.full((n,), -1, dtype=torch.int32, device=dev)
+        # The props and the agent exist now; the drives are made once per build.
+        self._ag = AssistedGrasp(self, self.props) if self.assisted_grasp else None
         return super()._after_reconfigure(options)
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        # Release any weld BEFORE the props are posed: an enabled drive would pull the
+        # freshly spawned prop back to the hand on the first physics step.
+        if self._ag is not None:
+            self._ag.reset()
         with torch.device(self.device):
             b = len(env_idx)
             self.scene_builder.initialize(env_idx)
@@ -426,14 +460,19 @@ class DepthRecallV1Task(BaseEnv):
             # only seeds the torch generator when a seed was passed, so a torch draw is
             # not reproducible from a seed — fine for jitter, wrong for the one fact the
             # whole task rests on.
-            perms, jit = [], []
+            # The pad draw comes AFTER the row permutation and the jitter, so a seed keeps
+            # the row and the start it had before the pads were coloured.
+            perms, jit, pads = [], [], []
             for i in env_idx.tolist():
                 rng = self._batched_episode_rng[int(i)]
                 perms.append(rng.permutation(self.cfg.n_props))
                 jit.append(rng.uniform(-1.0, 1.0, size=3))
+                pads.append(rng.permutation(4)[: self.cfg.n_props])
             slots = torch.as_tensor(np.stack(perms), dtype=torch.long)
             jx = torch.as_tensor(np.stack(jit), dtype=torch.float32)
             self.original_slots[env_idx] = slots
+            pad_slots = torch.as_tensor(np.stack(pads), dtype=torch.long)
+            self.pad_slots[env_idx] = pad_slots
 
             row_x = self._row_centre_x[env_idx] + jx[:, 0] * self.cfg.row_jitter_x
 
@@ -449,12 +488,12 @@ class DepthRecallV1Task(BaseEnv):
             slot_pts[:, :, 2] = self._counter_top_z[env_idx].unsqueeze(-1)
             self._slot_points[env_idx] = slot_pts
 
-            # The markers sit ON the slots, a hair above the surface so they are drawn
-            # rather than z-fighting with it.
-            for k, marker in enumerate(self.slot_markers):
-                mp = slot_pts[:, k, :].clone()
-                mp[:, 2] = mp[:, 2] + SLOT_MARKER_HALF[2] + 0.001
-                marker.set_pose(Pose.create_from_pq(p=mp))
+            # Each pad on its drawn slot, a hair above the surface so it is drawn rather
+            # than z-fighting with it.
+            for c, pad in enumerate(self.pads):
+                mp = slot_pts[torch.arange(b), pad_slots[:, c]].clone()
+                mp[:, 2] = mp[:, 2] + PAD_HALF[2] + 0.001
+                pad.set_pose(Pose.create_from_pq(p=mp))
 
             # Each prop onto its drawn row slot, by MESH BOTTOM: a box's origin sits
             # `prop_half_h` above its base, and spawning by origin buries it in the shelf.
@@ -464,12 +503,16 @@ class DepthRecallV1Task(BaseEnv):
                 p[:, :2] = own[:, :2]
                 p[:, 2] = self.cfg.shelf_top_z + self.cfg.spawn_clearance + self.cfg.prop_half_h
                 prop.set_pose(Pose.create_from_pq(p=p, q=self._yaw_quat(b)))
+                prop.set_linear_velocity(torch.zeros((b, 3), device=self.device))
+                prop.set_angular_velocity(torch.zeros((b, 3), device=self.device))
 
             self._restore_robot(env_idx, row_x, jx)
 
             self.left_slot[env_idx] = False
             self.restored[env_idx] = False
             self.was_lifted[env_idx] = False
+            self.staged[env_idx] = False
+            self.wrong_pad[env_idx] = False
             self.wrong_assign[env_idx] = False
             self.target_returned[env_idx] = False
             self.two_in_slot[env_idx] = False
@@ -500,11 +543,18 @@ class DepthRecallV1Task(BaseEnv):
         q[env_idx, 1] = self.cfg.start_y + jx[:, 1] * self.cfg.start_jitter_y
         q[env_idx, 2] = math.radians(self.cfg.start_yaw_deg) + jx[:, 2] * self.cfg.start_jitter_yaw
         self.agent.robot.set_qpos(q[env_idx])
+        self.agent.robot.set_qvel(torch.zeros_like(q[env_idx]))
+
+    def _after_simulation_step(self):
+        # The rule runs on every physics step, as OmniGibson's does: contacts and rays
+        # after the step, the weld switched before the next one.
+        if self._ag is not None:
+            self._ag.after_substep()
 
     # --------------------------------------------------------------- evaluate --
 
     def _prop_state(self):
-        """Positions, tilts, grasp flags and settle flags for the three props."""
+        """Positions, tilts, grasp flags and settle flags for the four props."""
         pos = torch.stack([p.pose.p for p in self.props], dim=1)                # (N, k, 3)
         rot = torch.stack([p.pose.to_transformation_matrix()[:, :3, :3]
                            for p in self.props], dim=1)                          # (N, k, 3, 3)
@@ -525,7 +575,7 @@ class DepthRecallV1Task(BaseEnv):
         cfg = self.cfg
         pos, tilt, grasped, settled = self._prop_state()
         n, k = self.num_envs, cfg.n_props
-        upright = tilt <= math.radians(15.0)
+        upright = tilt <= math.radians(cfg.upright_tilt_deg)
         free = settled & ~grasped
 
         # Each prop's OWN row slot point, gathered by the episode's permutation.
@@ -572,15 +622,26 @@ class DepthRecallV1Task(BaseEnv):
         # its own slot at t=0, and a flag that is true there says nothing. The verdict
         # already gates on `all_left`; folding it in here keeps the per-prop flag in the
         # trace honest too, which is what a failed run is read from.
-        restored = (in_row & own_hot).any(dim=-1) & ~is_target & self.left_slot
+        # Leaving a shelf slot alone also admits an in-cabinet sideways nudge.
+        # v1 requires every blocker to have stood, released, on the counter.
+        # A prop stands ON a pad within `slot_radius` of its centre; the pads are at
+        # least two radii apart, so on one pad or none. Its OWN pad is its colour's.
+        on_pad = (on_counter & free).unsqueeze(-1) & (d_slot <= cfg.slot_radius)  # (N, k, 4)
+        own_pad = torch.nn.functional.one_hot(self.pad_slots, 4).bool()           # (N, k, 4)
+        on_slot = on_pad.any(dim=-1)
+        on_own = (on_pad & own_pad).any(dim=-1)
+        self.wrong_pad = self.wrong_pad | ((on_pad & ~own_pad).any(dim=-1)
+                                           & self.was_lifted).any(dim=1)
+        self.staged = self.staged | (on_own & self.was_lifted)
+        restored = ((in_row & own_hot).any(dim=-1) & ~is_target
+                    & self.left_slot & self.staged)
         self.restored = restored
         movable = ~is_target
         all_restored = ((restored | ~movable).all(dim=1))
         all_left = ((self.left_slot | ~movable).all(dim=1))
-        target_ok = ((on_counter & free & self.was_lifted
-                      & (d_slot <= cfg.slot_radius).any(dim=-1)) | ~is_target).all(dim=1)
+        target_ok = ((on_own & self.was_lifted) | ~is_target).all(dim=1)
 
-        raw = (all_restored & all_left & target_ok
+        raw = (all_restored & all_left & target_ok & ~self.wrong_pad
                & ~self.wrong_assign & ~self.target_returned & ~self.two_in_slot)
 
         # The hold counter, idempotent within a step. It advances only when
@@ -597,14 +658,27 @@ class DepthRecallV1Task(BaseEnv):
         self.last_eval_step = torch.where(advance, step, self.last_eval_step)
         self.succeeded = self.succeeded | (self.arrangement_hold >= cfg.hold_steps)
 
+        extra = {}
+        ag = getattr(self, "_ag", None)
+        if ag is not None:
+            # Which prop is welded to the hand, -1 for none. Not an observation.
+            extra["ag_held"] = torch.full((n,), ag.held_index(), dtype=torch.long,
+                                          device=pos.device)
         return {
-            "success": self.succeeded,
+            **extra,
+            # Keep historical completion separate from a valid final arrangement.
+            "success": raw & (self.arrangement_hold >= cfg.hold_steps),
+            "success_once": self.succeeded,
             "all_restored": all_restored,
             "all_left": all_left,
-            "target_on_a_slot": target_ok,
+            "target_on_its_pad": target_ok,
+            "target_on_a_slot": ((on_slot & self.was_lifted) | ~is_target).all(dim=1),
+            "on_own_pad": on_own,
+            "wrong_pad": self.wrong_pad,
             "restored": restored,
             "left_slot": self.left_slot,
             "was_lifted": self.was_lifted,
+            "staged": self.staged,
             "wrong_assign": self.wrong_assign,
             "target_returned": self.target_returned,
             "two_in_slot": self.two_in_slot,
@@ -635,9 +709,10 @@ class DepthRecallV1Task(BaseEnv):
            in slot order. Slot order would put the front-origin prop at a fixed slice
            index and hand a state policy the answer for free.
         3. The slot geometry is emitted because it is honest scenery: where the four
-           counter points and the three row points ARE says nothing about which prop
+           counter points and the four row points ARE says nothing about which prop
            belongs to which. What must be remembered is the association, and no key here
-           carries it.
+           carries it. The pads (`pad_points`, in prop order: where prop i is to be
+           staged) are scenery too: drawn on the counter, independent of the row.
         """
         obs = dict(
             tcp_pose=self.agent.tcp_pose.raw_pose,
@@ -650,6 +725,9 @@ class DepthRecallV1Task(BaseEnv):
                                        dim=1).reshape(self.num_envs, -1),
                 row_points=self._row_points.reshape(self.num_envs, -1),
                 slot_points=self._slot_points.reshape(self.num_envs, -1),
+                pad_points=torch.gather(
+                    self._slot_points, 1, self.pad_slots.unsqueeze(-1).expand(-1, -1, 3)
+                ).reshape(self.num_envs, -1),
             )
         return obs
 
@@ -667,6 +745,10 @@ class DepthRecallV1Task(BaseEnv):
             state[key] = getattr(self, key).clone()
         state["row_points"] = self._row_points.reshape(self.num_envs, -1).clone()
         state["slot_points"] = self._slot_points.reshape(self.num_envs, -1).clone()
+        if self._ag is not None:
+            # Which prop is welded and where: without it a restored checkpoint drops a
+            # held prop the moment physics resumes.
+            state.update(self._ag.state_dict())
         return state
 
     def set_state_dict(self, state: dict, env_idx: torch.Tensor = None):
@@ -685,3 +767,5 @@ class DepthRecallV1Task(BaseEnv):
                 flat = restore_task_tensor(
                     getattr(self, attr).reshape(self.num_envs, -1), state[key], self.device)
                 setattr(self, attr, flat.reshape(getattr(self, attr).shape))
+        if self._ag is not None:
+            self._ag.load_state_dict(state)

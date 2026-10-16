@@ -2254,7 +2254,8 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
             return -1
         return out
 
-    def drive_straight(self, distance, v: float = 0.10, max_steps=None, stop_when=None):
+    def drive_straight(self, distance, v: float = 0.10, max_steps=None, stop_when=None,
+                       hold_pose: bool = False):
         """Drive the base straight by `distance` metres (negative = reverse), unplanned.
 
         The `follow_arc` template with the arc law replaced by a constant: no
@@ -2282,6 +2283,12 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
                 inside the 1 m/s slot).
             max_steps: hard cap; None = `ceil(|distance| / (v * control_dt)) * 2 + 20`.
             stop_when: nullary callable; truthy stops the drive after that step.
+            hold_pose: keep the initial arm/body targets for the whole drive.
+                The default follows measured positions for compliant contact motion.
+                Under payload that default accumulates sag: Depth Recall seed301
+                lost 5.6 cm of TCP height and caught the shelf edge. Loaded transport
+                opts into fixed absolute targets without changing robot controllers.
+                This restores the option from the original private motion solver.
 
         Returns:
             The last gym 5-tuple (or the guard's last step when already truncated);
@@ -2310,8 +2317,11 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         reason = "max-steps"
         travelled = 0.0
         i = -1
+        latched = self._hold_targets() if hold_pose else None
         for i in range(int(max_steps)):
-            arm_action, body_action = self._hold_targets()
+            arm_action, body_action = (
+                latched if latched is not None else self._hold_targets()
+            )
             base_action = np.array([np.clip(sign * speed, -1.0, 1.0), 0.0])
             action = self._compose(arm_action, body_action, base_action)
             out = self._step(action)

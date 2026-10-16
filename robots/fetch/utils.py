@@ -582,6 +582,21 @@ class SapienPlannerV2(SapienPlanner):
             return None
         return [mgi.index(i) for i in (0, 1, 2)]
 
+    def IK(self, goal_pose, start_qpos, mask=None, *, n_init_qpos: int = 20, threshold: float = 1e-3,
+           return_closest: bool = False, verbose: bool = False):
+        """mplib's IK, unless ``MIKASA_IK_STARTS`` or ``MIKASA_IK_BACKEND`` ask otherwise.
+
+        The default calls ``mplib.Planner.IK`` unchanged; the opt-in paths (fixed starts,
+        cuRobo proposals) are in `robots/fetch/ik_backend.py` and keep mplib's checks.
+        """
+        from robots.fetch import ik_backend
+
+        if ik_backend.is_default():
+            return super().IK(goal_pose, start_qpos, mask, n_init_qpos=n_init_qpos, threshold=threshold,
+                              return_closest=return_closest, verbose=verbose)
+        return ik_backend.ik(self, goal_pose, start_qpos, mask, n_init_qpos=n_init_qpos,
+                             threshold=threshold, return_closest=return_closest, verbose=verbose)
+
     def plan_qpos_line(
         self,
         goal_qpos,

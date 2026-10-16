@@ -177,7 +177,7 @@ def check(root, output):
                 records.append(dict(seed=seed, phase=phase, status=result["status"], **summary,
                     head_target_span=np.ptp(actions[:,8:10],axis=0).tolist(),
                     post_cue_head_tilt_min=float(min(after_cue)) if len(after_cue) else None))
-            if phase == "oracle" and signature["profile"]["env_id"] in {"MikasaSeasonDish-v0", "MikasaSameDrawer-v0"}:
+            if phase == "oracle" and signature["profile"]["env_id"] in {"MikasaSeasonDish-v0", "MikasaSameDrawer-v0", "MikasaDepthRecall-v1"}:
                 events_path = directory / "events.jsonl"
                 events = [json.loads(line) for line in events_path.read_text().splitlines()]
                 samples = [event for event in events if event["message"] == "waypoint noise"]
