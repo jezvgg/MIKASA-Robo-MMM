@@ -118,12 +118,17 @@ joints (rad): a pull against the door's resistance keeps its force, a blocked ar
 BASE_GAIN = _f("MIKASA_BD_BASE_GAIN", 2.0)
 LEVER_LEAD_FRAC = _f("MIKASA_BD_LEVER_LEAD_FRAC", 0.8)
 "The lever reaches LEVER_END at this fraction of the swing (it lags the command otherwise)."
-STANCE_TURN = _f("MIKASA_BD_STANCE_TURN", 0.977)
-"""How far the base has turned at the end of the shipped arc pull, rad, toward the side the leaf
-opens to (the pull-end headings 34.2-34.7 deg for right leaves and 147.0 deg for left ones, from
-a 90 deg dock; collection runs without assisted grasp, 2026-10-16). With the lever alone the swing
-ended right leaves 3-7 deg short of it (27.6-31.5 deg), 6-9 cm from the shipped stance, and the
-push from here found no IK there (seed 9). <= 0 turns the correction off."""
+STANCE_TURN = _f("MIKASA_BD_STANCE_TURN", 0.0)
+"""OFF (0). When > 0: after the swing, turn-drive-turn the base (hand held on the bar) onto the
+shipped arc's end stance — the heading turned this far toward the side the leaf opens to (the
+pull-end headings are 34.2-34.7 deg for right leaves and 147.0 deg for left ones from a 90 deg
+dock: 0.977 rad) and the bar at LEVER_END. With the lever alone the swing ends right leaves 3-7
+deg short of that heading and 6-9 cm off the stance, where the push from here once found no IK
+(seed 9). Measured 2026-10-16, assisted grasp, seeds 0-9: off 9/10 (822cb7c), on 8/10 (565509e:
+a 2.7 deg turn under the held bar slid the base 0.17 m) and, with the leg guards below, 7/10
+(a860900: the turns slide the base 1-3 cm within a few steps and stop, and the stances they
+leave lost two touch-dock drives). A base turning under a hand held on a free leaf is not a
+free motion."""
 STANCE_TOL_M, STANCE_TOL_RAD = 0.02, 0.035
 STANCE_SLIDE_M = 0.03
 STANCE_HAND_ERR_M = 0.03
