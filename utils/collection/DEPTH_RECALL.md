@@ -276,6 +276,9 @@ Same tree, more seeds and modes:
 | fresh seeds 3000-3199, pointcloud | **199/200** (0.972-0.999) | pads read right 199/199; between-pads 1393/1393; the miss is seed 3011: the measured row shift (10.4 mm) was just over `REDOCK_MIN_M`, and `drive_base` turned the base for a 1 cm sideways re-dock, which the open right door refused (forearm) |
 | seeds 1000-1099, state + assisted grasp | **100/100** | welds 7/7 in every episode |
 | seeds 1000-1099, pointcloud + assisted grasp | **100/100** | welds 7/7; wrist fits 700/700 |
+| seeds 1000-1099, state, cuRobo IK (shared server, no jump filter) | **100/100** | 6302 cuRobo calls over 200 episodes |
+| seeds 1000-1099, pointcloud, cuRobo IK | **100/100** | wall p50 343 s vs 380 s with mplib, same machine load class |
+| seeds 1000-1099, state, **blind** restore | 18/100 (Wilson 0.12-0.27) | the 1/6 guessing reference is 0.167: the pads carry no row order |
 
 Against the previous version on the same 100 seeds the episodes are 1.4 % longer in
 steps (median 3712 vs 3662 by state), all of it the longer crosses to the far pad; the
