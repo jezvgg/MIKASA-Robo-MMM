@@ -177,15 +177,16 @@ def test_each_task_welds_its_own_objects_and_checkpoints_it(env_id):
         assert [o.name for o in task._ag.objects if not _is_link(o)] == list(names)
         assert sum(_is_link(o) for o in task._ag.objects) == n_links
         assert int(task.get_info()["ag_held"][0]) == -1
+        free = next(i for i, o in enumerate(task._ag.objects) if not _is_link(o))
         env.step(_action(env, -1.0))
-        _float_prop_at_hand(task, 0)
-        task._ag.attach(0)
+        _float_prop_at_hand(task, free)
+        task._ag.attach(free)
         state = task.get_state_dict()
-        assert int(task.get_info()["ag_held"][0]) == 0
+        assert int(task.get_info()["ag_held"][0]) == free
         env.reset(seed=0)
         assert task._ag.held_index() == -1 and _enabled(task) == []
         task.set_state_dict(state)
-        assert task._ag.held_index() == 0 and _enabled(task) == [0]
+        assert task._ag.held_index() == free and _enabled(task) == [free]
     finally:
         env.close()
 

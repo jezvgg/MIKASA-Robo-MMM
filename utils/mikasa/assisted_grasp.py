@@ -164,13 +164,24 @@ def _is_link(obj) -> bool:
     return hasattr(obj._objs[0], "entity")
 
 
+def _pose(p):
+    import sapien
+
+    return sapien.Pose(np.asarray(p, dtype=np.float64))
+
+
 @dataclass
 class AssistedGrasp:
     """The rule wired into one CPU ManiSkill environment for a fixed list of objects.
 
     An object is an actor (a free body) or an articulation link (a door, a drawer: what
-    its handle is part of). OmniGibson welds to either; a link stays held by its own joint,
-    so the mass limit, which is about what the hand can carry, applies to free bodies only.
+    its handle is part of). A free body is welded rigidly at its current pose. A link is
+    held at the grasp point with its rotation free, OmniGibson's spherical joint for a
+    link under a revolute or prismatic joint: the handle turns in the hand as the door
+    swings, as it would between real pads (a rigid weld locked a CabinetSearch door at
+    0.26 rad of the 1.2 its pull needed, measured 2026-10-16). A link stays held by its own
+    joint, so the mass limit, which is about what the hand can carry, applies to free
+    bodies only.
 
     Build it in the task's ``_after_reconfigure`` (the agent and the objects exist),
     ``reset()`` it at the top of ``_initialize_episode``, call ``after_substep()`` from
@@ -209,14 +220,16 @@ class AssistedGrasp:
             component = drive._objs[0]
             for set_limit in (component.set_limit_x, component.set_limit_y, component.set_limit_z):
                 set_limit(0, 0)
-            component.set_limit_twist(0, 0)
-            # The swing axes: a cone limit does not lock them on a drive, a stiff slerp
-            # drive to the identity does.
-            component.set_drive_property_slerp(self.cfg.weld_stiffness, self.cfg.weld_damping)
+            if not _is_link(obj):
+                component.set_limit_twist(0, 0)
+                # The swing axes: a cone limit does not lock them on a drive, a stiff
+                # slerp drive to the identity does.
+                component.set_drive_property_slerp(self.cfg.weld_stiffness, self.cfg.weld_damping)
             component.set_drive_target(sapien.Pose())
             component.disable()
             self._drives.append(component)
         self.rel_pose = np.zeros(7, dtype=np.float32)
+        self.anchor = np.zeros(3, dtype=np.float32)   # grasp point in the hand frame (links)
         self.events: list = []
 
     # ------------------------------------------------------------------ state --
@@ -226,6 +239,7 @@ class AssistedGrasp:
             component.disable()
         self.window.reset()
         self.rel_pose[:] = 0.0
+        self.anchor[:] = 0.0
         self.events = []
 
     def held_index(self) -> int:
@@ -237,6 +251,7 @@ class AssistedGrasp:
         return {
             "ag_window": torch.tensor([self.window.state()], dtype=torch.int32),
             "ag_rel_pose": torch.as_tensor(self.rel_pose).reshape(1, 7).clone(),
+            "ag_anchor": torch.as_tensor(self.anchor).reshape(1, 3).clone(),
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -254,6 +269,8 @@ class AssistedGrasp:
         window = np.asarray(state["ag_window"]).reshape(-1)[:4]
         self.window.load(window)
         self.rel_pose[:] = np.asarray(state["ag_rel_pose"], dtype=np.float32).reshape(-1)[:7]
+        if "ag_anchor" in state:
+            self.anchor[:] = np.asarray(state["ag_anchor"], dtype=np.float32).reshape(-1)[:3]
         for component in self._drives:
             component.disable()
         if self.window.attached:
@@ -351,16 +368,27 @@ class AssistedGrasp:
         self._attach_here(int(i))
 
     def _attach_here(self, i: int) -> None:
-        rel = self.hand.pose.sp.inv() * self.objects[i].pose.sp
+        hand = self.hand.pose.sp
+        rel = hand.inv() * self.objects[i].pose.sp
         self.rel_pose[:3], self.rel_pose[3:] = rel.p, rel.q
+        tcp = (np.asarray(self.fingers[0].pose.sp.p) + np.asarray(self.fingers[1].pose.sp.p)) / 2
+        self.anchor[:] = (hand.inv() * _pose(tcp)).p
         self._weld(i, rel)
 
     def _weld(self, i: int, rel) -> None:
+        """Free body: the object frame locked at ``rel`` in the hand. Link: the grasp point
+        (``anchor`` in the hand frame) locked to the same material point of the link,
+        rotation free."""
         import sapien
 
         component = self._drives[i]
-        component.set_pose_in_parent(rel)
-        component.set_pose_in_child(sapien.Pose())
+        if _is_link(self.objects[i]):
+            at = sapien.Pose(np.asarray(self.anchor, dtype=np.float64))
+            component.set_pose_in_parent(at)
+            component.set_pose_in_child(rel.inv() * at)
+        else:
+            component.set_pose_in_parent(rel)
+            component.set_pose_in_child(sapien.Pose())
         component.enable()
 
 
