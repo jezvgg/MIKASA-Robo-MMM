@@ -195,6 +195,55 @@ they were not discarded from the reported SR. Staging area was sufficient in all
 100 development cases, so this release keeps the countertop and slot spacing.
 Historical 197/200 results using a modified robot are not current qualification.
 
+## Coloured pads (2026-10-16)
+
+The owner's change: wider spacing between the counter staging points, and a pad of each
+prop's own colour generated per episode (they were four identical yellow plates and the
+oracle staged on any free one).
+
+**Task.** Pad c has prop c's colour; the episode RNG draws which of the four counter slots
+each pad lies on, after the row permutation and the start jitter. A prop counts as staged
+only on its own pad; one released on another colour's pad latches `wrong_pad`; the target
+must finish on its own pad (`target_on_its_pad`). State observations gain `pad_points`
+(where each prop's pad is, prop order). The clip has a second view along the counter.
+
+**Spacing, and the measurement that set it.** 18 cm pitch (was 12), 54 cm west of the row,
+at y = -0.56 (was -0.525). The arm works from ONE dock, so the spacing is a reach
+question. `scripts/dr_pad_reach.py` asks cuRobo's batched scan for every pose the planner
+makes there — the restore grasp at each grasp lift and its pre-grasp, the extraction's
+place and its cross heights — from every stand (row x +-4 cm), with self-collision, hits
+re-checked in float64, under the planner's own rule (some lift, the place height, some
+cross height):
+
+| carry-out rule | restore grasp reaches | place reaches |
+|---|---|---|
+| back until the prop is over the pads' line (old) | 62 cm west | **44 cm** |
+| back to the dock line (`carry_out`, new) | 64 cm (y -0.56) | **60 cm** (y -0.56), 56 cm (y -0.525) |
+
+So the extraction now backs the base to the dock line before crossing, and the pads moved
+3.5 cm nearer the robot, where the cross to 54 cm plans at two torso heights from every
+row slot. The scan is kinematics plus self-collision only: the scene is the planner's to
+check, and the sweeps below are what confirm it.
+
+**Planner changes it took.** Both crosses (extraction and restore) used to lower the
+TORSO to come down, which takes the hand down WITH the shoulder and leaves its reach
+unchanged: on seed 1000 every torso rung was `IK Failed` for the 54 cm pad, and the
+restore then approached "from where we are", tipped the prop and grasped it lying. The
+crosses now first lower the HAND under the shoulder (extraction: 0, 10, 20 cm below the
+carry height; restore: 25-35 cm over the counter, under the closed left door and over the
+standing props); the torso rungs remain as fallbacks.
+
+**Perception mode** reads the pads' colours from the head cameras after the row is
+calibrated (majority hue of the flat band over the counter within 3.5 cm of each slot;
+all four colours must be read once), and closes the gripper only when the prop's own
+points lie between the finger pads over its height (`PropBelief.between_pads`, BIMBO's
+rays-between-pads rule; the band at the pads' own height is hidden from every camera by
+the hand itself, measured on seed 1000).
+
+**First runs** (H100 tree 42ce525 under a full machine): seeds 1000-1003 in both modes
+**8/8**, every prop on its own pad, max tilt 0.1 deg, 3582-3815 steps; pads read right
+4/4; all 28 between-pads checks passed with 218-622 points. 100-seed sweeps: see below.
+
 ## Assisted grasp (experimental, off by default)
 
 `MikasaDepthRecall-v1` accepts `assisted_grasp=True`. The prop is then welded to the

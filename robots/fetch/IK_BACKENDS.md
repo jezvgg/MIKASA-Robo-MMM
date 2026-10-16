@@ -183,3 +183,22 @@ Not wired into a planner's stand choice: SeasonDish grasps from where the episod
 the robot, and its old stand-slide stage bought nothing in a 75-seed A/B (60/75 with,
 59/75 without) — its refusals are collisions with the stove and the counter, which a
 kinematic scan does not see.
+
+## Two of BIMBO_EvoX's guards (2026-10-16)
+
+**Float64 re-check of scan hits** (`scan(..., verify_hits=True)`, the default; BIMBO's
+`_verify64`). cuRobo solves in float32 on the model RobotBuilder made from the URDF.
+Every hit is re-checked with numpy FK of the URDF itself (`robots/fetch/urdf_fk.py`,
+tested against mplib's pinocchio model): the gripper pose within 5 mm / 0.05 rad of the
+goal and every joint inside its URDF limits, or the hit is dropped
+(`STATS["verify_checked"]`, `STATS["verify_dropped"]`). Measured on the Depth Recall pad
+scans (`scripts/dr_pad_reach.py`, four passes): **52 388 hits checked, 0 dropped** — the
+cuRobo model and the URDF agree; the check stays on so a model or URDF change that
+breaks that is caught rather than trusted.
+
+**Jump filter on proposals** (`MIKASA_CUROBO_MAX_JUMP`, rad, default 1.2, 0 = off; BIMBO
+task 62's `max_jump`). A cuRobo proposal whose largest joint change from the current
+joints exceeds it is on another branch and is dropped; the rest are tried nearest first
+(L2), after the current joints themselves. A start on another branch makes CLIK land
+there, and the planner's joint line then sweeps the arm across the workspace or falls
+back to RRT. Dropped proposals are counted (`jump_dropped` in the client's report).
