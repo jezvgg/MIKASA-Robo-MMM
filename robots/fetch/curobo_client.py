@@ -17,11 +17,12 @@ by mplib.
 
 Two of BIMBO_EvoX's guards (skills/gpu-ik/gpu_ik.py, tasks/62_halve_an_egg/.../ik.py):
 
-* ``MIKASA_CUROBO_MAX_JUMP`` (rad, default 1.2, 0 = off): a proposal whose largest joint
+* ``MIKASA_CUROBO_MAX_JUMP`` (rad, default 0 = off): a proposal whose largest joint
   change from the current joints exceeds it is on another branch and is dropped; the
-  rest go nearest first. A start on another branch makes CLIK land there, and the
-  planner's joint line then sweeps the arm across the workspace or falls back to RRT.
-  The current joints themselves are always tried first (`ik_backend.ik`).
+  rest go nearest first. The current joints themselves are always tried first
+  (`ik_backend.ik`). OFF by default because our planners ask for postures far from the
+  current one by design (rest -> reach): at 1.2 (BIMBO's servo value) SeasonDish went
+  from 28/30 to 1/30 and Depth Recall from 100/100 to 0/200 (measured 2026-10-16).
 * ``scan(..., verify=True)``: every hit is re-checked in float64 against the URDF
   (`urdf_fk`), pose within ``VERIFY_TOL`` and joints within their limits; a claim that
   does not hold is dropped and counted in ``STATS["verify_dropped"]``.
@@ -148,26 +149,36 @@ def _report():
 
 
 def max_jump() -> float:
-    v = float(os.environ.get(MAX_JUMP_ENV, "1.2"))
+    v = float(os.environ.get(MAX_JUMP_ENV, "0"))
     if v < 0:
         raise ValueError(f"{MAX_JUMP_ENV}={v}: expected >= 0 (0 = off)")
     return v
 
 
-def near_first(q: np.ndarray, ok: np.ndarray, seed: np.ndarray, jump: float) -> tuple:
+def near_first(q: np.ndarray, ok: np.ndarray, seed: np.ndarray, jump: float, periodic=None) -> tuple:
     """(rows to try, how many solved rows the jump dropped).
 
     Solved rows within ``jump`` of ``seed`` (largest single-joint change), nearest first by
     L2; with none solved, the first four rows as plain starts, under the same jump rule.
-    ``jump`` 0 keeps every row.
+    ``jump`` 0 keeps every row. ``periodic`` marks the columns whose range exceeds a turn
+    (the roll joints): their change is taken modulo 2 pi, because the planner unwraps a
+    goal toward the current joints before it moves (`unwrap_toward`).
     """
-    d = np.linalg.norm(q - seed, axis=1)
-    far = np.abs(q - seed).max(axis=1) > jump if jump > 0 else np.zeros(len(q), bool)
+    delta = np.asarray(q, dtype=np.float64) - seed
+    if periodic is not None and np.any(periodic):
+        per = np.asarray(periodic, dtype=bool)
+        delta[:, per] = (delta[:, per] + np.pi) % (2 * np.pi) - np.pi
+    d = np.linalg.norm(delta, axis=1)
+    far = np.abs(delta).max(axis=1) > jump if jump > 0 else np.zeros(len(q), bool)
     solved = np.flatnonzero(ok)
     keep = [int(i) for i in solved[np.argsort(d[solved], kind="stable")] if not far[i]]
     if len(solved):
         return keep, int(len(solved) - len(keep))
     return [i for i in range(min(4, len(q))) if not far[i]], 0
+
+
+def variant_base(variant: str) -> str:
+    return "torso_lift_link" if variant == "arm" else "base_link"
 
 
 def chain(base: str = "base_link"):
@@ -244,7 +255,8 @@ def propose(planner, goal_pose, start_qpos, mask) -> list:
     STATS["wall_ms"] += (time.perf_counter() - t0) * 1e3
     q, ok = np.asarray(r["q"], dtype=np.float64), np.asarray(r["ok"], dtype=bool)
     seed = np.asarray([float(start_qpos[c]) for c in cols], dtype=np.float64)
-    order, dropped = near_first(q, ok, seed, max_jump())
+    lo, hi = chain(variant_base(variant)).limits(names)
+    order, dropped = near_first(q, ok, seed, max_jump(), periodic=(hi - lo) > 2 * np.pi)
     STATS["jump_dropped"] += dropped
     starts = []
     for i in order:

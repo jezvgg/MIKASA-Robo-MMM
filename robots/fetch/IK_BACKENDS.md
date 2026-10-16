@@ -196,9 +196,21 @@ scans (`scripts/dr_pad_reach.py`, four passes): **52 388 hits checked, 0 dropped
 cuRobo model and the URDF agree; the check stays on so a model or URDF change that
 breaks that is caught rather than trusted.
 
-**Jump filter on proposals** (`MIKASA_CUROBO_MAX_JUMP`, rad, default 1.2, 0 = off; BIMBO
+**Jump filter on proposals** (`MIKASA_CUROBO_MAX_JUMP`, rad, **default 0 = off**; BIMBO
 task 62's `max_jump`). A cuRobo proposal whose largest joint change from the current
 joints exceeds it is on another branch and is dropped; the rest are tried nearest first
-(L2), after the current joints themselves. A start on another branch makes CLIK land
-there, and the planner's joint line then sweeps the arm across the workspace or falls
-back to RRT. Dropped proposals are counted (`jump_dropped` in the client's report).
+(L2), after the current joints themselves; roll joints (range over a turn) count their
+change modulo 2 pi. Dropped proposals are counted (`jump_dropped` in the client's report).
+
+Measured 2026-10-16 on the H100 at 1.2 rad (before the modulo-2-pi rule), one shared
+server, interleaved arms:
+
+| run | with the filter | without |
+|---|---|---|
+| SeasonDish seeds 0-29 | **1/30**, IK call success 0.3 %, 42 131 proposals dropped | 28/30, IK 87 % |
+| Depth Recall (pads), seeds 1000-1099 x 2 modes | **0/200** — the first ready posture already has no IK | — |
+
+BIMBO uses the rule in a servo, where every goal is a few centimetres from the current
+pose. Our planners ask for postures far from the current one by design (rest -> reach,
+shelf -> counter), and the solution that serves them is a large change of several joints
+at once, not another branch. So the filter is off by default and kept as an option.

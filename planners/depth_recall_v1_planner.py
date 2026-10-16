@@ -211,6 +211,10 @@ RESTORE_CROSS_Z = tuple(
     float(v) for v in os.environ.get("MIKASA_DR1_RESTORE_CROSS_Z", "0.30,0.25,0.35").split(",")
 )
 
+#: How far in front of the prop (toward the robot) the restore's cross ends, metres:
+#: the side grasp's pre-grasp stands 12 cm back along the approach, and 3 cm more.
+RESTORE_CROSS_BACK = 0.15
+
 #: Roll joints, by name. Their travel is what `roll_rank` minimises.
 ROLL_JOINTS = ("upperarm_roll_joint", "forearm_roll_joint", "wrist_roll_joint")
 
@@ -528,7 +532,15 @@ def release_and_clear(env, planner, task, prop, place):
     #
     # The FOLD last, and only once the base is back on the dock line, because folding
     # from inside the cabinet is refused against its shell.
-    up, torso = torso_to(env, planner, task, SHELF_TORSO_RUNGS, label="torso up to")
+    #
+    # The prop just released is out of this check: the torso only lifts the hand straight
+    # up, away from it. The rise above leaves 7 mm between the finger pads and a 12 cm
+    # prop's top, which is less than what a camera estimate of it may be off by: measured
+    # 2026-10-16, 13 of 100 perception episodes had this raise refused at knot 0
+    # (`gripper_link <-> prop`), and once the base no longer backs away from a pad after a
+    # counter placement, nothing else separated the two before the next transfer.
+    with common.touchable(planner, prop.name):
+        up, torso = torso_to(env, planner, task, SHELF_TORSO_RUNGS, label="torso up to")
     if up != -1:
         res = up
         if common.stopped_by_horizon(planner):
@@ -767,7 +779,13 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
             planner.planner.update_from_simulation()
         tcp0 = task.agent.tcp.pose.sp
         z = float(tcp0.p[2]) if hand_z is None else hand_z
-        over = sapien.Pose(p=[float(p0[0]), float(tcp0.p[1]), z], q=tcp0.q)
+        # Never come down BEHIND the prop: after a row placement the hand backs out to
+        # ~9 cm past the pads' line, and the grasp posture from there passes over the
+        # prop to its pre-grasp, low enough for the palm to catch its top (measured
+        # 2026-10-16: 4 state episodes of 100 found the prop pushed 7-12 cm toward the
+        # robot or lying). In front of it, the posture is a move down.
+        y = min(float(tcp0.p[1]), float(p0[1]) - RESTORE_CROSS_BACK)
+        over = sapien.Pose(p=[float(p0[0]), y, z], q=tcp0.q)
         if noise is not None:
             over = noise.pose(f"counter approach {prop.name}", over, (True, False, True))
         say(env, "across to the prop's column", prop=prop.name, torso=torso,

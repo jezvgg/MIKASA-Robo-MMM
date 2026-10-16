@@ -308,6 +308,10 @@ def test_near_first_drops_far_branches_and_orders_nearest():
     assert near_first(q, ok, seed, 1.2) == ([1, 0], 1)           # 1.5 rad on one joint: another branch
     assert near_first(q, ok, seed, 0.0) == ([1, 0, 2], 0)        # 0 = off
     assert near_first(q, np.zeros(4, bool), seed, 1.2) == ([0, 1, 3], 0)   # nothing solved: plain starts
+    # A roll joint a full turn away is the same posture once unwrapped: not a jump.
+    turn = np.array([[2 * np.pi - 0.1, 0.0, 0.0]])
+    assert near_first(turn, np.array([True]), seed, 1.2) == ([], 1)
+    assert near_first(turn, np.array([True]), seed, 1.2, periodic=[True, False, False]) == ([0], 0)
 
 
 def test_scan_verify_keeps_true_hits_and_drops_false_ones():
