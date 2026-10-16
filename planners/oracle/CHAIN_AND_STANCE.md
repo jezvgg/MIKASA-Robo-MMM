@@ -103,6 +103,28 @@ collection profile).
 
   Those belong to items 3, 4 and 7 of the plan.
 
+**SeasonDish on fresh seeds.** Seeds 1010–1029 were never used while the chain was built.
+Streams 0 and 1:
+
+| | base | `--ik-chain` |
+|---|---|---|
+| stream 0 | 15/20 | 17/20 |
+| stream 1 | 15/20 | 16/20 |
+| **all** | **30/40** | **33/40** |
+| grasp reached | 33/40 | 38/40 |
+
+- **The chain wins 6 pairs:** 1013 00→11, 1018 01→11, 1025 00→11, 1026 10→11.
+- **It loses 3 pairs, all after the grasp:**
+  - 1020 11→10: carry path refused;
+  - 1021 11→00: no loaded route, or no upright hover with a complete pour.
+- **Both arms lose:** 1022 (carry path) and 1024 (grasp refused).
+- Seed 1021 loses on both streams. Its chained grasp branch passes the grasp-time carry
+  check (`carry_or_direct`), yet the loaded route after the lift fails. A chain that also
+  ranked by the full route would need the `complete` rule's previews at grasp time.
+
+**All 90 pairs** (dev seeds × 5 streams, plus fresh seeds × 2 streams): base 51/90, chain
+70/90. The chain wins 22 pairs and loses 3.
+
 **Depth Recall**, seeds 1000–1009, state mode. `MIKASA_DOCK_ERR` is the unseen dock error.
 
 | dock error | base | `--ik-chain` | `--ik-chain --stance-scan` (dx −0.04) |
