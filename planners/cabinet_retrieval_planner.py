@@ -1127,8 +1127,16 @@ def open_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=No
         say(env, "recorded the grip for a retrace",
             door_rad=round(float(record["door_rad"]), 3),
             base=[round(float(v), 3) for v in record["base_xy"]])
+    rad_held = float(door_rad_now(task, door))
     planner.open_gripper()
     planner.planner.update_from_simulation()
+    if getattr(task, "_ag", None) is not None:
+        q = _np(task.agent.robot.get_qpos()).reshape(-1)
+        names = [j.name for j in task.agent.robot.get_active_joints()]
+        say(env, "released the handle", door_rad_held=round(rad_held, 4),
+            door_rad_now=round(float(door_rad_now(task, door)), 4),
+            fingers=[round(float(q[names.index(n)]), 4)
+                     for n in ("l_gripper_finger_joint", "r_gripper_finger_joint")])
     if getattr(task, "_ag", None) is not None and AG_BAR_BACKOFF_M > 0:
         # Assisted grasp held the bar at the finger midpoint until the fingers opened; a
         # friction grip lets it slide where the pull put it. The retreat below was tuned
