@@ -150,6 +150,7 @@ def test_belief_models_are_the_props_own_meshes(world):
 def test_grasp_lifts_keep_the_finger_pads_on_the_prop():
     """Short props get the ladder brought down; the bottles keep every rung."""
     pytest.importorskip("mplib")
+    import dataclasses
     from types import SimpleNamespace
 
     from my_scenes.depth_recall_v1 import PROPS
@@ -159,9 +160,14 @@ def test_grasp_lifts_keep_the_finger_pads_on_the_prop():
     task = SimpleNamespace(cfg=SimpleNamespace(props=PROPS), props=props)
     for spec, prop in zip(PROPS, props):
         lifts = dr.grasp_lifts(task, prop)
-        top = spec.height / 2 - dr.FINGER_HALF_H - dr.FINGER_TOP_MARGIN
-        assert all(l <= top + 1e-9 for l in lifts) and len(set(lifts)) == len(lifts)
-        if top >= max(dr.GRASP_LIFTS):
+        tcp = [spec.height / 2 + l for l in lifts]            # over the support
+        assert len(set(lifts)) == len(lifts)
+        assert all(t >= dr.WRIST_HANG + dr.WRIST_CLEAR - 1e-4 for t in tcp), (spec.label, tcp)
+        assert all(t + dr.FINGER_HALF_H <= spec.height + 1e-4 for t in tcp), (spec.label, tcp)
+        if spec.height >= 0.12:                    # the box the ladder was measured on, or taller
             assert lifts == dr.GRASP_LIFTS
-    shaker = dr.grasp_lifts(task, props[1])
-    assert shaker[0] == dr.GRASP_LIFTS[0] and len(shaker) == 2
+    # the 12 cm box the ladder was measured on keeps it unchanged
+    box = SimpleNamespace(cfg=SimpleNamespace(props=(dataclasses.replace(PROPS[0], height=0.12),)),
+                          props=props[:1])
+    assert dr.grasp_lifts(box, props[0]) == dr.GRASP_LIFTS
+    assert dr.grasp_lifts(task, props[1]) == (0.0318, 0.034)

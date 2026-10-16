@@ -155,33 +155,74 @@ GRASP_LIFTS = tuple(
 #: which the side grasp turns vertical.
 FINGER_HALF_H = 0.0132
 
-#: How far the pads' top edge stays under the prop's top, at least, metres.
-FINGER_TOP_MARGIN = 0.002
+#: How far `wrist_flex_link` hangs under the hand's axis in the side grasp, metres, and
+#: the clearance over the support the box's first rung left it (TCP 8.0 cm up, 1.3 cm).
+WRIST_HANG = 0.067
+WRIST_CLEAR = 0.012
 
 
 def grasp_lifts(task, prop) -> tuple:
-    """`GRASP_LIFTS` for this prop: a rung that would put the finger pads' top edge above
-    the prop's top is brought down to where it does not, and duplicates go.
+    """`GRASP_LIFTS` for this prop, each rung clipped into the band where the grasp is
+    sound, duplicates dropped. -> (lift over mid-height, ...), metres.
 
-    The ladder was measured on a 12 cm box, where its highest rung (4.5 cm) leaves the
-    pads 0.2 cm under the top. The 9.45 cm shakers are the case it exists for: their
-    0.035 and 0.045 rungs would grip the top 0.1 cm and nothing at all, so they become one
-    rung at 3.2 cm (TCP 7.9 cm over the support, the wrist's 6.7 cm hang clearing it by
-    1.2 cm, as the box's first rung did by 1.3 cm). The bottles (15-16.5 cm) keep every
-    rung.
+    The band, as TCP height over the support the prop stands on: at least
+    `WRIST_HANG` + `WRIST_CLEAR` (7.9 cm), or the wrist meets the support; at most the
+    prop's height less `FINGER_HALF_H`, or the finger pads' top edge stands above the
+    prop. The ladder was measured on the 12 cm box, which it fits unchanged (8.0 -
+    10.5 cm in a band of 7.9 - 10.7), and so do the 15 - 16.5 cm bottles. The 9.45 cm
+    shakers do not: their band is 7.9 - 8.1 cm, and the 2 cm rung (TCP 6.7 cm up) is the
+    one that, measured 2026-10-16 (seed 1000), grasped a shaker off the counter and then
+    could not stand it in the front row slot: the wrist met the cabinet's front lip on
+    the way down, the hand stopped 1.1 cm short, and the released shaker fell into the
+    row and knocked over the two restored before it.
 
     Example:
         >>> grasp_lifts(task, task.props[1])        # a shaker  # doctest: +SKIP
-        (0.02, 0.032)
+        (0.0318, 0.034)
     """
     spec = task.cfg.props[_index(task, prop)]
-    top = spec.height / 2.0 - FINGER_HALF_H - FINGER_TOP_MARGIN
+    mid = spec.height / 2.0
+    lo = WRIST_HANG + WRIST_CLEAR - mid
+    hi = spec.height - FINGER_HALF_H - mid
     out = []
     for lift in GRASP_LIFTS:
-        lift = round(min(float(lift), top), 4)
+        lift = round(min(max(float(lift), lo), hi), 4)
         if lift not in out:
             out.append(lift)
     return tuple(out)
+
+
+#: The base's coast after `drive_straight`, metres per control step, below which it
+#: counts as stopped; and the most steps to wait for that.
+BASE_STILL_M = 0.0005
+BASE_SETTLE_MAX = 20
+
+
+def settle_base(planner, task):
+    """Idle until the base has stopped, then re-read the planning world. -> the last
+    5-tuple, or None when no step was needed.
+
+    `drive_straight` stops commanding at the distance, and the base coasts on: measured
+    2026-10-16 (seed 1000) 1.1 cm over the next ~9 steps after the 0.30 m drive into the
+    cabinet. A stroke planned at the drive's end is planned from a base that is still
+    moving, and the hand overshoots by the coast: the grasp stroke ended 1.7 cm past its
+    goal and the fingertips pushed the next shaker in the row 3.6 cm aside (it fell
+    on the unshelve), and every row placement landed 1.2-1.4 cm deeper than its slot. The
+    4.5 cm boxes had 1.1 cm more room in the row, which is why this never showed.
+    """
+    res = None
+    prev = _np(task.agent.base_link.pose.p).reshape(-1)[:2].copy()
+    for _ in range(BASE_SETTLE_MAX):
+        res = planner.idle_steps(t=1)
+        if common.stopped_by_horizon(planner):
+            return res
+        now = _np(task.agent.base_link.pose.p).reshape(-1)[:2].copy()
+        moved = float(np.linalg.norm(now - prev))
+        prev = now
+        if moved < BASE_STILL_M:
+            break
+    planner.planner.update_from_simulation()
+    return res
 
 #: Torso heights the lateral cross is tried at, in order. `None` means "wherever the
 #: carry-out left it" — the first rung is free, the rest cost a joint line.
@@ -685,7 +726,11 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         return res, False
     if res == -1:
         return fail(env, "drive into the cabinet"), False
-    planner.planner.update_from_simulation()
+    settled = settle_base(planner, task)
+    if settled is not None:
+        res = settled
+        if common.stopped_by_horizon(planner):
+            return res, False
 
     res, ok = grasp_ladder(env, planner, task, prop, where="shelf", lift=chosen_lift)
     if not ok:
@@ -1024,10 +1069,14 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         return res, False
     if res == -1:
         return fail(env, "drive into the cabinet, loaded"), False
+    settled = settle_base(planner, task)
+    if settled is not None:
+        res = settled
+        if common.stopped_by_horizon(planner):
+            return res, False
     if not _grasping(task, prop):
         say(env, f"MISSED: {prop.name} left the gripper on the way in")
         return res, False
-    planner.planner.update_from_simulation()
 
     place = sp.place_pose_for(task, obj=_seen(prop), target=row_xyz, compensate_xy=True)
     others = row_neighbours(task, prop)

@@ -113,7 +113,8 @@ def test_wrong_remembered_assignment_is_an_irreversible_error():
     task = world()
     stage_all(task)
     restore_blockers(task)
-    task.pos[:, [0, 1]] = task.pos[:, [1, 0]].clone()
+    # Swapped in the row, each standing at its OWN height (the props differ in height).
+    task.pos[:, [0, 1], :2] = task.pos[:, [1, 0], :2].clone()
     assert evaluate(task)['wrong_assign'].item()
     restore_blockers(task)
     assert not hold(task)['success'].item()
@@ -131,7 +132,7 @@ def test_two_released_props_in_one_row_slot_fail():
     task = world()
     stage_all(task)
     restore_blockers(task)
-    task.pos[:, 1] = task.pos[:, 0]
+    task.pos[:, 1, :2] = task.pos[:, 0, :2]          # prop 1 in prop 0's slot, standing
     assert evaluate(task)['two_in_slot'].item()
     assert not hold(task)['success'].item()
 
@@ -209,7 +210,7 @@ def test_props_are_spices_and_sauces_that_fit_the_row():
     assert pitch - cfg.max_half_xy > cfg.finger_reach + 0.005
 
 
-@pytest.mark.parametrize('field,value', [('half_xy', 0.029), ('height', 0.07)])
+@pytest.mark.parametrize('field,value', [('half_xy', 0.029), ('height', 0.09)])
 def test_validate_refuses_a_prop_that_does_not_fit(field, value):
     bad = dataclasses.replace(PROPS[1], **{field: value})
     cfg = DepthRecallV1Config(props=(PROPS[0], bad) + PROPS[2:])

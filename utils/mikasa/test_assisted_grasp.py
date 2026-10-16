@@ -160,13 +160,20 @@ def test_weld_follows_the_hand_then_lets_go_on_open(ag_env):
     task._ag.attach(0)
     before = _rel(task, 0)
     z0 = float(task.props[0].pose.p[0, 2])
+    h0 = float(task._ag.hand.pose.p[0, 2])
     delta = _torso_room(ag_env)
     for _ in range(15):
         ag_env.step(_action(ag_env, -1.0, torso_delta=delta))
     after = _rel(task, 0)
     moved = float(task.props[0].pose.p[0, 2]) - z0
-    assert abs(moved) > 0.05 and np.sign(moved) == np.sign(delta), (
-        f"the torso moved {delta:+.2f} m/step and the prop moved {moved:+.3f} m")
+    hand = float(task._ag.hand.pose.p[0, 2]) - h0
+    # The hand's own travel in 15 steps is ~5 cm (measured 2026-10-16: 4.95 cm for a
+    # torso command of -0.02 m/step, whatever the prop weighs); the weld is what is
+    # tested, i.e. that the prop travels WITH it.
+    assert abs(hand) > 0.04 and np.sign(hand) == np.sign(delta), (
+        f"the torso moved {delta:+.2f} m/step and the hand moved {hand:+.3f} m")
+    assert abs(moved - hand) < 2e-3, (
+        f"the hand moved {hand:+.4f} m and the welded prop {moved:+.4f} m")
     assert np.linalg.norm(after.p - before.p) < 2e-3, "the weld slipped"
     assert int(task.get_info()["ag_held"][0]) == 0
     ag_env.step(_action(ag_env, 1.0))                # fully open: released on the next step

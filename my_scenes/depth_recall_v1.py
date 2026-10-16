@@ -285,11 +285,12 @@ class DepthRecallV1Config:
             assert 0 < spec.half_xy <= 0.028, (
                 f"{spec.label} ({spec.instance}) is {2 * spec.half_xy * 100:.1f} cm across: "
                 "wider than 5.6 cm does not fit the 7 cm row with the fingers' reach")
-            assert 0.08 <= spec.height <= 0.18, (
-                f"{spec.label} ({spec.instance}) is {spec.height * 100:.1f} cm tall: below "
-                "8 cm the side grasp's wrist (6.7 cm under the hand axis) meets the shelf "
-                "before the finger pads (+-1.3 cm) are on the prop; above 18 cm it is "
-                "taller than any prop this task has been run with")
+            assert 0.092 <= spec.height <= 0.18, (
+                f"{spec.label} ({spec.instance}) is {spec.height * 100:.1f} cm tall: the "
+                "side grasp needs its TCP 7.9 cm over the support (the wrist hangs 6.7 cm "
+                "under the hand axis) and the finger pads' upper 1.3 cm on the prop, i.e. "
+                "9.2 cm at least (`depth_recall_v1_planner.grasp_lifts`); above 18 cm it "
+                "is taller than any prop this task has been run with")
         assert len(self.row_slots_y) == self.n_props
         ys = list(self.row_slots_y)
         assert ys == sorted(ys), "row slots must run front (south) -> deep"
