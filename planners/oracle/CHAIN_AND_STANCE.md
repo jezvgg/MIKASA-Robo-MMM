@@ -116,7 +116,15 @@ collection profile).
   `no line`).
 - At 8 cm, seed 1004 (drawn error +7.2 cm east, −7.7 cm, 4.5°): the shipped dock's drive
   itself was refused. The −0.04 dock parked 10.7 cm off and the episode succeeded.
-  That is one seed.
+- 20 more seeds at 8 cm (1010–1029): the shipped dock (`--ik-chain`) scored 13/20, the
+  scanned −0.04 dock (`--ik-chain --stance-scan`) 20/20.
+  - **Over 30 seeds: 22/30 vs 30/30.**
+  - Every shipped-dock loss is "dock at the row" with the draw 5.8–7.6 cm east. The dock
+    drive's screw puts `forearm_roll_link` into the cabinet's right door
+    (`hingerightdoor`, seed 1013).
+  - That limit is the scene, which the kinematic scan cannot see. The scan's own east
+    limit is the reach to the far pad. Both say the shipped dock sits too far east, and
+    four centimetres west clears both.
 
 ## 2. Stance choice by a robust scan
 
@@ -185,5 +193,9 @@ The first version walked up to the cross 20 cm above the pad with the torso at t
 rung. That is out of reach, so every offset was refused. Measured on seed 1000: both
 branches broke on IK; 10 cm held.
 
-The scene check picked −0.04 in all 30 state-mode episodes of the stance arm (no error,
-5 cm and 8 cm). The pointcloud mode is measured separately.
+The scene check picked −0.04 in all 40 episodes of the stance arm: 30 in state mode (no
+error, 5 cm, 8 cm) and 10 in pointcloud mode.
+
+In pointcloud mode (seeds 1000–1009, no injected error, re-dock at the measured row on 8 of
+10 seeds) the shipped planner and `--ik-chain --stance-scan` both scored 10/10 with 0
+refused postures, at 3843 vs 3837 mean steps.
