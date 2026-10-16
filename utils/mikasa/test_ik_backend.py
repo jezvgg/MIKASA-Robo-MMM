@@ -356,3 +356,53 @@ def test_urdf_fk_matches_the_planners_model(planner):
         T = (np.linalg.inv(curobo_client._matrix(planner.pinocchio_model.get_link_pose(base)))
              @ curobo_client._matrix(planner.pinocchio_model.get_link_pose(grip)))
         assert np.allclose(c.fk(dict(zip(c.joint_names, vals))), T, atol=1e-6)
+
+
+def test_scan_with_the_torso_held_sends_goals_in_the_torso_frame(monkeypatch, tmp_path, request):
+    """``torso=t``: variant ``arm``, every goal in torso_lift_link of each stand at height t."""
+    import socket
+    import threading
+
+    from robots.fetch import curobo_client
+
+    path = _socket_path(tmp_path, request)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen()
+    seen = {}
+
+    def serve():
+        conn, _ = srv.accept()
+        with conn, conn.makefile("r") as rd, conn.makefile("w") as wr:
+            wr.write("CUROBO " + json.dumps({"id": 0, "ready": True}) + "\n")
+            wr.flush()
+            for line in rd:
+                req = json.loads(line)
+                seen["variant"] = req["args"]["variant"]
+                goals = np.asarray(req["args"]["goals"]).reshape(-1, 4, 4)
+                seen["goals"] = goals
+                ok = [True] * len(goals)
+                out = {"id": req["id"], "ok": ok, "q": [[0.0] * 7 for _ in ok], "names": [], "ms": 1.0}
+                wr.write("CUROBO " + json.dumps(out) + "\n")
+                wr.flush()
+
+    threading.Thread(target=serve, daemon=True).start()
+    monkeypatch.setenv("MIKASA_CUROBO_SOCKET", str(path))
+    curobo_client._SERVER.clear()
+    goal = np.eye(4)
+    goal[:3, 3] = [1.0, 0.0, 0.9]
+    stand = (0.5, -1.0, np.pi / 2)
+    try:
+        ok, q = curobo_client.scan([goal], [stand], verify_hits=False, torso=0.2)
+    finally:
+        s = curobo_client._SERVER.pop("s", None)
+        if s is not None:
+            s.close()
+        curobo_client._SERVER.clear()
+        srv.close()
+    T_bt = curobo_client.torso_frame(0.2)
+    assert seen["variant"] == "arm" and ok.shape == (1, 1) and q.shape == (1, 1, 7)
+    assert np.allclose(T_bt[:3, :3], np.eye(3)) and T_bt[2, 3] > 0.2          # the torso rises along z
+    expect = np.linalg.inv(curobo_client.stand_matrix(*stand) @ T_bt) @ goal
+    assert np.allclose(seen["goals"][0], expect)
+    assert np.allclose(curobo_client.torso_frame(0.3)[2, 3] - T_bt[2, 3], 0.1)

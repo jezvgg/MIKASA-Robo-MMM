@@ -33,6 +33,8 @@ import my_scenes  # noqa: F401  (registers benchmark environments)
 from mani_skill.utils.wrappers import RecordEpisode
 
 from planners.oracle import oracle_common as common
+from planners.oracle import stance_scan
+from planners.season_dish_stance import choose_station_stance
 from planners.oracle.wrist_pour_prepare import prepare_for_wrist_pour
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
@@ -1353,6 +1355,13 @@ def _solve(
     offset = float(getattr(task, "motion_parameters", {}).get("station_backoff_m", 0.))
     if offset not in (0., .05, .10, .15):raise ValueError("Unsupported station offset")
     dock_xyz -= offset * face
+    if stance_scan.enabled():
+        # Item 2 (planners/season_dish_stance.py): a stance that survives the arrival error
+        # and from which a contact chain builds; None keeps the shipped one.
+        chosen = choose_station_stance(env, planner, task, target, dock_xyz + offset * face, face,
+                                       grasp_info, say=say, backoff=offset, below_top=GRASP_BELOW_TOP)
+        if chosen is not None:
+            dock_xyz, face = chosen
     say(env, "travel after cue", station_backoff_m=offset, goal=dock_xyz.tolist(),
         distance_m=float(np.linalg.norm(dock_xyz[:2] - _np(task.agent.base_link.pose.p)[0, :2])))
     res = drive_to_counter(env, planner, dock_xyz, face)

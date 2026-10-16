@@ -43,7 +43,7 @@ import sapien
 from planners import cabinet_retrieval_planner as retr
 from planners import depth_recall_v1_perception as perc
 from planners.oracle import cabinet_place as sp
-from planners.oracle import ik_chain
+from planners.oracle import ik_chain, stance_scan
 from planners.oracle import oracle_common as common
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
@@ -427,6 +427,67 @@ def counter_grasp_chains(env, planner, task, prop, torso: float, lift: float, de
     say(env, "ik chain: counter grasp", prop=prop.name, torso=torso, lift=lift, depth=depth,
         **report.as_dict())
     return chains
+
+
+#: Item 2 (``MIKASA_STANCE_SCAN=1``): dock offsets from the row's x, tried in order, the first
+#: whose scene check passes (`choose_dock_dx`). The kinematics are rigid relative to the
+#: row, so the scan that ranks them runs once, offline: `scripts/dr_stance_scan.py`,
+#: 2026-10-17. With the dock off its mark by up to 3 cm / 3 cm / 3 deg every transfer stays
+#: reachable for dx in [-0.16, 0.00]; the shipped 0.00 is that range's east edge (the cross
+#: to the far pad goes first, 0.926 at +0.02). At 5 cm / 5 deg only -0.04 keeps all of them
+#: (0.00: 0.889, the far-pad cross again; -0.06: 0.963, the deepest row's entry).
+STANCE_DX = tuple(float(v) for v in os.environ.get("MIKASA_DR_STANCE_DX", "-0.04,-0.06,-0.02,0.0").split(","))
+
+
+def choose_dock_dx(env, planner, task, row_pts, slot_pts) -> float:
+    """The dock offset to use: the first of `STANCE_DX` the scene allows, else 0.
+
+    The scene check is item 1's chain with the base where that dock puts it, on the two
+    transfers the doors and the counter decide: the front row prop's shelf grasp walked
+    back to its pre-grasp from the work stance (driven in, torso at the shelf rung, the
+    prop out of the world as for the grasp screw), and the far pad's place walked up to
+    the cross 20 cm above it from the dock line (torso at the counter rung).
+    """
+    p = planner.planner
+    sim = _np(task.agent.robot.get_qpos()).reshape(-1).astype(np.float64)
+    held = [True, True, True, True] + [False] * (len(sim) - 4)
+    arm = ik_chain.arm_columns(task)
+    front = min(task.props, key=lambda o: float(np.linalg.norm(
+        _np(o.pose.p).reshape(-1)[:2] - np.asarray(row_pts[0][:2], dtype=float))))
+    grasp, pre = retr.side_grasp_pose(task, retr.SIDE_GRASP_DEPTHS[0], lift=GRASP_LIFTS[0], obj=front)
+    deeper = sapien.Pose(p=np.asarray(grasp.p) + np.array([0.0, retr.READY_GRASP_SLACK, 0.0]), q=grasp.q)
+    far = min(slot_pts, key=lambda q: float(q[0]))
+    z_top = float(_np(task._counter_top_z).reshape(-1)[0])
+    place = sapien.Pose(p=[float(far[0]), float(far[1]),
+                           z_top + task.cfg.prop_half_h + GRASP_LIFTS[0] + 0.005], q=grasp.q)
+    cross = sapien.Pose(p=np.asarray(place.p) + np.array([0.0, 0.0, 0.20]), q=grasp.q)
+    row_x = float(row_pts[0][0])
+    verdicts = []
+
+    def start_at(x, y, torso):
+        q = sim.copy()
+        q[:3] = stance_scan.root_joints_for(task, x, y, np.pi / 2)
+        q[3] = torso
+        return p.fold_qpos(q)
+
+    for dx in STANCE_DX:
+        x = row_x + dx
+        with common.touchable(planner, front.name):
+            shelf = ik_chain.chain_back(ik_chain.mplib_solver(planner, held), deeper, pre,
+                                        start_at(x, retr.WORK_DOCK_Y, SHELF_TORSO_RUNGS[0]),
+                                        cols=arm, n_hard=16, keep=2)
+        counter = ik_chain.chain_back(ik_chain.mplib_solver(planner, held), place, cross,
+                                      start_at(x, retr.READY_DOCK_Y, COUNTER_TORSO_RUNGS[0]),
+                                      cols=arm, n_hard=16, keep=2) if shelf else []
+        verdicts.append(dict(dx=dx, shelf=len(shelf), counter=len(counter)))
+        if shelf and counter:
+            break
+    p.update_from_simulation()  # the what-if IK left the planning model at the last stance tried
+    if verdicts[-1]["shelf"] and verdicts[-1]["counter"]:
+        say(env, "stance: dock offset", dx=verdicts[-1]["dx"], tried=verdicts)
+        return verdicts[-1]["dx"]
+    say(env, "stance: no offset passed the scene check; the row's x", tried=verdicts)
+    return 0.0
 
 
 def entry_chain_rank(env, planner, task, prop, row_xyz, entry, drive: float):
@@ -1249,7 +1310,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     if res == -1 or common.stopped_by_horizon(planner):
         return res
     row_x = float(row_pts[0][0])
-    res = dock_at(env, planner, task, row_x, stage="dock at the row (once)", noise=noise)
+    dock_dx = choose_dock_dx(env, planner, task, row_pts, slot_pts) if stance_scan.enabled() else 0.0
+    res = dock_at(env, planner, task, row_x + dock_dx, stage="dock at the row (once)", noise=noise)
     if res != -1 and common.stopped_by_horizon(planner):
         return res
     if res == -1:
@@ -1284,7 +1346,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                 # 100 seeds, that path knocked a neighbouring counter prop over on 2.
                 row_pts, slot_pts = _BELIEF.calibrate_row(fits, row_pts, slot_pts)
                 if abs(_BELIEF.row_dx) > REDOCK_MIN_M:
-                    res = dock_at(env, planner, task, float(row_pts[0][0]),
+                    res = dock_at(env, planner, task, float(row_pts[0][0]) + dock_dx,
                                   stage="re-dock at the measured row", noise=noise)
                     if res != -1 and common.stopped_by_horizon(planner):
                         return res
@@ -1392,11 +1454,15 @@ if __name__ == "__main__":
     ap.add_argument("--ik-chain", action="store_true",
                     help="solve the grasp / row place before the posture that leads to it "
                          "(planners/oracle/ik_chain.py)")
+    ap.add_argument("--stance-scan", action="store_true",
+                    help="dock at the scanned offset from the row (STANCE_DX, scripts/dr_stance_scan.py)")
     ap.add_argument("--video-dir", default="videos/depth_recall_v1",
                     help="where the render camera's clip goes (unless --no-video)")
     args = ap.parse_args()
     if args.ik_chain:
         os.environ["MIKASA_IK_CHAIN"] = "1"
+    if args.stance_scan:
+        os.environ["MIKASA_STANCE_SCAN"] = "1"
     for flag, var in ((args.ik_starts, "MIKASA_IK_STARTS"), (args.ik_backend, "MIKASA_IK_BACKEND")):
         if flag is not None:
             os.environ[var] = flag

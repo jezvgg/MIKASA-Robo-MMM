@@ -276,9 +276,26 @@ def stand_matrix(x: float, y: float, yaw: float) -> np.ndarray:
     return T
 
 
-def scan(goals_world, stands, *, coll: bool = False, verify_hits: bool = True, tol=VERIFY_TOL):
-    """Which (stand, goal) pairs the arm reaches with the torso free: a ``(len(stands),
-    len(goals))`` boolean mask from ONE batched cuRobo call (plus its solutions).
+def torso_frame(torso: float) -> np.ndarray:
+    """torso_lift_link in the base_link frame with the torso at ``torso`` metres (URDF), 4x4."""
+    key = ("base_link", "torso_lift_link")
+    if key not in _CHAINS:
+        from robots.fetch.urdf_fk import Chain
+
+        _CHAINS[key] = Chain(Path(__file__).resolve().parent / "fetch.urdf", *key)
+    return _CHAINS[key].fk({"torso_lift_joint": float(torso)})
+
+
+def scan(goals_world, stands, *, coll: bool = False, verify_hits: bool = True, tol=VERIFY_TOL,
+         torso: float | None = None):
+    """Which (stand, goal) pairs the arm reaches: a ``(len(stands), len(goals))`` boolean
+    mask from ONE batched cuRobo call (plus its solutions).
+
+    With ``torso=None`` the torso is free (variant ``torso_arm``, solutions torso + 7 arm
+    joints). With ``torso=t`` it is held at ``t`` metres (variant ``arm``, goals expressed in
+    torso_lift_link, solutions the 7 arm joints) — what the planners' torso-held IK can
+    actually reach; the free scan is optimistic there (Depth Recall seed 1000: every torso
+    rung refused a pad the free scan reached).
 
     ``goals_world`` are gripper_link poses (N, 4, 4) in the world; ``stands`` (M, 3) are
     base poses (x, y, yaw). Kinematics only (and self-collision with ``coll``): the scene is
@@ -289,14 +306,16 @@ def scan(goals_world, stands, *, coll: bool = False, verify_hits: bool = True, t
     """
     G = np.asarray(goals_world, dtype=np.float64).reshape(-1, 4, 4)
     S = np.asarray(stands, dtype=np.float64).reshape(-1, 3)
-    rel = np.stack([np.linalg.inv(stand_matrix(*st)) @ G for st in S])          # (M, N, 4, 4)
+    variant = "torso_arm" if torso is None else "arm"
+    lift = np.eye(4) if torso is None else torso_frame(torso)
+    rel = np.stack([np.linalg.inv(stand_matrix(*st) @ lift) @ G for st in S])   # (M, N, 4, 4)
     t0 = time.perf_counter()
-    r = server().call("scan", variant="torso_arm", goals=rel.reshape(-1, 16).tolist(), coll=bool(coll))
+    r = server().call("scan", variant=variant, goals=rel.reshape(-1, 16).tolist(), coll=bool(coll))
     STATS["calls"] += 1
     STATS["server_ms"] += r["ms"]
     STATS["wall_ms"] += (time.perf_counter() - t0) * 1e3
     ok = np.asarray(r["ok"], dtype=bool).reshape(len(S), len(G))
     q = np.asarray(r["q"], dtype=np.float64).reshape(len(S), len(G), -1)
     if verify_hits:
-        ok = verify(rel, q, ok, r["names"], tol)
+        ok = verify(rel, q, ok, r["names"], tol, base=variant_base(variant))
     return ok, q
