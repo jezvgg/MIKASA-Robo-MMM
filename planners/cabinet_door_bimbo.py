@@ -158,6 +158,42 @@ def _qpos(task) -> np.ndarray:
     return _np(task.agent.robot.get_qpos()).reshape(-1).astype(np.float64)
 
 
+ROLL_WINDOW_MARGIN = 0.10
+"""Rad kept inside the collection's roll window (`RollPathPlanner.margin` is 0.05)."""
+ROLL_EDGE_M = 0.5
+"""Within this many radians of a window edge a roll joint's cost rises (x10 at the edge)."""
+
+
+def roll_window(planner, indices) -> tuple[np.ndarray, np.ndarray] | None:
+    """The range each roll joint may still use without breaking the collection's roll window.
+
+    `CollectionMotionPlanner.prefer_low_roll_ik` keeps, for each of the three roll joints, the
+    lowest and highest value measured over the WHOLE episode, and refuses any plan that would
+    take the range beyond pi - 0.05 or a joint beyond +-(pi - 0.05) (`RollPathPlanner.accepts`).
+    A motion this module makes without a plan must respect the same window, or every plan after
+    it is refused (`collection joint limit: no bounded path`, seed 7, 2026-10-16: the servo had
+    taken the forearm roll from -1.29 to 2.74). Returns (lo, hi) for the joints in `indices`
+    (robot qpos indices), or None when the planner keeps no window.
+
+    Example:
+        >>> import types
+        >>> p = types.SimpleNamespace(_roll_indices=[5, 7], _roll_low=np.array([0.0, -1.0]),
+        ...                           _roll_high=np.array([1.0, 0.5]))
+        >>> lo, hi = roll_window(p, [7, 5])
+        >>> np.round(lo, 3).tolist(), np.round(hi, 3).tolist()
+        ([-2.542, -2.042], [2.042, 3.042])
+    """
+    ridx = getattr(planner, "_roll_indices", None)
+    low, high = getattr(planner, "_roll_low", None), getattr(planner, "_roll_high", None)
+    if ridx is None or low is None or high is None:
+        return None
+    width = np.pi - ROLL_WINDOW_MARGIN
+    pos = {int(j): k for k, j in enumerate(ridx)}
+    lo = np.array([max(-width, float(high[pos[int(j)]]) - width) for j in indices])
+    hi = np.array([min(width, float(low[pos[int(j)]]) + width) for j in indices])
+    return lo, hi
+
+
 class HandServo:
     """Resolved-rate servo of `gripper_link` (the TCP) with the arm's seven joints.
 
@@ -169,9 +205,9 @@ class HandServo:
 
     FD_EPS = 1e-6
 
-    def __init__(self, task):
+    def __init__(self, task, planner=None):
         robot = task.agent.robot
-        self.task = task
+        self.task, self.planner = task, planner
         self.pm = robot._objs[0].create_pinocchio_model()
         self.link = int(robot.links_map["gripper_link"]._objs[0].index)
         jm = robot.active_joints_map
@@ -216,12 +252,20 @@ class HandServo:
         dp, dr = ds.pose_error(self.pose(q), T_goal)
         meas = q[self.idx]
         bias = np.where(self.roll, ROLL_HOLD, ARM_HOLD) * (self.roll_ref - meas)
+        lo, hi = self.lo.copy(), self.hi.copy()
+        cost = self.cost.copy()
+        win = roll_window(self.planner, self.idx[self.roll]) if self.planner is not None else None
+        if win is not None:
+            lo[self.roll] = np.maximum(lo[self.roll], win[0])
+            hi[self.roll] = np.minimum(hi[self.roll], win[1])
+            edge = np.minimum(meas[self.roll] - lo[self.roll], hi[self.roll] - meas[self.roll])
+            cost[self.roll] *= 1.0 + 9.0 * np.clip(1.0 - edge / ROLL_EDGE_M, 0.0, 1.0)
         dq = ds.dls_step(self.jacobian(q), dp, dr, k_pos=K_POS, k_rot=K_ROT, cap_pos=CAP_POS,
-                         cap_rot=CAP_ROT, cap_q=CAP_Q, w_rot=W_ROT, joint_cost=self.cost,
+                         cap_rot=CAP_ROT, cap_q=CAP_Q, w_rot=W_ROT, joint_cost=cost,
                          bias=bias)
         cmd = np.clip(np.asarray(q_cmd, dtype=np.float64) + dq, meas - ARM_LEAD_MAX,
                       meas + ARM_LEAD_MAX)
-        return np.clip(cmd, self.lo, self.hi), dp, dr
+        return np.clip(cmd, lo, hi), dp, dr
 
 
 def _base_scale(planner) -> float:
@@ -325,7 +369,7 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     if done:
         return res
     try:
-        servo = HandServo(task)
+        servo = HandServo(task, planner)
     except Exception as exc:          # no model, no servo: say so and stop before the close
         return crp.fail(env, "bimbo door: no kinematic model for the hand servo",
                         why=f"{type(exc).__name__}: {exc}"[:160])
@@ -556,7 +600,7 @@ def lower_the_hand(env, planner, task, *, door, dz: float = LOWER_M):
     Watched by the leaf's angle like the clear. Returns the last 5-tuple, or -1 if no step was
     taken."""
     try:
-        servo = HandServo(task)
+        servo = HandServo(task, planner)
     except Exception as exc:
         say(env, "lower the hand: no kinematic model", why=f"{type(exc).__name__}"[:80])
         return -1
