@@ -26,6 +26,7 @@ preceded it.
 
 from __future__ import annotations
 
+import os
 import random
 
 import numpy as np
@@ -46,4 +47,9 @@ def seed_everything(seed: int) -> None:
         # mplib ships Linux wheels only. Scene code runs without it; the planners
         # do not, and they are the only thing whose determinism depends on this.
         return
-    mplib.set_global_seed(seed)
+    # ``MIKASA_PLANNER_RNG_OFFSET=k`` (a measurement hook, unset in collection): mplib's
+    # generator starts from seed + k, so the SAME scene is planned under another stream of
+    # random IK starts and RRT samples. A planner change that adds IK calls shifts that
+    # stream for everything after it; comparing arms over a few streams separates the
+    # change from the draw (plan curious-wishing-newell, 2026-10-17).
+    mplib.set_global_seed(seed + int(os.environ.get("MIKASA_PLANNER_RNG_OFFSET", "0") or 0))
