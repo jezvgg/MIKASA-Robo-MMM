@@ -268,6 +268,21 @@ on another colour's pad. The between-pads check never had to refuse a close in t
 200 episodes: it is a guard against closing on air, not a source of the success rate.
 The longest episode, 4221 steps, is inside the 5700-step horizon.
 
+Same tree, more seeds and modes:
+
+| run | success | notes |
+|---|---|---|
+| fresh seeds 3000-3199, state | **200/200** (0.981-1) | steps p50 3707, max 3931 |
+| fresh seeds 3000-3199, pointcloud | **199/200** (0.972-0.999) | pads read right 199/199; between-pads 1393/1393; the miss is seed 3011: the measured row shift (10.4 mm) was just over `REDOCK_MIN_M`, and `drive_base` turned the base for a 1 cm sideways re-dock, which the open right door refused (forearm) |
+| seeds 1000-1099, state + assisted grasp | **100/100** | welds 7/7 in every episode |
+| seeds 1000-1099, pointcloud + assisted grasp | **100/100** | welds 7/7; wrist fits 700/700 |
+
+Against the previous version on the same 100 seeds the episodes are 1.4 % longer in
+steps (median 3712 vs 3662 by state), all of it the longer crosses to the far pad; the
+wall clock is ~30 % longer, which is planning, not motion: ~4.8 refused rungs per
+episode (the far pad's first extraction rung always, the restore's hand-height rungs for
+near pads) before the one that plans.
+
 ## Assisted grasp (experimental, off by default)
 
 `MikasaDepthRecall-v1` accepts `assisted_grasp=True`. The prop is then welded to the
