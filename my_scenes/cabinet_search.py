@@ -1619,8 +1619,10 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
     # ------------------------------------------------------------ initialize --
 
     def _assisted_grasp_objects(self):
-        """The can (`cube`, its historical key) is the one thing picked up."""
-        return [self.cube]
+        """The compartments' doors (their handles are what the hand closes on) and the can
+        (`cube`, its historical key; the planner only touches it)."""
+        doors = [art.get_active_joints()[j].child_link for art, j in self._hinges[0]]
+        return doors + [self.cube]
 
     def _after_reconfigure(self, options: dict):
         # The layout built in __init__ lives on the CPU (no device yet); the latch

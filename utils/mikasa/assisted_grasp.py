@@ -154,9 +154,23 @@ def pick_candidate(touch: Sequence[int], ray_hit: Sequence[bool], dist: Sequence
     return i if touch[i] >= min_fingers else None
 
 
+def _entity_id(obj) -> int:
+    """Scene id of an actor's entity, or of the entity a link's component lives on."""
+    o = obj._objs[0]
+    return (o.entity if hasattr(o, "entity") else o).per_scene_id
+
+
+def _is_link(obj) -> bool:
+    return hasattr(obj._objs[0], "entity")
+
+
 @dataclass
 class AssistedGrasp:
     """The rule wired into one CPU ManiSkill environment for a fixed list of objects.
+
+    An object is an actor (a free body) or an articulation link (a door, a drawer: what
+    its handle is part of). OmniGibson welds to either; a link stays held by its own joint,
+    so the mass limit, which is about what the hand can carry, applies to free bodies only.
 
     Build it in the task's ``_after_reconfigure`` (the agent and the objects exist),
     ``reset()`` it at the top of ``_initialize_episode``, call ``after_substep()`` from
@@ -180,9 +194,12 @@ class AssistedGrasp:
         self.window = GraspWindow(1.0 / float(env.sim_freq), self.cfg.window_s, self.cfg.release_s)
         self._px = env.scene.sub_scenes[0].physx_system
         self._robot_ids = {link._objs[0].entity.per_scene_id for link in agent.robot.get_links()}
-        self._obj_ids = {obj._objs[0].per_scene_id: i for i, obj in enumerate(self.objects)}
+        self._obj_ids = {_entity_id(obj): i for i, obj in enumerate(self.objects)}
         self._masses = []
         for obj in self.objects:
+            if _is_link(obj):
+                self._masses.append(0.0)          # held by its joint; never refused for mass
+                continue
             body = obj._objs[0].find_component_by_type(sapien.physx.PhysxRigidDynamicComponent)
             self._masses.append(float(body.mass) if body is not None else float("inf"))
         # One drive per object, hand -> object, made now and switched later.

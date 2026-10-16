@@ -365,8 +365,14 @@ class SameDrawerTask(AssistedGraspTask, BaseEnv):
     # ---------------------------------------------------------------- buffers --
 
     def _assisted_grasp_objects(self):
-        """The apple is the one thing picked up; the plate is kinematic scenery."""
-        return [self.apple]
+        """The apple, and the moving link (`inner_box`, which carries the handle bar) of
+        every drawer; the plate is kinematic scenery. Read from the scene, not from
+        `_drawer_arts`: this runs inside `super()._after_reconfigure`, before that is set."""
+        drawers = []
+        for name in DRAWER_FIXTURES:
+            art = self.scene.articulations[f"{name}{DRAWER_ART_SUFFIX}"]
+            drawers += [link for link in art.links if link.name.split("/")[-1] == "inner_box"]
+        return [self.apple] + drawers
 
     def _after_reconfigure(self, options: dict):
         super()._after_reconfigure(options)

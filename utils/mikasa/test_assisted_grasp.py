@@ -89,9 +89,17 @@ def test_nearest_one_finger_body_blocks_a_farther_grasp():
 
 # ---------------------------------------------------------------- simulator --
 
-TASKS = {"MikasaSeasonDish-v0": ("shaker", "condiment_bottle"),
-         "MikasaSameDrawer-v0": ("apple",),
-         "MikasaCabinetSearch-v0": ("cube",)}
+#: The objects each task welds, by kind: free bodies by name, and how many articulation
+#: links (doors or drawers) come with them.
+TASKS = {"MikasaSeasonDish-v0": (("shaker", "condiment_bottle"), 0),
+         "MikasaSameDrawer-v0": (("apple",), 4),
+         "MikasaCabinetSearch-v0": (("cube",), 4)}
+
+
+#: As the planners and the collection profiles build them: the pinned kitchen (SameDrawer
+#: draws one per env otherwise, and not every kitchen has its drawers) and 20/100 Hz.
+MAKE_KW = dict(num_envs=1, robot_uids="ds_fetch", control_mode="pd_joint_pos", obs_mode="state",
+               sim_backend="cpu", scene_idx=0, sim_config={"control_freq": 20, "sim_freq": 100})
 
 
 def _make_env(assisted, env_id="MikasaSeasonDish-v0"):
@@ -99,9 +107,7 @@ def _make_env(assisted, env_id="MikasaSeasonDish-v0"):
     pytest.importorskip("mani_skill")
     try:
         import my_scenes  # noqa: F401  (registers the benchmark environments)
-        env = gym.make(env_id, num_envs=1, robot_uids="ds_fetch",
-                       control_mode="pd_joint_pos", obs_mode="state", sim_backend="cpu",
-                       assisted_grasp=assisted)
+        env = gym.make(env_id, assisted_grasp=assisted, **MAKE_KW)
         env.reset(seed=0)
     except Exception as exc:  # no RoboCasa assets, no renderer, ...
         pytest.skip(f"{env_id} cannot be built here: {exc!r}")
@@ -166,7 +172,10 @@ def test_each_task_welds_its_own_objects_and_checkpoints_it(env_id):
     env = _make_env(True, env_id)
     task = env.unwrapped
     try:
-        assert [o.name for o in task._ag.objects] == list(TASKS[env_id])
+        names, n_links = TASKS[env_id]
+        from utils.mikasa.assisted_grasp import _is_link
+        assert [o.name for o in task._ag.objects if not _is_link(o)] == list(names)
+        assert sum(_is_link(o) for o in task._ag.objects) == n_links
         assert int(task.get_info()["ag_held"][0]) == -1
         env.step(_action(env, -1.0))
         _float_prop_at_hand(task, 0)
@@ -188,14 +197,15 @@ def test_weld_follows_the_hand_then_lets_go_on_open(ag_env):
     _float_prop_at_hand(task, 0)
     task._ag.attach(0)
     before = _rel(task, 0)
-    z0 = float(task._ag.objects[0].pose.p[0, 2])
+    z0, h0 = float(task._ag.objects[0].pose.p[0, 2]), float(task._ag.hand.pose.p[0, 2])
     delta = _torso_room(ag_env)
     for _ in range(15):
         ag_env.step(_action(ag_env, -1.0, torso_delta=delta))
     after = _rel(task, 0)
     moved = float(task._ag.objects[0].pose.p[0, 2]) - z0
-    assert abs(moved) > 0.05 and np.sign(moved) == np.sign(delta), (
-        f"the torso moved {delta:+.2f} m/step and the prop moved {moved:+.3f} m")
+    hand = float(task._ag.hand.pose.p[0, 2]) - h0
+    assert abs(hand) > 0.03 and np.sign(hand) == np.sign(delta), f"the hand moved only {hand:+.3f} m"
+    assert abs(moved - hand) < 3e-3, f"the hand moved {hand:+.3f} m and the prop {moved:+.3f} m"
     assert np.linalg.norm(after.p - before.p) < 2e-3, "the weld slipped"
     assert int(task.get_info()["ag_held"][0]) == 0
     ag_env.step(_action(ag_env, 1.0))                # fully open: released on the next step
