@@ -278,6 +278,7 @@ Same tree, more seeds and modes:
 | seeds 1000-1099, pointcloud + assisted grasp | **100/100** | welds 7/7; wrist fits 700/700 |
 | seeds 1000-1099, state, cuRobo IK (shared server, no jump filter) | **100/100** | 6302 cuRobo calls over 200 episodes |
 | seeds 1000-1099, pointcloud, cuRobo IK | **100/100** | wall p50 343 s vs 380 s with mplib, same machine load class |
+| validation seeds 200000-200099, all four modes | **400/400** | pads read right 200/200; between-pads 1400/1400; welds 7/7 in all 200 AG episodes; steps max 4238 |
 | seeds 1000-1099, state, **blind** restore | 18/100 (Wilson 0.12-0.27) | the 1/6 guessing reference is 0.167: the pads carry no row order |
 
 Against the previous version on the same 100 seeds the episodes are 1.4 % longer in
