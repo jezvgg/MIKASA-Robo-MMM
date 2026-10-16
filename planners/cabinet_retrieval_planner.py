@@ -315,6 +315,11 @@ The base legs are unplanned (that is the point — the planned ones are what ref
 the leaf is watched by state instead of by a collision sweep. Well under the task's own
 `theta_count` = 0.05 rad, which is what latches a compartment as opened."""
 RETREAT_LIFT_M = float(os.environ.get("MIKASA_RETREAT_LIFT_M", "0.0"))
+
+#: With assisted grasp on, how far the open hand backs straight off a released handle
+#: before the usual retreat, metres (`open_the_door`, at the release). The pads reach 3 cm
+#: past the TCP and the bar is ~1.3 cm thick.
+AG_BAR_BACKOFF_M = float(os.environ.get("MIKASA_AG_BAR_BACKOFF_M", "0.05"))
 RETREAT_ALONG_FACE = os.environ.get("MIKASA_RETREAT_ALONG_FACE", "1") == "1"
 """The retreat after the release runs along the LEAF's plane — the hand's own axis
 projected onto it — instead of along the hand's axis as it stands. Measured
@@ -1124,6 +1129,26 @@ def open_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=No
             base=[round(float(v), 3) for v in record["base_xy"]])
     planner.open_gripper()
     planner.planner.update_from_simulation()
+    if getattr(task, "_ag", None) is not None and AG_BAR_BACKOFF_M > 0:
+        # Assisted grasp held the bar at the finger midpoint until the fingers opened; a
+        # friction grip lets it slide where the pull put it. The retreat below was tuned
+        # on the second, and from the first it dragged the leaf ~0.1 rad shut and ended
+        # with the pads on it (CabinetSearch seeds 0 and 1, 2026-10-16). Straight back
+        # along the approach first, so the bar leaves the open pads before anything else;
+        # BIMBO_EvoX and b1k_rl_guys clear the hand off a released handle the same way.
+        tcp = task.agent.tcp.pose.sp
+        out = sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -AG_BAR_BACKOFF_M])
+        with common.contact_stroke(planner, [door.stem]):
+            backed = common.arm_move(env, planner, out, who=WHO,
+                                     stage="slide the open hand off the bar (assisted grasp)",
+                                     tries=2)
+        if backed != -1:
+            res = backed
+            if common.stopped_by_horizon(planner):
+                return res
+            planner.planner.update_from_simulation()
+        say(env, "off the bar after the weld", backed=backed != -1,
+            door_rad=round(float(door_rad_now(task, door)), 3))
     if record is not None and RETRACE_ARC and RETREAT_LIFT_M > 0:
         # Off the face first, along the LIVE normal (RETREAT_LIFT_M says why); taped, so
         # the reversal undoes it last, with the hand already at the bar's radius.
