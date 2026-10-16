@@ -158,7 +158,7 @@ FINGER_HALF_H = 0.0132
 #: How far `wrist_flex_link` hangs under the hand's axis in the side grasp, metres, and
 #: the clearance over the support the box's first rung left it (TCP 8.0 cm up, 1.3 cm).
 WRIST_HANG = 0.067
-WRIST_CLEAR = 0.012
+WRIST_CLEAR = float(os.environ.get("MIKASA_DR1_WRIST_CLEAR", "0.012"))
 
 
 def grasp_lifts(task, prop) -> tuple:

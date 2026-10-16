@@ -26,6 +26,7 @@ of this configuration.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -450,6 +451,14 @@ class DepthRecallV1Task(BaseEnv):
             )
             for i, spec in enumerate(self.cfg.props)
         ]
+        # Diagnostic only: scale every prop's density by MIKASA_DR1_MASS_X (mass and
+        # inertia together, as SeasonDish's K98 did). 1.0, the default, does not touch them.
+        _mx = float(os.environ.get("MIKASA_DR1_MASS_X", "1.0"))
+        if _mx != 1.0:
+            for prop in self.props:
+                for body in prop._bodies:
+                    body.mass = float(body.mass) * _mx
+                    body.inertia = body.inertia * _mx
         # Origin to mesh bottom, per prop: what a standing prop's origin sits above its
         # surface. Read in the actor's own frame (no pose needed, so it also works while
         # GPU sim has no body data yet — SeasonDish's K55). The objaverse origin is the
