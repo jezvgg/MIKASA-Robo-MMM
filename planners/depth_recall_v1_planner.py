@@ -43,6 +43,7 @@ import sapien
 from planners import cabinet_retrieval_planner as retr
 from planners import depth_recall_v1_perception as perc
 from planners.oracle import cabinet_place as sp
+from planners.oracle import ik_chain
 from planners.oracle import oracle_common as common
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
@@ -390,6 +391,86 @@ def fold_arm(env, planner, task):
     return retr.fold_arm_to_rest(env, planner, task)
 
 
+def what_if_start(planner, task, *, torso: float | None = None, drive: float = 0.0):
+    """The planning model's qpos as it would be with the torso at `torso` and the base
+    `drive` metres along its heading — the same shift `ready_by_line` gives its drive
+    sweep, folded the way its IK start is. Nothing moves.
+    """
+    sim = _np(task.agent.robot.get_qpos()).reshape(-1).astype(np.float64)
+    if torso is not None:
+        sim[3] = float(torso)
+    if float(drive):
+        heading = task.agent.base_link.pose.sp.to_transformation_matrix()[:3, 0]
+        sim[0] += float(drive) * float(heading[0])
+        sim[1] += float(drive) * float(heading[1])
+    return planner.planner.fold_qpos(sim)
+
+
+def counter_grasp_chains(env, planner, task, prop, torso: float, lift: float, depth: float):
+    """MIKASA_IK_CHAIN=1: the counter grasp solved FIRST, then walked back to its pre-grasp.
+
+    The grasp is the deeper pose `ready_by_line`'s screw aims at (`READY_GRASP_SLACK` past
+    the side grasp), with the prop out of the planning world exactly as for that screw,
+    the torso held at `torso`. Returns the chains (possibly none), nearest first.
+    """
+    grasp, pre = retr.side_grasp_pose(task, depth, lift=lift, obj=_seen(prop))
+    if grasp is None:
+        return []
+    deeper = sapien.Pose(p=np.asarray(grasp.p) + np.array([0.0, retr.READY_GRASP_SLACK, 0.0]),
+                         q=grasp.q)
+    start = what_if_start(planner, task, torso=torso)
+    held = [True, True, True, True] + [False] * (len(start) - 4)
+    report = ik_chain.ChainReport()
+    with common.touchable(planner, prop.name):
+        chains = ik_chain.chain_back(ik_chain.mplib_solver(planner, held), deeper, pre, start,
+                                     cols=ik_chain.arm_columns(task), report=report)
+    say(env, "ik chain: counter grasp", prop=prop.name, torso=torso, lift=lift, depth=depth,
+        **report.as_dict())
+    return chains
+
+
+def entry_chain_rank(env, planner, task, prop, row_xyz, entry, drive: float):
+    """MIKASA_IK_CHAIN=1: the row place solved FIRST at the work stance, walked up to the entry.
+
+    The place is the pose the final descent aims at (`place_pose_for`), with the row
+    neighbours out of the planning world as for that descent and the held prop in it; the
+    base is `drive` ahead, where it will be. The entry end of a chain is the arm the ready
+    posture needs (the drive in is a pure base translation), so the ready IK goals are
+    ranked nearest to those ends — a rank, not a gate: with no chain the old order stands.
+    """
+    place = sp.place_pose_for(task, obj=_seen(prop), target=row_xyz, compensate_xy=True)
+    if place is None:
+        return None
+    start = what_if_start(planner, task, drive=drive)
+    held = [True, True, True, True] + [False] * (len(start) - 4)
+    report = ik_chain.ChainReport()
+    with neighbours_touchable(planner, row_neighbours(task, prop)):
+        chains = ik_chain.chain_back(ik_chain.mplib_solver(planner, held), place, entry, start,
+                                     cols=ik_chain.arm_columns(task), report=report)
+    say(env, "ik chain: row place to entry", prop=prop.name, **report.as_dict())
+    if not chains:
+        return None
+    return ik_chain.nearest_rank([c.easy for c in chains], ik_chain.arm_columns(task))
+
+
+#: ``MIKASA_DOCK_ERR="sx,sy,syaw"`` (a measurement hook, off by default): every dock's drive
+#: target is moved by a draw the planner is never told about — uniform in +-sx, +-sy metres
+#: and +-syaw rad of heading — from an RNG of its own keyed on the episode seed, so the
+#: waypoint-noise and coin streams are untouched. It stands in for a base that parks off
+#: its mark, which is what a stance chosen for robustness has to survive.
+DOCK_ERR_OFFSET = 70_001
+
+
+def dock_error_rng(seed):
+    """(rng, (sx, sy, syaw)) when ``MIKASA_DOCK_ERR`` is set, else None."""
+    spec = os.environ.get("MIKASA_DOCK_ERR", "").strip()
+    if not spec:
+        return None
+    scale = tuple(float(v) for v in spec.split(","))
+    assert len(scale) == 3, f"MIKASA_DOCK_ERR wants sx,sy,syaw, got {spec!r}"
+    return np.random.default_rng((0 if seed is None else int(seed)) + DOCK_ERR_OFFSET), scale
+
+
 def dock_at(env, planner, task, x: float, *, stage: str, noise=None):
     """Put the base in front of `x`, empty-handed, facing the counter. -1 or the tuple.
 
@@ -405,8 +486,17 @@ def dock_at(env, planner, task, x: float, *, stage: str, noise=None):
     dock = np.array([float(x), retr.READY_DOCK_Y, 0.0])
     if noise is not None:
         dock = noise.point(stage, dock, axes=(True, True, False))
+    view = np.array([0.0, 1.0, 0.0])
+    err = getattr(planner, "_dock_err", None)
+    if err is not None:
+        rng, scale = err
+        dx, dy, dyaw = rng.uniform(-1.0, 1.0, 3) * np.asarray(scale, dtype=float)
+        dock = dock + np.array([dx, dy, 0.0])
+        view = np.array([-np.sin(dyaw), np.cos(dyaw), 0.0])
+        say(env, "injected dock error", dx=round(float(dx), 4), dy=round(float(dy), 4),
+            dyaw_deg=round(float(np.degrees(dyaw)), 2))
     say(env, stage, dock=[round(float(v), 3) for v in dock])
-    res = planner.drive_base(target_pos=dock, target_view_vec=np.array([0.0, 1.0, 0.0]), freeze_arm=True)
+    res = planner.drive_base(target_pos=dock, target_view_vec=view, freeze_arm=True)
     if res != -1:
         planner.planner.update_from_simulation()
         d_dock, dyaw = common.dock_error(task, (float(x), retr.READY_DOCK_Y, np.pi / 2))
@@ -866,45 +956,77 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
             if fold_arm(env, planner, task) == -1:
                 break
             planner.planner.update_from_simulation()
-        for torso in COUNTER_GRASP_TORSO_RUNGS:
-            lowered = retr.plan_joints(env, planner, task, {"torso_lift_joint": torso},
-                                       label=f"torso to {torso} for the counter grasp",
-                                       line_only=True, qpos_step=TORSO_LINE_STEP)
-            if lowered == -1:
-                continue
-            res = lowered
-            if common.stopped_by_horizon(planner):
-                return res, False
-            planner.planner.update_from_simulation()
-            for lift in GRASP_LIFTS:
-                for depth in retr.SIDE_GRASP_DEPTHS:
-                    grasp, pre = retr.side_grasp_pose(task, depth, lift=lift, obj=_seen(prop))
-                    if grasp is None:
-                        return fail(env, f"{prop.name} has no collision mesh"), False
-                    res = _ready_by_line(
-                        env, planner, task, pre, drive=0.0, grasp=grasp,
-                        label=f"grasp posture ({prop.name}, torso {torso}, lift {lift}, "
-                              f"depth {depth})",
-                        touch_needle=prop.name, rank=roll_rank(task))
-                    if res != -1 and common.stopped_by_horizon(planner):
-                        return res, False
-                    planner.planner.update_from_simulation()
-                    if res != -1:
-                        chosen = (torso, lift)
+        # MIKASA_IK_CHAIN=1 runs the ladder first with each (torso, lift, depth) rung's
+        # grasp solved before its pre-grasp (`counter_grasp_chains`): a rung with no chain
+        # is skipped — a torso with none is not even lowered to — and the ready IK goals are
+        # ranked nearest the chains' pre-grasp ends. If that finds nothing that plans, the
+        # plain ladder below runs as before.
+        for chained in ((True, False) if ik_chain.enabled() else (False,)):
+            chains_at: dict = {}
+
+            def chains_for(torso, lift, depth):
+                key = (torso, lift, depth)
+                if key not in chains_at:
+                    chains_at[key] = counter_grasp_chains(env, planner, task, prop,
+                                                          torso, lift, depth)
+                return chains_at[key]
+
+            for torso in COUNTER_GRASP_TORSO_RUNGS:
+                if chained and not any(chains_for(torso, lift, depth) for lift in GRASP_LIFTS
+                                       for depth in retr.SIDE_GRASP_DEPTHS):
+                    say(env, "ik chain: no counter grasp at this torso; not lowering to it",
+                        prop=prop.name, torso=torso)
+                    continue
+                lowered = retr.plan_joints(env, planner, task, {"torso_lift_joint": torso},
+                                           label=f"torso to {torso} for the counter grasp",
+                                           line_only=True, qpos_step=TORSO_LINE_STEP)
+                if lowered == -1:
+                    continue
+                res = lowered
+                if common.stopped_by_horizon(planner):
+                    return res, False
+                planner.planner.update_from_simulation()
+                for lift in GRASP_LIFTS:
+                    for depth in retr.SIDE_GRASP_DEPTHS:
+                        rank = roll_rank(task)
+                        if chained:
+                            chains = chains_for(torso, lift, depth)
+                            if not chains:
+                                continue
+                            rank = ik_chain.nearest_rank([c.easy for c in chains],
+                                                         ik_chain.arm_columns(task), fallback=rank)
+                        grasp, pre = retr.side_grasp_pose(task, depth, lift=lift, obj=_seen(prop))
+                        if grasp is None:
+                            return fail(env, f"{prop.name} has no collision mesh"), False
+                        res = _ready_by_line(
+                            env, planner, task, pre, drive=0.0, grasp=grasp,
+                            label=f"grasp posture ({prop.name}, torso {torso}, lift {lift}, "
+                                  f"depth {depth})",
+                            touch_needle=prop.name, rank=rank)
+                        if res != -1 and common.stopped_by_horizon(planner):
+                            return res, False
+                        planner.planner.update_from_simulation()
+                        if res != -1:
+                            chosen = (torso, lift)
+                            break
+                    if chosen is not None:
                         break
-                if chosen is not None:
+                if chosen is None:
+                    continue
+                say(env, "counter grasp posture", prop=prop.name, torso=chosen[0],
+                    lift=chosen[1], **({"chained": True} if chained else {}))
+                res, ok = grasp_ladder(env, planner, task, prop, where="counter",
+                                       lift=chosen[1])
+                if ok:
                     break
-            if chosen is None:
-                continue
-            say(env, "counter grasp posture", prop=prop.name, torso=chosen[0],
-                lift=chosen[1])
-            res, ok = grasp_ladder(env, planner, task, prop, where="counter",
-                                   lift=chosen[1])
+                if res != -1 and common.stopped_by_horizon(planner):
+                    return res, False
+                chosen = None
             if ok:
                 break
-            if res != -1 and common.stopped_by_horizon(planner):
-                return res, False
-            chosen = None
+            if chained:
+                say(env, "ik chain: the chained ladder found no grasp; the plain ladder",
+                    prop=prop.name)
         if ok:
             break
     if not ok:
@@ -951,9 +1073,11 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         entry=[round(float(v), 3) for v in entry.p])
     # The held prop stays in the planning world for the descent pre-check: it is exactly
     # what must not hit the shelf.
+    entry_rank = (entry_chain_rank(env, planner, task, prop, row_xyz, entry, drive)
+                  if ik_chain.enabled() else None)
     res = _ready_by_line(env, planner, task, ready, drive=drive, grasp=entry,
                              label=f"entry posture ({prop.name})",
-                             slack=sp.PLACE_PROBE_SLACK, touch_needle=None)
+                             slack=sp.PLACE_PROBE_SLACK, touch_needle=None, rank=entry_rank)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
@@ -1077,6 +1201,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     _BELIEF = (perc.PropBelief(task, lambda message, **data: say(env, message, **data))
                if perception == "pointcloud" else None)
     planner = planner_factory(env, debug, vis)
+    planner._dock_err = dock_error_rng(seed)
     if _BELIEF is not None:
         _BELIEF.bind_world(planner)
     noise = WaypointNoise((0 if seed is None else int(seed)) + 200003
@@ -1264,9 +1389,14 @@ if __name__ == "__main__":
                     help="IK restarts: mplib's random draws, or a fixed table (robots/fetch/ik_backend.py)")
     ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None,
                     help="IK proposals from mplib alone, or from cuRobo (needs MIKASA_CUROBO_PY)")
+    ap.add_argument("--ik-chain", action="store_true",
+                    help="solve the grasp / row place before the posture that leads to it "
+                         "(planners/oracle/ik_chain.py)")
     ap.add_argument("--video-dir", default="videos/depth_recall_v1",
                     help="where the render camera's clip goes (unless --no-video)")
     args = ap.parse_args()
+    if args.ik_chain:
+        os.environ["MIKASA_IK_CHAIN"] = "1"
     for flag, var in ((args.ik_starts, "MIKASA_IK_STARTS"), (args.ik_backend, "MIKASA_IK_BACKEND")):
         if flag is not None:
             os.environ[var] = flag

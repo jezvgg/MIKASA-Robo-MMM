@@ -4,6 +4,7 @@ from collections import Counter
 import time
 from planners.season_dish_candidates import candidates as grasp_candidates, journal, failure_kind
 from planners.oracle.search_budget import measured
+from planners.oracle import ik_chain
 import mplib
 import numpy as np
 import sapien
@@ -149,6 +150,39 @@ def above_via(planner, task, q, reach, above_m):
     return via
 
 
+def chain_contact_path(planner, task, start, knots):
+    """The contact leg along an IK chain (planners/oracle/ik_chain.py), or None.
+
+    From `start` (where the descent left the arm) through the chain's knots, standoff end
+    first, to the configuration the contact pose was solved in. A screw to the same pose
+    is free to drift along the 7-DoF arm's null space and can leave that branch: measured
+    2026-10-17 on SeasonDish seed 1005, the contact IK was collision-free and the screw to
+    the very same pose put ``wrist_flex_link`` into the counter. Every knot is an IK answer
+    2 cm from the next; the dense `path_clear` sweep and the roll window still decide.
+    """
+    p = planner.planner
+    move = list(p.move_group_joint_indices)
+    start = np.asarray(start, dtype=float)
+    rows = [start] + [np.asarray(k, dtype=float) for k in reversed(knots)]
+    full = np.vstack(rows)
+    arm = ik_chain.arm_columns(task)
+    if ik_chain.joint_jump(start, rows[1], arm) > ik_chain.JUMP_RAD:
+        planner._last_path_collision = None
+        return None
+    if not p.accepts(full) or not path_clear(planner, start, full[:, move]):
+        return None
+    try:
+        times, pos, vel, acc, duration = p.TOPP(full[:, move], task.control_timestep)
+    except RuntimeError:
+        return None
+    timed = np.broadcast_to(start, (len(pos), len(start))).copy()
+    timed[:, move] = pos
+    if not p.accepts(timed) or not path_clear(planner, start, pos):
+        return None
+    return dict(status='Success', time=times, position=pos, velocity=vel,
+                acceleration=acc, duration=duration)
+
+
 @measured
 def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
     """Reject grasps whose lift or carry would require changing elbow branch."""
@@ -187,7 +221,14 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
                 continue
             target=via
             q=via.copy();q[moves]=down['position'][-1]
-        contact=straight_plan(planner,grasp,current=q)
+        knots=getattr(planner,'_contact_chains',{}).get(record.get('candidate'))
+        contact=None
+        if knots is not None:
+            # MIKASA_IK_CHAIN=1: follow the branch the contact was solved on.
+            contact=chain_contact_path(planner,task,q,knots)
+            reasons['chain contact '+str(contact is not None)]+=1
+        if contact is None:
+            contact=straight_plan(planner,grasp,current=q)
         reasons['contact '+str(contact is not None)]+=1
         if contact is None:
             journal(planner,record,'contact',failure_kind(planner._straight_failures,
@@ -283,6 +324,7 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
         journal(planner,record,'accepted',seconds=time.perf_counter()-candidate_start,
                 direct_pour=direct is not None,complete_wrist_pour=route is not None or direct is not None)
         return dict(approach=line,down=down,reach_pose=reach,above_m=above_m,contact=contact,lift_z=z,grasp_pose=grasp,
+                    contact_knots=knots,
                     grasp_qpos=closed,carry=fold,direct_pour=direct is not None,
                     progress_powers=line.get('progress_powers'),
                     total_joint_travel=float(np.abs(np.diff(all_knots,axis=0)).sum()))
@@ -312,7 +354,13 @@ def grasp_with_continuation(env,planner,task,obj,grasp,reach):
         result=execute_straight(planner,down)
         if common.stopped_by_horizon(planner):return result,False
         planner.planner.update_from_simulation()
-    path=straight_plan(planner,chain['grasp_pose'])
+    path=None
+    if chain.get('contact_knots') is not None:
+        now=task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
+        path=chain_contact_path(planner,task,now,chain['contact_knots'])
+        common.say(env,'season_dish_planner','contact along the IK chain',planned=path is not None)
+    if path is None:
+        path=straight_plan(planner,chain['grasp_pose'])
     if path is None:return -1,False
     result=execute_straight(planner,path)
     if common.stopped_by_horizon(planner):return result,False

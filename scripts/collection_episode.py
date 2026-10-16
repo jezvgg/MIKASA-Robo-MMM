@@ -25,12 +25,16 @@ def main():
     ap.add_argument("seed", type=int)
     ap.add_argument("--assisted-grasp", action="store_true")
     ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None, help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
+    ap.add_argument("--ik-chain", action="store_true",
+                    help="solve the contact before its standoff (planners/oracle/ik_chain.py)")
     ap.add_argument("--video-dir", default=None, help="record the render camera's clip here")
     args = ap.parse_args()
-    if args.ik_backend is not None:
-        import os
+    import os
 
+    if args.ik_backend is not None:
         os.environ["MIKASA_IK_BACKEND"] = args.ik_backend
+    if args.ik_chain:
+        os.environ["MIKASA_IK_CHAIN"] = "1"
 
     import gymnasium as gym
 
@@ -71,7 +75,7 @@ def main():
         info = base.get_info()
         success = verdict == "success" and bool(info["success"].reshape(-1)[0])
         print(f"collection_episode task={args.task} seed={seed} assisted_grasp={args.assisted_grasp} "
-              f"ik_backend={args.ik_backend or 'mplib'} "
+              f"ik_backend={args.ik_backend or 'mplib'} ik_chain={args.ik_chain} "
               f"verdict={verdict} success={success} steps={int(base.elapsed_steps.reshape(-1)[0])}", flush=True)
         ag = base._ag
         if ag is not None:

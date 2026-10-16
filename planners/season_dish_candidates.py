@@ -7,6 +7,7 @@ from transforms3d.quaternions import mat2quat
 from robots.fetch.utils import unwrap_toward
 from planners.oracle.wrist_pour import rotation
 from planners.oracle import oracle_common as common
+from planners.oracle import ik_chain
 
 TEMPLATES = ((.5, 2.1, 1.8, -2.3, .75, .1),
              (-.6, .9, 1.8, -3.0, 1.05, 2.4))
@@ -110,45 +111,12 @@ def candidates(planner, task, grasp, reach, reasons, *, n_init=32):
         {str(i):i%4 for i in range(len(specifications))}) if warm_starts else {}
     result = []
     planner._candidate_journal = []
-    for request, (yaw, dz, torso, template) in enumerate(specifications):
-        if 'diagnostic_grasp_torso_m' in parameters:
-            torso = parameters['diagnostic_grasp_torso_m']
-        start = time.perf_counter()
-        rot = rotation([0,0,1], np.deg2rad(yaw))
-        orientation = mat2quat(rot @ grasp.to_transformation_matrix()[:3,:3])
-        g = sapien.Pose(grasp.p+[0,0,dz], orientation)
-        reach_pose = sapien.Pose(g.p+rot@(reach.p-grasp.p), orientation)
-        initial = folded.copy()
-        archive_index=warm_queries.get(str(request))
-        seed_template = ARCHIVE_WARM_STARTS[archive_index] if archive_index is not None else TEMPLATES[template]
-        initial[indices] = unrolled(seed_template) if family == 'unrolled' else seed_template
-        if torso is not None:
-            initial[3] = torso
-        status, found = p.IK(p._transform_goal_to_wrt_base(mplib.Pose(reach_pose.p,reach_pose.q)),
-                             initial, [True]*3+[torso is not None]+[False]*11,
-                             n_init_qpos=min(32,n_init))
-        reasons['ik '+str((yaw,dz,torso,template))+' '+status] += 1
-        record = dict(request=request, yaw_deg=yaw, lift_offset_m=dz,
-                      requested_torso_m=torso, template=template, policy=policy,
-                      template_source='archive_medoid' if archive_index is not None else 'original',
-                      archive_template=archive_index,
-                      ik_seconds=time.perf_counter()-start)
-        if status != 'Success':
-            journal(planner,record,'ik',failure_kind([status]),status=status)
-            continue
-        goals = []
-        for raw in np.atleast_2d(found):
-            wrapped = unwrap_toward(raw,initial,p.joint_limits)
-            # Unwrapping toward an artificial IK seed can cross the episode's
-            # roll window even though mplib's original representative is valid.
-            q = wrapped if p.accepts(wrapped) else np.asarray(raw).copy()
-            if family == 'unrolled' and q[wrist] > -.05:
-                continue
-            if p.accepts(q):
-                goals.append(q)
-        if not goals:
-            journal(planner,record,'ik','joint_limit_after_unwrap')
-            continue
+    planner._contact_chains = {}
+
+    def accept(q):
+        return p.accepts(q) and not (family == 'unrolled' and q[wrist] > -.05)
+
+    def select(goals, initial, record, g, reach_pose, knots_of=None):
         goals.sort(key=lambda q: float(np.linalg.norm(q[3:13]-initial[3:13])))
         ranks = {id(q): i for i,q in enumerate(goals)}
         if policy != 'legacy':
@@ -167,7 +135,79 @@ def candidates(planner, task, grasp, reach, reasons, *, n_init=32):
                 journal(planner,detail,'deduplicate','near_identical_endpoint')
                 continue
             journal(planner,detail,'ik_selected')
+            if knots_of is not None:
+                knots = [k.copy() for k in knots_of[id(q)]]
+                for k in knots:
+                    for idx in p._root_cols():
+                        k[idx] = current[idx]
+                planner._contact_chains[len(result)] = knots
             result.append((q,g,reach_pose,detail))
+
+    # MIKASA_IK_CHAIN=1: every request first solves the CONTACT pose and walks back to its
+    # standoff on that branch (planners/oracle/ik_chain.py); a request whose contact has
+    # no chain is then asked the old way, after all the chained ones, so the list can only
+    # gain candidates the contact stroke can reach. Off, the loop below is the old one.
+    chained = ik_chain.enabled()
+    passes = (('chain', 'standoff') if chained else ('standoff',))
+    unchained = set(range(len(specifications)))
+    arm = ik_chain.arm_columns(task) if chained else None
+    for mode in passes:
+        for request, (yaw, dz, torso, template) in enumerate(specifications):
+            if mode == 'standoff' and request not in unchained:
+                continue
+            if 'diagnostic_grasp_torso_m' in parameters:
+                torso = parameters['diagnostic_grasp_torso_m']
+            start = time.perf_counter()
+            rot = rotation([0,0,1], np.deg2rad(yaw))
+            orientation = mat2quat(rot @ grasp.to_transformation_matrix()[:3,:3])
+            g = sapien.Pose(grasp.p+[0,0,dz], orientation)
+            reach_pose = sapien.Pose(g.p+rot@(reach.p-grasp.p), orientation)
+            initial = folded.copy()
+            archive_index=warm_queries.get(str(request))
+            seed_template = ARCHIVE_WARM_STARTS[archive_index] if archive_index is not None else TEMPLATES[template]
+            initial[indices] = unrolled(seed_template) if family == 'unrolled' else seed_template
+            if torso is not None:
+                initial[3] = torso
+            mask = [True]*3+[torso is not None]+[False]*11
+            record = dict(request=request, yaw_deg=yaw, lift_offset_m=dz,
+                          requested_torso_m=torso, template=template, policy=policy,
+                          template_source='archive_medoid' if archive_index is not None else 'original',
+                          archive_template=archive_index)
+            if mode == 'chain':
+                report = ik_chain.ChainReport()
+                chains = ik_chain.chain_back(ik_chain.mplib_solver(planner, mask, accept=accept),
+                                             g, reach_pose, initial, cols=arm,
+                                             n_hard=min(32,n_init), report=report)
+                record.update(ik_seconds=time.perf_counter()-start, chain=report.as_dict())
+                reasons['chain '+str((yaw,dz,torso,template))+' '+str(len(chains))] += 1
+                if not chains:
+                    journal(planner,record,'chain','no_contact_chain')
+                    continue
+                unchained.discard(request)
+                select([c.easy for c in chains], initial, dict(record, ik_source='contact_chain'),
+                       g, reach_pose, knots_of={id(c.easy): c.knots for c in chains})
+                continue
+            status, found = p.IK(p._transform_goal_to_wrt_base(mplib.Pose(reach_pose.p,reach_pose.q)),
+                                 initial, mask, n_init_qpos=min(32,n_init))
+            reasons['ik '+str((yaw,dz,torso,template))+' '+status] += 1
+            record.update(ik_seconds=time.perf_counter()-start)
+            if status != 'Success':
+                journal(planner,record,'ik',failure_kind([status]),status=status)
+                continue
+            goals = []
+            for raw in np.atleast_2d(found):
+                wrapped = unwrap_toward(raw,initial,p.joint_limits)
+                # Unwrapping toward an artificial IK seed can cross the episode's
+                # roll window even though mplib's original representative is valid.
+                q = wrapped if p.accepts(wrapped) else np.asarray(raw).copy()
+                if family == 'unrolled' and q[wrist] > -.05:
+                    continue
+                if p.accepts(q):
+                    goals.append(q)
+            if not goals:
+                journal(planner,record,'ik','joint_limit_after_unwrap')
+                continue
+            select(goals, initial, record, g, reach_pose)
     assert len(result) <= 8
     reasons['bounded candidates'] = len(result)
     return result
