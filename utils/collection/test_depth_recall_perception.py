@@ -104,3 +104,64 @@ def test_cross_rungs_are_ordered_by_how_far_the_pad_is():
     far_r, near_r = dr.restore_cross_rungs(0.54, z0), dr.restore_cross_rungs(0.18, z0)
     assert far_r[0] == (None, z0 + dr.RESTORE_CROSS_Z[0]) and near_r[0] == (dr.CROSS_SAFE_TORSO[0], None)
     assert sorted(far_r, key=str) == sorted(near_r, key=str)
+
+
+def test_hue_signatures_tell_the_four_props_apart():
+    """The measured signatures name a pixel of each prop's measured colour, and nothing
+    between two of them or grey. Pure numpy."""
+    import colorsys
+    from planners.depth_recall_v1_perception import PROP_HUES
+    from utils.mikasa import point_cloud as pc
+
+    def rgb(h, s=0.9, v=0.65):
+        return [int(round(c * 255)) for c in colorsys.hsv_to_rgb((h % 360) / 360.0, s, v)]
+
+    centres = [sig.hue_deg for sig in PROP_HUES]
+    gaps = [min(abs(a - b), 360 - abs(a - b)) for k, a in enumerate(centres) for b in centres[k + 1:]]
+    assert min(gaps) > 2 * max(sig.max_gap_deg for sig in PROP_HUES), "bands overlap"
+    px = np.array([rgb(h) for h in centres] + [rgb(h + 1.4) for h in centres]
+                  + [rgb(27.0), rgb(0, s=0.1), rgb(120, v=0.05)], dtype=np.uint8)
+    assert pc.hue_labels(px, PROP_HUES).tolist() == [0, 1, 2, 3, 0, 1, 2, 3, -1, -1, -1]
+
+
+def test_belief_models_are_the_props_own_meshes(world):
+    """The fit model, the perceived mesh and the rest height are each prop's own."""
+    env, belief, _ = world
+    task = env.unwrapped
+    for i, prop in enumerate(task.props):
+        mesh = prop.get_first_collision_mesh(to_world_frame=False)
+        b = np.asarray(mesh.bounds)
+        model = belief.models[i]
+        assert model.shape[0] == belief.fit_cfg.model_points
+        assert np.allclose(model.min(axis=0), b[0], atol=0.003)
+        assert np.allclose(model.max(axis=0), b[1], atol=0.003)
+        assert abs(belief.rest_lift[i] - float(task._rest_lift[i])) < 1e-6
+        # with the belief at the truth, the perceived mesh is the prop's own, in place
+        true = prop.pose.sp
+        q = np.asarray(true.q)
+        yaw = float(np.arctan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2)))
+        belief.est[i] = dict(x=float(true.p[0]), y=float(true.p[1]), z=float(true.p[2]), yaw=yaw)
+        got = np.asarray(belief.proxy(prop).get_first_collision_mesh().bounds)
+        want = np.asarray(prop.get_first_collision_mesh(to_world_frame=True).bounds)
+        assert np.allclose(got, want, atol=1e-3)
+    belief.est.clear()
+
+
+def test_grasp_lifts_keep_the_finger_pads_on_the_prop():
+    """Short props get the ladder brought down; the bottles keep every rung."""
+    pytest.importorskip("mplib")
+    from types import SimpleNamespace
+
+    from my_scenes.depth_recall_v1 import PROPS
+    from planners import depth_recall_v1_planner as dr
+
+    props = [object() for _ in PROPS]
+    task = SimpleNamespace(cfg=SimpleNamespace(props=PROPS), props=props)
+    for spec, prop in zip(PROPS, props):
+        lifts = dr.grasp_lifts(task, prop)
+        top = spec.height / 2 - dr.FINGER_HALF_H - dr.FINGER_TOP_MARGIN
+        assert all(l <= top + 1e-9 for l in lifts) and len(set(lifts)) == len(lifts)
+        if top >= max(dr.GRASP_LIFTS):
+            assert lifts == dr.GRASP_LIFTS
+    shaker = dr.grasp_lifts(task, props[1])
+    assert shaker[0] == dr.GRASP_LIFTS[0] and len(shaker) == 2

@@ -28,6 +28,9 @@ import time
 import numpy as np
 
 CARRY = os.environ.get("CARRY", "dock")
+#: Which prop's height and footprint the poses are built for (`PROPS` index; the props
+#: differ since 2026-10-16, and this scan was made with the 12 cm box).
+PROP = int(os.environ.get("PROP", "0"))
 
 
 def main(out):
@@ -66,8 +69,9 @@ def main(out):
     offsets = np.round(np.arange(-0.80, 0.4001, 0.02), 3)
     ys = (-0.60, -0.56, -0.525, -0.49, -0.46)
     jitter = (-cfg.row_jitter_x, 0.0, cfg.row_jitter_x)
-    mid = z_top + cfg.prop_half_h
-    shelf_tcp = cfg.shelf_top_z + cfg.prop_half_h + dr.GRASP_LIFTS[0] + dr.UNSHELVE_DZ
+    spec = cfg.props[PROP]
+    mid = z_top + spec.height / 2
+    shelf_tcp = cfg.shelf_top_z + spec.height / 2 + dr.GRASP_LIFTS[0] + dr.UNSHELVE_DZ
     cross_z = tuple(shelf_tcp - (retr.READY_TORSO - t) for t in (retr.READY_TORSO, 0.30, 0.20))
 
     face_y = float(np.asarray(cab.pos)[1] - np.asarray(cab.size)[1] / 2)
@@ -77,7 +81,7 @@ def main(out):
         prop is over the pad's line) or CARRY=dock (`depth_recall_v1_planner.carry_out`)."""
         if CARRY == "slot":
             return prop_y - y
-        return dr.carry_out(retr.WORK_DOCK_Y, prop_y - dr.UNSHELVE_BACK, face_y, cfg.prop_half_xy)
+        return dr.carry_out(retr.WORK_DOCK_Y, prop_y - dr.UNSHELVE_BACK, face_y, spec.half_xy)
 
     report = dict(facts=facts, carry=CARRY, offsets=offsets.tolist(), ys=list(ys), jitter=list(jitter),
                   lifts=list(dr.GRASP_LIFTS), depths=list(retr.SIDE_GRASP_DEPTHS),

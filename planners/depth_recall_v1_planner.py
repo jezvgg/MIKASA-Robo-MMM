@@ -150,6 +150,39 @@ GRASP_LIFTS = tuple(
     float(v) for v in os.environ.get("MIKASA_DR1_GRASP_LIFTS", "0.02,0.035,0.045").split(",")
 )
 
+#: Half the finger pads' height in this grasp, metres: the finger links' collision boxes
+#: span +-1.32 cm about the TCP along gripper_link's x (robots/fetch/fetch.urdf meshes),
+#: which the side grasp turns vertical.
+FINGER_HALF_H = 0.0132
+
+#: How far the pads' top edge stays under the prop's top, at least, metres.
+FINGER_TOP_MARGIN = 0.002
+
+
+def grasp_lifts(task, prop) -> tuple:
+    """`GRASP_LIFTS` for this prop: a rung that would put the finger pads' top edge above
+    the prop's top is brought down to where it does not, and duplicates go.
+
+    The ladder was measured on a 12 cm box, where its highest rung (4.5 cm) leaves the
+    pads 0.2 cm under the top. The 9.45 cm shakers are the case it exists for: their
+    0.035 and 0.045 rungs would grip the top 0.1 cm and nothing at all, so they become one
+    rung at 3.2 cm (TCP 7.9 cm over the support, the wrist's 6.7 cm hang clearing it by
+    1.2 cm, as the box's first rung did by 1.3 cm). The bottles (15-16.5 cm) keep every
+    rung.
+
+    Example:
+        >>> grasp_lifts(task, task.props[1])        # a shaker  # doctest: +SKIP
+        (0.02, 0.032)
+    """
+    spec = task.cfg.props[_index(task, prop)]
+    top = spec.height / 2.0 - FINGER_HALF_H - FINGER_TOP_MARGIN
+    out = []
+    for lift in GRASP_LIFTS:
+        lift = round(min(float(lift), top), 4)
+        if lift not in out:
+            out.append(lift)
+    return tuple(out)
+
 #: Torso heights the lateral cross is tried at, in order. `None` means "wherever the
 #: carry-out left it" — the first rung is free, the rest cost a joint line.
 #:
@@ -623,7 +656,8 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     base_p = _np(task.agent.base_link.pose.p).reshape(-1)
     drive = float(retr.WORK_DOCK_Y - base_p[1])
     chosen_lift = None
-    for lift in GRASP_LIFTS:
+    lifts = grasp_lifts(task, prop)
+    for lift in lifts:
         grasp, pre = retr.side_grasp_pose(task, retr.SIDE_GRASP_DEPTHS[0],
                                           lift=lift, obj=_seen(prop))
         if grasp is None:
@@ -642,7 +676,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
             break
         planner.planner.update_from_simulation()
     if chosen_lift is None:
-        return fail(env, f"ready posture for {prop.name}", lifts=list(GRASP_LIFTS)), False
+        return fail(env, f"ready posture for {prop.name}", lifts=list(lifts)), False
     planner.planner.update_from_simulation()
 
     say(env, "drive into the cabinet", distance=round(drive, 3))
@@ -686,7 +720,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     cab = task.cabinets[0]
     face_y = float(np.asarray(cab.pos)[1] - np.asarray(cab.size)[1] / 2.0)
     back = carry_out(float(_np(task.agent.base_link.pose.p).reshape(-1)[1]), prop_y, face_y,
-                     float(task.cfg.prop_half_xy))
+                     float(task.cfg.props[_index(task, prop)].half_xy))
     say(env, "carry out", distance=round(back, 3))
     res = planner.drive_straight(-back, v=0.10, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
@@ -876,7 +910,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
             if common.stopped_by_horizon(planner):
                 return res, False
             planner.planner.update_from_simulation()
-            for lift in GRASP_LIFTS:
+            for lift in grasp_lifts(task, prop):
                 for depth in retr.SIDE_GRASP_DEPTHS:
                     grasp, pre = retr.side_grasp_pose(task, depth, lift=lift, obj=_seen(prop))
                     if grasp is None:
@@ -910,7 +944,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     if not ok:
         return fail(env, f"take {prop.name} off the counter",
                     torsos=list(COUNTER_GRASP_TORSO_RUNGS),
-                    lifts=list(GRASP_LIFTS)), False
+                    lifts=list(grasp_lifts(task, prop))), False
     _hold(env, planner, task, prop, held=True)
 
     tcp = task.agent.tcp.pose.sp

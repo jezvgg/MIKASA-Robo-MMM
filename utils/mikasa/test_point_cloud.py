@@ -101,3 +101,70 @@ def test_band_keeps_the_support_height_only():
     pts = np.array([[2.5, -0.3, 1.43], [2.5, -0.3, 1.40], [2.5, -0.3, 1.60], [9.0, -0.3, 1.45]])
     keep = pc.band(pts, (2.0, -0.6), (3.0, 0.0), 1.43, 1.56)
     assert keep.tolist() == [True, False, False, False]
+
+
+def _hsv_rgb(h_deg, s, v):
+    import colorsys
+    return tuple(int(round(c * 255)) for c in colorsys.hsv_to_rgb(h_deg / 360.0, s, v))
+
+
+def test_rgb_to_hsv_is_colorsys():
+    import colorsys
+    rng = np.random.default_rng(0)
+    rgb = rng.integers(0, 256, (2000, 3)).astype(np.uint8)
+    ref = np.array([colorsys.rgb_to_hsv(*(c / 255.0)) for c in rgb])
+    assert np.abs(pc.rgb_to_hsv(rgb) - ref).max() < 1e-12
+
+
+def test_hue_signatures_use_their_own_band():
+    sigs = [pc.HueSignature(0.0, 10.0), pc.HueSignature(55.3, 10.0)]
+    rgb = np.array([_hsv_rgb(4, .9, .7), _hsv_rgb(50, .9, .7),      # in each band
+                    _hsv_rgb(27, .9, .7),                            # between them: neither
+                    _hsv_rgb(356, .9, .7),                           # red wraps round
+                    _hsv_rgb(0, .2, .7), _hsv_rgb(0, .9, .05)], dtype=np.uint8)  # grey, dark
+    assert pc.hue_labels(rgb, sigs).tolist() == [0, 1, -1, 0, -1, -1]
+    # The same colours against a plain palette keep the old 0.07-turn band.
+    assert pc.hue_labels(rgb[2:3], [(1.0, 0.0, 0.0), (1.0, 0.85, 0.0)]).tolist() == [1]
+
+
+def test_mesh_model_keeps_only_the_outer_surface():
+    trimesh = pytest.importorskip("trimesh")
+    body = trimesh.creation.box(extents=[0.05, 0.05, 0.08])
+    cap = trimesh.creation.box(extents=[0.03, 0.03, 0.02])
+    cap.apply_translation([0, 0, 0.05])                       # sits ON the body's top
+    m = pc.mesh_model([body, cap], n=1500)
+    assert m.shape == (1500, 3)
+    assert np.allclose(m.min(axis=0), [-0.025, -0.025, -0.04], atol=1e-3)
+    assert np.allclose(m.max(axis=0), [0.025, 0.025, 0.06], atol=1e-3)
+    # The cap's underside (z 0.04, inside the body's top face) is hidden: no samples.
+    under = (np.abs(m[:, 2] - 0.04) < 1e-6) & (np.abs(m[:, :2]).max(axis=1) < 0.0149)
+    assert under.sum() == 0
+    # The body's top ring around the cap is visible: samples.
+    ring = (np.abs(m[:, 2] - 0.04) < 1e-6) & (np.abs(m[:, :2]).max(axis=1) > 0.0151)
+    assert ring.sum() > 20
+
+
+def test_fit_recovers_a_round_prop_from_its_mesh_model():
+    trimesh = pytest.importorskip("trimesh")
+    cyl = trimesh.creation.cylinder(radius=0.022, height=0.15, sections=32)
+    model = pc.mesh_model([cyl], n=1500)
+    rng = np.random.default_rng(3)
+    # the half of the surface a camera to the south sees, at (2.5, -0.3), origin 7.5 cm up
+    pts = model[model[:, 1] < -0.005] + [2.5, -0.3, 1.42 + 0.075]
+    pts = pts + rng.normal(0, 0.001, pts.shape)
+    cfg = pc.FitConfig(yaw_span_deg=360.0, yaw_step_deg=30.0)
+    fit = pc.fit_planar(pts, model, 1.42 + 0.075, cfg=cfg, init_xy=(2.51, -0.29))
+    assert fit["accepted"], fit["reasons"]
+    assert np.hypot(fit["x"] - 2.5, fit["y"] + 0.3) < 0.004
+
+
+def test_cutter_takes_an_offset_box():
+    cutter = pc.RobotCutter.__new__(pc.RobotCutter)
+    cutter.margin, cutter.links = 0.0, []
+    T = np.eye(4)
+    T[:3, 3] = [1.0, 0.0, 0.0]
+    pts = np.array([[1.0, 0.0, 0.05], [1.0, 0.0, -0.05], [1.0, 0.0, 0.15]])
+    keep = cutter.keep(pts, [(T, np.array([-0.1, -0.1, 0.0]), np.array([0.1, 0.1, 0.1]))])
+    assert keep.tolist() == [False, True, True]
+    keep = cutter.keep(pts, [(T, (0.1, 0.1, 0.1))])           # the old (pose, half) form
+    assert keep.tolist() == [False, False, True]
