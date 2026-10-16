@@ -242,7 +242,31 @@ the hand itself, measured on seed 1000).
 
 **First runs** (H100 tree 42ce525 under a full machine): seeds 1000-1003 in both modes
 **8/8**, every prop on its own pad, max tilt 0.1 deg, 3582-3815 steps; pads read right
-4/4; all 28 between-pads checks passed with 218-622 points. 100-seed sweeps: see below.
+4/4; all 28 between-pads checks passed with 218-622 points.
+
+**100 development seeds (1000-1099).** The first sweep (42ce525) gave 97/100 by state and
+79/100 by camera, and showed two defects, both fixed (`68c5f27`):
+
+- after a counter placement the hand rises 6 cm, 7 mm above the released prop's top; a
+  camera estimate is off by more, so the torso raise was refused at knot 0 (13 camera
+  episodes). The raise right after a release now leaves the released prop out of the
+  check: it lifts the hand straight up, away from it;
+- the restore's cross ended ~9 cm past the pads' line after a row placement, and the
+  grasp posture then passed over the prop, pushing it 7-12 cm or tipping it (4 state
+  episodes, and most of the camera grasp-fit refusals). The cross now ends 15 cm in
+  front of the prop.
+
+With the fixes (H100, tree `68c5f27`):
+
+| mode | success | steps p50 / p90 / max | notes |
+|---|---|---|---|
+| state | **100/100** (Wilson 95 % 0.963-1) | 3712 / 3774 / 3969 | 0 knocked over, 0 close misses |
+| pointcloud | **100/100** (0.963-1) | 3806 / 3956 / 4221 | pads read right 100/100; between-pads checks 700/700 passed (195-624 points); wrist fits 700/700, error p95 2.3 mm |
+
+Every final arrangement had the target on its own pad (200/200) and no prop ever stood
+on another colour's pad. The between-pads check never had to refuse a close in these
+200 episodes: it is a guard against closing on air, not a source of the success rate.
+The longest episode, 4221 steps, is inside the 5700-step horizon.
 
 ## Assisted grasp (experimental, off by default)
 
