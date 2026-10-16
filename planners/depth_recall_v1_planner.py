@@ -170,11 +170,10 @@ def grasp_lifts(task, prop) -> tuple:
     prop's height less `FINGER_HALF_H`, or the finger pads' top edge stands above the
     prop. The ladder was measured on the 12 cm box, which it fits unchanged (8.0 -
     10.5 cm in a band of 7.9 - 10.7), and so do the 15 - 16.5 cm bottles. The 9.45 cm
-    shakers do not: their band is 7.9 - 8.1 cm, and the 2 cm rung (TCP 6.7 cm up) is the
-    one that, measured 2026-10-16 (seed 1000), grasped a shaker off the counter and then
-    could not stand it in the front row slot: the wrist met the cabinet's front lip on
-    the way down, the hand stopped 1.1 cm short, and the released shaker fell into the
-    row and knocked over the two restored before it.
+    shakers do not: their band is 7.9 - 8.1 cm. Their 2 cm rung puts the TCP 6.7 cm up,
+    with no room for the wrist's 6.7 cm hang; on seed 1000 (2026-10-16, before the scene
+    had its 5 mm contact offset) a shaker grasped there stopped 1.1 cm short of its row
+    placement and, released, fell and knocked over the two props restored before it.
 
     Example:
         >>> grasp_lifts(task, task.props[1])        # a shaker  # doctest: +SKIP
