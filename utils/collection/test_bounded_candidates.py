@@ -16,9 +16,16 @@ def test_duplicate_endpoints_do_not_consume_continuation_slots():
     np.testing.assert_equal(kept[1],values[2])
 
 
+@pytest.mark.parametrize('chain', ['0', '1'])
 @pytest.mark.parametrize('policy,requests', [('legacy',8),('margin',8),('diverse',4)])
-def test_many_ik_endpoints_cannot_expand_execution_search(monkeypatch,policy,requests):
+def test_many_ik_endpoints_cannot_expand_execution_search(monkeypatch,policy,requests,chain):
+    """Off, one 32-start request per specification. With the contact chain
+    (planners/oracle/ik_chain.py, on by default) each specification makes one 32-start
+    request at the contact, plus the old standoff request when its contact has no
+    chain; the walk back to the standoff adds only one-start (eight on a retry) solves,
+    and the candidate list stays capped."""
     from collections import Counter
+    monkeypatch.setenv('MIKASA_IK_CHAIN', chain)
     names=['root_x_axis_joint','root_y_axis_joint','root_z_rotation_joint',
            'torso_lift_joint','head_pan_joint','shoulder_pan_joint','head_tilt_joint',
            'shoulder_lift_joint','upperarm_roll_joint','elbow_flex_joint',
@@ -46,7 +53,10 @@ def test_many_ik_endpoints_cannot_expand_execution_search(monkeypatch,policy,req
         motion_parameters={'grasp_selection':policy})
     monkeypatch.setattr(search.common,'say',lambda *args,**kwargs:None)
     result=search.candidates(planner,task,sapien.Pose([.7,0,1.]),sapien.Pose([.6,0,1.]),Counter(),n_init=256)
-    assert len(calls)==requests and set(calls)=={32}
+    if chain == '0':
+        assert len(calls)==requests and set(calls)=={32}
+    else:
+        assert requests<=calls.count(32)<=2*requests and set(calls)<={32,8,1}
     assert 0<len(result)<=8
     assert all(engine.accepts(row[0]) for row in result)
 

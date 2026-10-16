@@ -25,21 +25,21 @@ def main():
     ap.add_argument("seed", type=int)
     ap.add_argument("--assisted-grasp", action="store_true")
     ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None, help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
-    ap.add_argument("--ik-chain", action="store_true",
-                    help="solve the contact before its standoff (planners/oracle/ik_chain.py)")
-    ap.add_argument("--stance-scan", action="store_true",
-                    help="choose the stance by a cuRobo reach scan (planners/oracle/stance_scan.py; "
-                         "needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
+    ap.add_argument("--ik-chain", action=argparse.BooleanOptionalAction, default=None,
+                    help="solve the contact before its standoff (planners/oracle/ik_chain.py); "
+                         "on unless --no-ik-chain or MIKASA_IK_CHAIN=0")
+    ap.add_argument("--stance-scan", action=argparse.BooleanOptionalAction, default=None,
+                    help="choose the stance by a reach scan (planners/oracle/stance_scan.py; SeasonDish's "
+                         "needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY); the task's default otherwise")
     ap.add_argument("--video-dir", default=None, help="record the render camera's clip here")
     args = ap.parse_args()
     import os
 
     if args.ik_backend is not None:
         os.environ["MIKASA_IK_BACKEND"] = args.ik_backend
-    if args.ik_chain:
-        os.environ["MIKASA_IK_CHAIN"] = "1"
-    if args.stance_scan:
-        os.environ["MIKASA_STANCE_SCAN"] = "1"
+    for flag, var in ((args.ik_chain, "MIKASA_IK_CHAIN"), (args.stance_scan, "MIKASA_STANCE_SCAN")):
+        if flag is not None:
+            os.environ[var] = "1" if flag else "0"
 
     import gymnasium as gym
 
@@ -80,7 +80,7 @@ def main():
         info = base.get_info()
         success = verdict == "success" and bool(info["success"].reshape(-1)[0])
         print(f"collection_episode task={args.task} seed={seed} assisted_grasp={args.assisted_grasp} "
-              f"ik_backend={args.ik_backend or 'mplib'} ik_chain={args.ik_chain} stance_scan={args.stance_scan} "
+              f"ik_backend={args.ik_backend or 'mplib'} ik_chain={os.environ.get('MIKASA_IK_CHAIN', '1')} stance_scan={args.stance_scan} "
               f"verdict={verdict} success={success} steps={int(base.elapsed_steps.reshape(-1)[0])}", flush=True)
         ag = base._ag
         if ag is not None:

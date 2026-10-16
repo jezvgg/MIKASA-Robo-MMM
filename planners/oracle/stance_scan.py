@@ -18,8 +18,9 @@ Two tiers, because the scan cannot see the scene:
    stance slide that only the scan approved gained nothing on SeasonDish before
    (60/75 vs 59/75, refusals were scene collisions; robots/fetch/IK_BACKENDS.md).
 
-``MIKASA_STANCE_SCAN=1`` turns it on in the planners; it needs the cuRobo server
-(``MIKASA_CUROBO_SOCKET`` or ``MIKASA_CUROBO_PY``) and refuses loudly without one.
+``MIKASA_STANCE_SCAN`` turns it on or off in the planners (`enabled`). SeasonDish's scan
+needs the cuRobo server (``MIKASA_CUROBO_SOCKET`` or ``MIKASA_CUROBO_PY``) and refuses
+loudly without one; Depth Recall's offsets were scanned offline and need no server.
 """
 from __future__ import annotations
 
@@ -35,9 +36,13 @@ ROBUST_WEIGHT = 1.5
 VERIFY_K = 3
 
 
-def enabled() -> bool:
-    """``MIKASA_STANCE_SCAN=1`` turns the scan on; off by default (the pinned profiles)."""
-    return os.environ.get("MIKASA_STANCE_SCAN", "0") == "1"
+def enabled(default: bool = False) -> bool:
+    """``MIKASA_STANCE_SCAN=1`` / ``=0`` turns stance choice on / off; unset, `default`.
+
+    Depth Recall passes ``default=True`` (its scanned dock offset, on since 2026-10-17);
+    SeasonDish keeps it off — on all measured seeds its shipped stance scanned robust.
+    """
+    return os.environ.get("MIKASA_STANCE_SCAN", "1" if default else "0") == "1"
 
 
 def require_server() -> None:

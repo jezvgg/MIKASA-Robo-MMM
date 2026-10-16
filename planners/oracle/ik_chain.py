@@ -47,8 +47,9 @@ ARM_JOINTS = ("shoulder_pan_joint", "shoulder_lift_joint", "upperarm_roll_joint"
 
 
 def enabled() -> bool:
-    """``MIKASA_IK_CHAIN=1`` turns the chain on; off by default (the pinned profiles)."""
-    return os.environ.get("MIKASA_IK_CHAIN", "0") == "1"
+    """On by default since 2026-10-17 (the owner's call on the measured SeasonDish gain,
+    planners/oracle/CHAIN_AND_STANCE.md); ``MIKASA_IK_CHAIN=0`` turns it off."""
+    return os.environ.get("MIKASA_IK_CHAIN", "1") == "1"
 
 
 def arm_columns(task) -> list[int]:

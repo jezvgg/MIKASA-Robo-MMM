@@ -49,7 +49,7 @@ from planners.season_dish_paths import CARRY_TARGETS, carry_targets, carry_goal,
 from planners.oracle.path_clearance import path_clear
 from planners.oracle.straight_paths import straight_plan, execute_straight
 from planners.oracle.upright_payload import upright_path, elbow_only, enforce_upright, PayloadTiltError
-from planners.season_dish_transfer import plan_loaded_hover, held_transform, plan_bowl_drive
+from planners.season_dish_transfer import plan_loaded_hover, held_transform, plan_bowl_drive, hover_summary
 
 WHO = "season_dish_planner"
 
@@ -1532,7 +1532,8 @@ def _solve(
                     current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
                     route = plan_bowl_drive(planner, task, current, held_transform(task, target), dock_xyz, face)
                     if route is None:
-                        return fail(env, "no checked loaded route with a complete bowl pour")
+                        return fail(env, "no checked loaded route with a complete bowl pour",
+                                    tried=getattr(planner, '_route_failures', []))
                     dock_xyz = route['dock']
                     say(env, "loaded bowl route prechecked", offset_x_m=route['offset_x_m'],
                         dock=dock_xyz.tolist(), complete_wrist_pour=True)
@@ -1557,7 +1558,8 @@ def _solve(
                     with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
                         direct = plan_loaded_hover(planner, task, current, held_transform(task, target), preferred=route['hover'])
                     if direct is None:
-                        return fail(env, "no upright hover with a complete wrist-only pour")
+                        return fail(env, "no upright hover with a complete wrist-only pour",
+                                    hover=hover_summary(planner))
                 say(env, "hover over bowl", route_prechecked=True, extra=direct['hover_extra'],
                     back=direct['hover_back'], spin_deg=direct['hover_spin'])
                 with transfer_phase(planner, "carry condiment over bowl"):

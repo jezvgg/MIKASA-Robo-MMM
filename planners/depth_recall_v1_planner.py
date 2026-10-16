@@ -429,7 +429,7 @@ def counter_grasp_chains(env, planner, task, prop, torso: float, lift: float, de
     return chains
 
 
-#: Item 2 (``MIKASA_STANCE_SCAN=1``): dock offsets from the row's x, tried in order, the first
+#: Item 2 (on by default; ``MIKASA_STANCE_SCAN=0`` docks at the row's x): dock offsets from the row's x, tried in order, the first
 #: whose scene check passes (`choose_dock_dx`). The kinematics are rigid relative to the
 #: row, so the scan that ranks them runs once, offline: `scripts/dr_stance_scan.py`,
 #: 2026-10-17. With the dock off its mark by up to 3 cm / 3 cm / 3 deg every transfer stays
@@ -1314,7 +1314,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     if res == -1 or common.stopped_by_horizon(planner):
         return res
     row_x = float(row_pts[0][0])
-    dock_dx = choose_dock_dx(env, planner, task, row_pts, slot_pts) if stance_scan.enabled() else 0.0
+    dock_dx = (choose_dock_dx(env, planner, task, row_pts, slot_pts)
+               if stance_scan.enabled(default=True) else 0.0)
     res = dock_at(env, planner, task, row_x + dock_dx, stage="dock at the row (once)", noise=noise)
     if res != -1 and common.stopped_by_horizon(planner):
         return res
@@ -1455,18 +1456,18 @@ if __name__ == "__main__":
                     help="IK restarts: mplib's random draws, or a fixed table (robots/fetch/ik_backend.py)")
     ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None,
                     help="IK proposals from mplib alone, or from cuRobo (needs MIKASA_CUROBO_PY)")
-    ap.add_argument("--ik-chain", action="store_true",
+    ap.add_argument("--ik-chain", action=argparse.BooleanOptionalAction, default=None,
                     help="solve the grasp / row place before the posture that leads to it "
-                         "(planners/oracle/ik_chain.py)")
-    ap.add_argument("--stance-scan", action="store_true",
-                    help="dock at the scanned offset from the row (STANCE_DX, scripts/dr_stance_scan.py)")
+                         "(planners/oracle/ik_chain.py); on unless --no-ik-chain")
+    ap.add_argument("--stance-scan", action=argparse.BooleanOptionalAction, default=None,
+                    help="dock at the scanned offset from the row (STANCE_DX, scripts/dr_stance_scan.py); "
+                         "on unless --no-stance-scan")
     ap.add_argument("--video-dir", default="videos/depth_recall_v1",
                     help="where the render camera's clip goes (unless --no-video)")
     args = ap.parse_args()
-    if args.ik_chain:
-        os.environ["MIKASA_IK_CHAIN"] = "1"
-    if args.stance_scan:
-        os.environ["MIKASA_STANCE_SCAN"] = "1"
+    for flag, var in ((args.ik_chain, "MIKASA_IK_CHAIN"), (args.stance_scan, "MIKASA_STANCE_SCAN")):
+        if flag is not None:
+            os.environ[var] = "1" if flag else "0"
     for flag, var in ((args.ik_starts, "MIKASA_IK_STARTS"), (args.ik_backend, "MIKASA_IK_BACKEND")):
         if flag is not None:
             os.environ[var] = flag

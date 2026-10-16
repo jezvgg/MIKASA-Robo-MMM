@@ -133,3 +133,12 @@ def test_root_joints_for_inverts_the_root_frame():
     world = task.root @ stand_matrix(*q)
     assert np.allclose(world[:2, 3], target[:2])
     assert np.isclose(np.arctan2(world[1, 0], world[0, 0]), target[2])
+
+
+def test_stance_choice_defaults_per_task_and_the_flag_overrides(monkeypatch):
+    monkeypatch.delenv("MIKASA_STANCE_SCAN", raising=False)
+    assert not stance_scan.enabled() and stance_scan.enabled(default=True)
+    monkeypatch.setenv("MIKASA_STANCE_SCAN", "0")
+    assert not stance_scan.enabled(default=True)
+    monkeypatch.setenv("MIKASA_STANCE_SCAN", "1")
+    assert stance_scan.enabled()

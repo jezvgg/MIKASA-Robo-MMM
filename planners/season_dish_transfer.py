@@ -198,13 +198,28 @@ def preview_base_legs(planner, current, destinations, final_yaw):
 def plan_bowl_drive(planner, task, current, hand_object, dock, face):
     """Keep upright fingers clear of the left wall and preview the final pour."""
     offsets = (0., .15, .25, .35, .45) if float(dock[0]) < 1. else (0.,)
+    failures = []; planner._route_failures = failures
     for offset in offsets:
         candidate = np.asarray(dock).copy(); candidate[0] += offset
         destinations = [candidate]  # Loaded compact carry goes directly to the bowl.
         arrival = preview_base_legs(planner, current, destinations, math.atan2(face[1], face[0]))
         if arrival is None:
+            failures.append(dict(offset_x_m=offset, stage='base_sweep',
+                                 collision=getattr(planner, '_last_path_collision', None)))
             continue
         hover = plan_loaded_hover(planner, task, arrival, hand_object)
         if hover is not None:
             return dict(dock=candidate, offset_x_m=offset, hover=hover)
+        failures.append(dict(offset_x_m=offset, stage='hover', hover=hover_summary(planner)))
     return None
+
+
+def hover_summary(planner):
+    """`plan_loaded_hover`'s refusals, counted by stage and reason, for the failure log."""
+    out = {}
+    for f in getattr(planner, '_hover_failures', []):
+        reason = f.get('reason') or f.get('status') or ','.join(
+            str(r.get('reason', r)) if isinstance(r, dict) else str(r) for r in f.get('reasons', [])[:2])
+        key = f"{f.get('stage')}:{str(reason)[:60]}"
+        out[key] = out.get(key, 0) + 1
+    return out
