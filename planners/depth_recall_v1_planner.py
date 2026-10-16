@@ -499,6 +499,12 @@ def dock_at(env, planner, task, x: float, *, stage: str, noise=None):
     return res
 
 
+def _torso_now(task) -> float:
+    """The torso lift joint's position now, metres."""
+    j = task.agent.robot.active_joints_map["torso_lift_joint"]
+    return float(_np(task.agent.robot.get_qpos()).reshape(-1)[int(np.asarray(j.active_index).reshape(-1)[0])])
+
+
 def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
     """First rung that plans, reached in `TORSO_CHUNK` steps. Returns (res, rung).
 
@@ -663,9 +669,19 @@ def release_and_clear(env, planner, task, prop, place):
     # 2026-10-16, 13 of 100 perception episodes had this raise refused at knot 0
     # (`gripper_link <-> prop`), and once the base no longer backs away from a pad after a
     # counter placement, nothing else separated the two before the next transfer.
-    with common.touchable(planner, prop.name):
-        up, torso = torso_to(env, planner, task, SHELF_TORSO_RUNGS, label="torso up to",
-                             sync=False)
+    #
+    # UP only. After a row placement the torso is already at its 0.386 stop, and the
+    # first rung's line is then empty, which `plan_joints` books as a refusal: the ladder
+    # went on to 0.34 and LOWERED the open hand 4.6 cm back onto the prop just released.
+    # Measured 2026-10-16 (seed 1001, both modes): a finger or the palm caught a 15.8 g
+    # shaker's top (0.15-0.22 N) and slid it 4 cm, out of its slot or into the next one.
+    # The 243 g box never moved for it.
+    here = _torso_now(task)
+    rungs = tuple(t for t in SHELF_TORSO_RUNGS if t > here + 0.002)
+    up, torso = -1, round(here, 3)
+    if rungs:
+        with common.touchable(planner, prop.name):
+            up, torso = torso_to(env, planner, task, rungs, label="torso up to", sync=False)
     if up != -1:
         res = up
         if common.stopped_by_horizon(planner):
