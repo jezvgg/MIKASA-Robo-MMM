@@ -377,6 +377,16 @@ class DepthRecallV1Task(BaseEnv):
         self._ag = None
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
+    @property
+    def _default_sim_config(self):
+        """Diagnostic only: MIKASA_DR1_SCENE_CONTACT_OFFSET replaces PhysX's scene contact
+        offset (0.02). Unset, the default, is BaseEnv's own config."""
+        co = os.environ.get("MIKASA_DR1_SCENE_CONTACT_OFFSET")
+        if co is None:
+            return super()._default_sim_config
+        from mani_skill.utils.structs.types import SceneConfig, SimConfig
+        return SimConfig(scene_config=SceneConfig(contact_offset=float(co)))
+
     # ---------------------------------------------------------------- sensors --
 
     @property
