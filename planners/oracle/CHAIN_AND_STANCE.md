@@ -1,15 +1,19 @@
 # IK chain from the hardest pose, and stance choice by scan
 
 These are two tricks taken from BIMBO_EvoX and b1k_rl_guys. They apply to SeasonDish and
-Depth Recall v1. Both are opt-in: the pinned profiles are unchanged.
+Depth Recall v1. **Defaults since 2026-10-17 (the owner's call on the measured gain):**
+- The IK chain is on (`MIKASA_IK_CHAIN=0` or `--no-ik-chain` turns it off).
+- Depth Recall's scanned dock offset is on (`MIKASA_STANCE_SCAN=0` / `--no-stance-scan`).
+- SeasonDish's stance scan stays off: it never moved the stance.
 
 | Flag | Environment | What it does |
 |---|---|---|
-| `--ik-chain` | `MIKASA_IK_CHAIN=1` | IK chain from the hardest pose ([`ik_chain.py`](ik_chain.py)) |
-| `--stance-scan` | `MIKASA_STANCE_SCAN=1` | Stance choice by a reach scan ([`stance_scan.py`](stance_scan.py)). Needs the cuRobo server. |
+| `--[no-]ik-chain` | `MIKASA_IK_CHAIN` (default 1) | IK chain from the hardest pose ([`ik_chain.py`](ik_chain.py)) |
+| `--[no-]stance-scan` | `MIKASA_STANCE_SCAN` (Depth Recall default 1, SeasonDish 0) | Stance choice by a reach scan ([`stance_scan.py`](stance_scan.py)). SeasonDish's needs the cuRobo server. |
+| — | `MIKASA_GRASP_ROUTE_CHECK` (default 1, with the chain) | SeasonDish: prefer grasps whose whole transfer previews (below) |
 
-Both flags exist on `scripts/collection_episode.py`. On the Depth Recall planner's command
-line only `--ik-chain` exists. `MIKASA_DOCK_ERR=sx,sy,syaw` is a measurement hook in Depth
+Both switches exist on `scripts/collection_episode.py` and on the Depth Recall planner's
+command line. `MIKASA_DOCK_ERR=sx,sy,syaw` is a measurement hook in Depth
 Recall's `dock_at`: it moves the dock target by an error the planner is never told about.
 
 All numbers below are measured on gangway with 10 seeds, paired. They are the only
@@ -226,3 +230,57 @@ error, 5 cm, 8 cm) and 10 in pointcloud mode.
 In pointcloud mode (seeds 1000–1009, no injected error, re-dock at the measured row on 8 of
 10 seeds) the shipped planner and `--ik-chain --stance-scan` both scored 10/10 with 0
 refused postures, at 3843 vs 3837 mean steps.
+
+## 3. Seed 1021: the grasp must leave room for the pour
+
+With the chain, SeasonDish seed 1021 lost on 3 of 4 streams; the base won it on all 4. The
+chained grasp is a few millimetres off the screw's and on the same branch.
+- The difference shows only after the lift: every hover's 165° wrist pour was refused by
+  the episode's roll window, in both directions (`roll_window+`, `roll_window-` in the now
+  logged reasons).
+- The grasp-time check under `carry_or_direct` asks only for a carry endpoint, and that
+  endpoint was fine.
+
+**Fix (`season_dish_paths.ROUTE_CHECK_MAX`).** With the chain on, the first three grasps
+that pass the carry rule also preview the whole transfer:
+- the `complete` rule's loaded drive, hover and wrist pour, with the roll history of the
+  grasp, lift and fold — or a direct pour from the station;
+- a grasp that fails the preview is kept as the fallback, used only when nothing passes.
+
+On the pairs the chain had lost:
+
+| seed, stream | result |
+|---|---|
+| 1021 r1 | success, grasp request 1 |
+| 1021 r3 | success, grasp request 2 |
+| 1005 r3 | success |
+| 1007 r4 | success |
+| 1021 r0 | still lost: the preview passes, the physical route after the lift does not |
+
+**Full measurement** (`b698cd2`): the same 130 (seed, stream) pairs, the chain with the
+route check, which is the new default.
+
+| | base | chain (`79831ec`/`e9c789f`) | chain + route check |
+|---|---|---|---|
+| dev seeds 1000–1009 × 5 streams | 21/50 | 37/50 | 42/50 |
+| fresh seeds 1010–1029 × 4 streams | 62/80 | 68/80 | 69/80 |
+| **all 130** | **83** | **105** | **111** |
+
+- **Against the chain alone:** 9 pairs won, 3 lost.
+  - Won: 1000 r4, 1002 r4, 1005 r2–r4, 1007 r4, 1021 r1/r3, 1022 r2.
+  - Lost: 1000 r0, 1020 r2, 1026 r2.
+- **Against the base:** 33 pairs won, 5 lost.
+  - 1000 r0: the loaded drive puts the forearm into the left wall.
+  - 1020 r1–r3: "upright compact carry path refused".
+  - 1021 r0.
+- **Seed 1021:** 3 of 4 streams now (base 4/4, chain alone 1/4).
+- **Planning time:** median 33.5 s, p90 64 s, max 117 s of the 120 s budget; no episode
+  exhausted it.
+- **Steps:** successful episodes average 784, longest 1060 of 1100.
+- **Tests:** 291 passed; the one failure is the known torch pin on gangway.
+
+**Tried and withdrawn: refining fast wrist steps in the upright fold** (`3802c14`).
+- What it did: split a >0.2 rad wrist step into 8 sub-steps and kept it if continuous.
+- Result: 102/130 against 105/130 for the chain alone (1 pair won, 4 lost).
+- Why it lost: the sub-stepped segments are slow, and one episode ran out of its
+  1100 steps.
