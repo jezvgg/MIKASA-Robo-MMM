@@ -459,6 +459,15 @@ class DepthRecallV1Task(BaseEnv):
                 for body in prop._bodies:
                     body.mass = float(body.mass) * _mx
                     body.inertia = body.inertia * _mx
+        # Diagnostic only: torsional friction on the props' collision shapes (PhysX's
+        # contact patch radius, metres). 0, the default, leaves the shapes as loaded.
+        _pr = float(os.environ.get("MIKASA_DR1_PATCH_R", "0"))
+        if _pr > 0:
+            for prop in self.props:
+                for body in prop._bodies:
+                    for shape in body.get_collision_shapes():
+                        shape.set_patch_radius(_pr)
+                        shape.set_min_patch_radius(_pr)
         # Origin to mesh bottom, per prop: what a standing prop's origin sits above its
         # surface. Read in the actor's own frame (no pose needed, so it also works while
         # GPU sim has no body data yet — SeasonDish's K55). The objaverse origin is the
