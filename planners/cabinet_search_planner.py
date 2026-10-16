@@ -1204,6 +1204,16 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 theta_reveal=float(cfg.theta_reveal), **_latches(res[-1]))
             return res
         say(env, "door open", compartment=comp.name, door_rad=round(rad, 3))
+        if os.environ.get("MIKASA_CS_DEBUG") == "1":
+            # stdout only (no trace event): the arm and the collection's roll window
+            _jm = task.agent.robot.active_joints_map
+            _q = _np(task.agent.robot.get_qpos()).reshape(-1)
+            print("[cabinet_search_planner] debug arm after the opening",
+                  {n: round(float(_q[int(_jm[n].active_index[0])]), 3) for n in
+                   ["torso_lift_joint"] + list(task.agent.controller.controllers["arm"].config.joint_names)},
+                  "roll_low", np.round(getattr(planner, "_roll_low", np.zeros(3)), 3).tolist(),
+                  "roll_high", np.round(getattr(planner, "_roll_high", np.zeros(3)), 3).tolist(),
+                  flush=True)
         planner.planner.update_from_simulation()
         # LOOK. W22 (2026-09-02, pixel counts on the ds_fetch rig, cube present
         # vs hidden): from the pose the ARC PULL leaves the base in — measured

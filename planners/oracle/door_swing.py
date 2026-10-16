@@ -168,7 +168,7 @@ def _clip_norm(v, cap: float) -> np.ndarray:
 
 def dls_step(J, dp, dr, *, k_pos: float = 0.5, k_rot: float = 0.5, cap_pos: float = 0.03,
              cap_rot: float = 0.08, damping: float = 2e-3, cap_q: float = 0.06,
-             w_rot: float = 0.5) -> np.ndarray:
+             w_rot: float = 0.5, joint_cost=None, bias=None) -> np.ndarray:
     """One damped-least-squares joint step toward a pose error (BIMBO's `ArmServo.step`).
 
     The task-space step is the error scaled by its gain and capped in norm; rotation rows are
@@ -176,9 +176,16 @@ def dls_step(J, dp, dr, *, k_pos: float = 0.5, k_rot: float = 0.5, cap_pos: floa
     `J^T (J J^T + damping I)^-1 d` on the weighted rows, scaled down as a whole so no joint moves
     more than `cap_q` (a uniform scale keeps the direction of the step).
 
+    `joint_cost` (n,) makes it the weighted least-norm step: a joint with cost c moves as if
+    its motion cost c times more (the inverse weights scale `J^T`). `bias` (n,) is a joint step
+    wanted on the side; only its part in the task's null space is added, so it changes how the
+    arm is shaped, not where the hand goes (to first order).
+
     Args:
         J: 6 x n Jacobian, rows [linear; angular], world-aligned at the controlled point.
         dp, dr: position error (m) and rotation-vector error (rad), world frame.
+        joint_cost: optional per-joint cost (> 0); None = 1 for all.
+        bias: optional secondary joint step, projected into the null space.
 
     Returns:
         dq, shape (n,).
@@ -193,7 +200,13 @@ def dls_step(J, dp, dr, *, k_pos: float = 0.5, k_rot: float = 0.5, cap_pos: floa
               _clip_norm(k_rot * np.asarray(dr, dtype=np.float64), cap_rot)]
     W = np.diag([1.0, 1.0, 1.0, w_rot, w_rot, w_rot])
     Jw, dw = W @ J, W @ d
-    dq = Jw.T @ np.linalg.solve(Jw @ Jw.T + float(damping) * np.eye(6), dw)
+    n = J.shape[1]
+    Ci = np.diag(1.0 / np.asarray(joint_cost, dtype=np.float64)) if joint_cost is not None \
+        else np.eye(n)
+    pinv = Ci @ Jw.T @ np.linalg.inv(Jw @ Ci @ Jw.T + float(damping) * np.eye(6))
+    dq = pinv @ dw
+    if bias is not None:
+        dq = dq + (np.eye(n) - pinv @ Jw) @ np.asarray(bias, dtype=np.float64)
     m = float(np.max(np.abs(dq))) if dq.size else 0.0
     if m > cap_q:
         dq = dq * (cap_q / m)

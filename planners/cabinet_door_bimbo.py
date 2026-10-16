@@ -82,6 +82,14 @@ STALL_EPS = 0.01
 K_POS, K_ROT = _f("MIKASA_BD_K_POS", 0.6), _f("MIKASA_BD_K_ROT", 0.6)
 CAP_POS, CAP_ROT, CAP_Q = 0.04, 0.10, 0.08
 W_ROT = 0.5
+ROLL_COST = _f("MIKASA_BD_ROLL_COST", 10.0)
+ROLL_HOLD = _f("MIKASA_BD_ROLL_HOLD", 0.3)
+"""The three roll joints (upperarm, forearm, wrist) cost ROLL_COST times more to move, and the
+null space pulls them back toward where the grasp left them at ROLL_HOLD per control. The
+collection solver keeps every roll joint inside one window of width pi - 0.05 over the WHOLE
+episode (`RollPathPlanner`): a swing that spends a radian of roll there leaves the later plans
+(the push from here, the tuck) a radian less, measured 2026-10-16 as `IK Failed` and
+`collection joint limit: no bounded path` on every round after an unweighted swing."""
 ARM_LEAD_MAX = 0.20
 """The arm's commanded joints integrate the servo's steps but stay within this of the measured
 joints (rad): a pull against the door's resistance keeps its force, a blocked arm does not wind up."""
@@ -110,6 +118,10 @@ CLEAR_MAX_STEPS = 50
 CLEAR_LEAF_TOL = 0.03
 "Rad: a clear that moves the leaf more than this stops where it is."
 LEAF_EDGE_PAST_BAR = 0.05
+PATH_SLACK_M = 0.005
+"""How much nearer the panel the clear's straight path may pass than where it starts: the
+panel here is the hinge-axis segment, 2-3 cm off the face, and a slide parallel to it closes
+by a few millimetres when the leaf turned a little since it was read."""
 "The free edge stands this far past the bar along the leaf (robocasa `handle_hpad`)."
 
 
@@ -153,6 +165,13 @@ class HandServo:
         self.lo = np.where(bounded, lim[:, 0] + 0.02, -np.inf)
         self.hi = np.where(bounded, lim[:, 1] - 0.02, np.inf)
         self.T_root = _T(robot.pose.sp)
+        self.roll = np.array([n.endswith("roll_joint") for n in names])
+        self.cost = np.where(self.roll, ROLL_COST, 1.0)
+        self.roll_ref = _qpos(task)[self.idx].copy()
+
+    def hold_rolls_here(self) -> None:
+        """The null-space pull keeps the roll joints where they stand now."""
+        self.roll_ref = _qpos(self.task)[self.idx].copy()
 
     def pose(self, q) -> np.ndarray:
         self.pm.compute_forward_kinematics(np.asarray(q, dtype=np.float64))
@@ -178,9 +197,11 @@ class HandServo:
         """One control: the arm's next commanded joints, and the pose error it was taken on."""
         q = np.asarray(q, dtype=np.float64)
         dp, dr = ds.pose_error(self.pose(q), T_goal)
-        dq = ds.dls_step(self.jacobian(q), dp, dr, k_pos=K_POS, k_rot=K_ROT, cap_pos=CAP_POS,
-                         cap_rot=CAP_ROT, cap_q=CAP_Q, w_rot=W_ROT)
         meas = q[self.idx]
+        bias = np.where(self.roll, ROLL_HOLD * (self.roll_ref - meas), 0.0)
+        dq = ds.dls_step(self.jacobian(q), dp, dr, k_pos=K_POS, k_rot=K_ROT, cap_pos=CAP_POS,
+                         cap_rot=CAP_ROT, cap_q=CAP_Q, w_rot=W_ROT, joint_cost=self.cost,
+                         bias=bias)
         cmd = np.clip(np.asarray(q_cmd, dtype=np.float64) + dq, meas - ARM_LEAD_MAX,
                       meas + ARM_LEAD_MAX)
         return np.clip(cmd, self.lo, self.hi), dp, dr
@@ -338,6 +359,7 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     # -- door_swing: the lead angle, the servoed hand, the creeping base ---------------------
     drv.torso = _torso(task)
     drv.reset_command()
+    servo.hold_rolls_here()
     G0 = _T(task.agent.tcp.pose.sp)                  # the hand on the bar, as it closed
     rad0 = float(crp.door_rad_now(task, door))
     q = _qpos(task)
@@ -352,6 +374,7 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         sense=int(s), ten_hz=drv.ten_hz)
     sw = rad0
     goal = G0.copy()
+    q_arm0, q_base0 = q[servo.idx].copy(), q[:3].copy()
     hist: list = []
     trace: list = []
     reason = "max-steps"
@@ -390,8 +413,11 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
             return res
     rad = float(crp.door_rad_now(task, door))
     hand_rad = ds.angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
+    q_end = _qpos(task)
     say(env, "swing done (bimbo)", rad=round(rad, 3), door_from_hand=round(hand_rad, 3),
         why=reason, steps=i + 1, perr_max=round(perr_max, 3), rerr_max=round(rerr_max, 3),
+        arm_moved=[round(float(v), 3) for v in q_end[servo.idx] - q_arm0],
+        base_moved=[round(float(v), 3) for v in q_end[:3] - q_base0],
         trace="[i, sw, rad, hand, perr, rerr, v, w, a_x, a_y] " + str(trace[-16:]),
         **({"door_tail": [round(v, 3) for v in hist[-20:]]} if reason != "target" else {}))
 
@@ -443,11 +469,11 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     d, rule = ds.clear_direction(T[:3, 2], n, lift_off=CLEAR_LIFT_OFF)
     lift = np.array([0.0, 0.0, CLEAR_LIFT_M])
     end = T[:3, 3] + CLEAR_M * d + lift
-    if not ds.path_keeps_off(T[:2, 3], end[:2], leaf_a, leaf_b):
+    if not ds.path_keeps_off(T[:2, 3], end[:2], leaf_a, leaf_b, slack=PATH_SLACK_M):
         d2, rule2 = ds.clear_direction(T[:3, 2], n, min_off=2.0,       # force the in-plane slide
                                        lift_off=CLEAR_LIFT_OFF)
         end2 = T[:3, 3] + CLEAR_M * d2 + lift
-        if ds.path_keeps_off(T[:2, 3], end2[:2], leaf_a, leaf_b):
+        if ds.path_keeps_off(T[:2, 3], end2[:2], leaf_a, leaf_b, slack=PATH_SLACK_M):
             d, rule, end = d2, rule2, end2
         else:
             rule = rule + "-unchecked"
