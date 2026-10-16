@@ -8,8 +8,8 @@ three blockers to their original shelf positions.
 
 > **Props changed 2026-10-16 (branch `feat/depth-recall-v1-realistic-props`).** The four
 > coloured 4.5 × 4.5 × 12 cm boxes are RoboCasa objects; see
-> [RoboCasa props](#robocasa-props-spices-and-sauces-2026-10-16). Every measurement
-> below that section was made with the boxes.
+> [RoboCasa props](#robocasa-props-spices-and-sauces-2026-10-16) (the last section). Every
+> measurement in the other sections was made with the boxes.
 
 > **Task changed 2026-10-16 (branch `feat/depth-recall-v1-colored-pads`).** The pads are
 > coloured per prop and 18 cm apart (were all yellow, 12 cm, any free slot). Everything
