@@ -20,6 +20,20 @@ The route (design blank I, plan step 4), one ROUND per compartment:
       else MISSED. Then a short look-idle and ONLY `info["success"]` /
       `info["fail"]` are read — `cube_cab` is never touched (the AST test in
       tests/test_cabinet_search.py says so). Success -> settle and return.
+      THE OPENING STAGE IS SELECTED (`door_mode`, 2026-10-16): `MIKASA_CS_DOOR=arc` is the
+      stage above, `cabinet_retrieval_planner.open_the_door`; `MIKASA_CS_DOOR=bimbo` is
+      `planners/cabinet_door_bimbo.open_the_door`, BIMBO_EvoX's task-62 fridge door on a
+      Fetch — the same dock and bar grasp, the finger gap checked after the close, then
+      every control a lead angle, the hand servoed to the bar's place on the arc with its
+      orientation commanded, the base creeping to the shipped arc's end stance, the arm
+      relaxed before the release and the open hand slid off the bar in the leaf's plane.
+      Unset, the mode follows assisted grasp: `bimbo` with `gym.make(..., assisted_grasp=
+      True)`, `arc` without — so every collected CabinetSearch dataset's path is untouched.
+      Only in the bimbo mode: a found can's blocked tuck first drops the open hand under the
+      leaf (`lower_the_hand`), and a push from here with no plan hands over to
+      `close_by_the_bar` (the opening reversed on the bar). `MIKASA_CS_PUSH_HAND=fist|open`
+      (default fist) chooses the hand S3 pushes with. Measurements in
+      utils/collection/CABINET_SEARCH.md, "Assisted grasp: the BIMBO door".
   S3  the compartment was empty: `close_the_door(door=spec)` (K106's fist
       push), verdict by state (`<= theta_closed`), one re-push, else MISSED.
       The env's detent zeroes the hinge once the hand is away.

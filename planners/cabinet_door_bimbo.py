@@ -517,10 +517,10 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         goal[:3, 3] = T[:3, 3] + GRASP_RETRY_IN_M * T[:3, 2]
         drv.reset_command()
         for _ in range(12):
-            res, dp, _, _ = drv.step(goal)
+            res, dp, _, fresh = drv.step(goal)
             if common.stopped_by_horizon(planner):
                 return res
-            if float(np.linalg.norm(dp)) < 0.003:
+            if fresh and float(np.linalg.norm(dp)) < 0.003:
                 break
     if not GRASP_GAP[0] < gap <= GRASP_GAP[1]:
         planner.open_gripper()
@@ -608,11 +608,11 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     moved = 0.0
     k = 0
     for k in range(CLEAR_MAX_STEPS):
-        res, dp, _, _ = drv.step(goal)
+        res, dp, _, fresh = drv.step(goal)
         if common.stopped_by_horizon(planner):
             return res
         moved = float(crp.door_rad_now(task, door)) - rad_start
-        if abs(moved) > CLEAR_LEAF_TOL or float(np.linalg.norm(dp)) < 0.01:
+        if abs(moved) > CLEAR_LEAF_TOL or (fresh and float(np.linalg.norm(dp)) < 0.01):
             break
     planner.planner.update_from_simulation()
     T1 = _T(task.agent.tcp.pose.sp)
@@ -650,11 +650,11 @@ def lower_the_hand(env, planner, task, *, door, dz: float = LOWER_M):
     rad0 = float(crp.door_rad_now(task, door))
     res, moved, k = -1, 0.0, 0
     for k in range(CLEAR_MAX_STEPS):
-        res, dp, _, _ = drv.step(goal)
+        res, dp, _, fresh = drv.step(goal)
         if common.stopped_by_horizon(planner):
             return res
         moved = float(crp.door_rad_now(task, door)) - rad0
-        if abs(moved) > CLEAR_LEAF_TOL or float(np.linalg.norm(dp)) < 0.01:
+        if abs(moved) > CLEAR_LEAF_TOL or (fresh and float(np.linalg.norm(dp)) < 0.01):
             break
     planner.planner.update_from_simulation()
     say(env, "lowered the open hand", dz=round(float(dz), 3), steps=k + 1,
@@ -750,7 +750,7 @@ def close_by_the_bar(env, planner, task, *, door, record, res):
                 goal_k[:2, 3] = p0[:2] + (REGRASP_OFF_FACE_M - o_hand) * n
             else:
                 goal_k[:2, 3] = g[:2, 3] + off
-            res, dp, _, _ = drv.step(goal_k)
+            res, dp, _, fresh = drv.step(goal_k)
             if common.stopped_by_horizon(planner):
                 return res, True
             opened, others = wrong_way()
@@ -759,7 +759,7 @@ def close_by_the_bar(env, planner, task, *, door, record, res):
                 say(env, "close by the bar: a leaf moved the wrong way on the way back to the bar",
                     leg=leg, opened=round(opened, 4), others=round(others, 4))
                 return res, True
-            if float(np.linalg.norm(dp)) < 0.004:
+            if fresh and float(np.linalg.norm(dp)) < 0.004:
                 break
     r = planner.close_gripper(t=12)
     if r != -1:
@@ -768,8 +768,13 @@ def close_by_the_bar(env, planner, task, *, door, record, res):
         return res, True
     gap = _settled_gap(planner, task)
     ag = getattr(task, "_ag", None)
+    g, n = bar_now()
+    d_hand = _T(task.agent.tcp.pose.sp)[:3, 3] - g[:3, 3]
+    t_dir = np.array([-n[1], n[0]])
     say(env, "close by the bar: grasp", finger_gap=round(gap, 4), steps_back=k + 1,
-        weld=(None if ag is None else int(ag.held_index())))
+        weld=(None if ag is None else int(ag.held_index())),
+        hand_minus_bar_normal_along_z=[round(float(d_hand[:2] @ n), 3),
+                                      round(float(d_hand[:2] @ t_dir), 3), round(float(d_hand[2]), 3)])
     if not GRASP_GAP[0] < gap <= GRASP_GAP[1]:
         planner.open_gripper()
         return res, True
@@ -801,10 +806,10 @@ def close_by_the_bar(env, planner, task, *, door, record, res):
         float(np.linalg.norm(T[:2, 2])), 1e-6)
     drv.reset_command()
     for k in range(2 * CLEAR_MAX_STEPS):
-        res, dp, _, _ = drv.step(goal)
+        res, dp, _, fresh = drv.step(goal)
         if common.stopped_by_horizon(planner):
             return res, True
-        if float(np.linalg.norm(dp)) < 0.01:
+        if fresh and float(np.linalg.norm(dp)) < 0.01:
             break
     planner.planner.update_from_simulation()
     say(env, "close by the bar: released and withdrawn", why=reason,
