@@ -30,8 +30,8 @@ The route (design blank I, plan step 4), one ROUND per compartment:
       Unset, the mode follows assisted grasp: `bimbo` with `gym.make(..., assisted_grasp=
       True)`, `arc` without — so every collected CabinetSearch dataset's path is untouched.
       Only in the bimbo mode: a found can's blocked tuck first drops the open hand under the
-      leaf (`lower_the_hand`), and a push from here with no plan hands over to
-      `close_by_the_bar` (the opening reversed on the bar). `MIKASA_CS_PUSH_HAND=fist|open`
+      leaf (`lower_the_hand`); `close_by_the_bar` (the opening reversed on the bar, for a
+      push from here with no plan) is opt-in and measured not to work yet. `MIKASA_CS_PUSH_HAND=fist|open`
       (default fist) chooses the hand S3 pushes with. Measurements in
       utils/collection/CABINET_SEARCH.md, "Assisted grasp: the BIMBO door".
   S3  the compartment was empty: `close_the_door(door=spec)` (K106's fist
@@ -749,9 +749,10 @@ def drive_home(env, planner, task):
 def close_and_verify(env, planner, task, door: DoorSpec, res, record=None):
     """Physical panel push, at most two handle corrections, then release dwell.
 
-    In the bimbo door mode a push from here that finds no plan (it steps nothing) hands over
-    to `cabinet_door_bimbo.close_by_the_bar` — the opening reversed on the bar the hand has
-    just let go of — before the corrections; `record` is the round's opening record."""
+    In the bimbo door mode, with `MIKASA_BD_CLOSE_BY_BAR=1` (off: it does not work yet, see
+    `cabinet_door_bimbo.CLOSE_BY_BAR`), a push from here that finds no plan (it steps nothing)
+    hands over to `cabinet_door_bimbo.close_by_the_bar` — the opening reversed on the bar the
+    hand has just let go of — before the corrections; `record` is the round's opening record."""
     def verify(result):
         # The environment independently checks all leaves and the hand distance.
         for _ in range(int(task.cfg.close_dwell_steps)):
@@ -780,7 +781,7 @@ def close_and_verify(env, planner, task, door: DoorSpec, res, record=None):
         res = r
     if common.stopped_by_horizon(planner):
         return res, False
-    if r == -1 and door_mode(task) == "bimbo" and record:
+    if r == -1 and door_mode(task) == "bimbo" and record and _bimbo.CLOSE_BY_BAR:
         res, _ = _bimbo.close_by_the_bar(env, planner, task, door=door, record=record, res=res)
         if common.stopped_by_horizon(planner):
             return res, False

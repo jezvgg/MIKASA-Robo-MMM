@@ -21,27 +21,38 @@ What this module transfers, and what it does not:
 * Steps 1 and 2, and the release with the checked clear of step 3. The bar is reached by the
   shipped dock/pre-grasp/contact-stroke (`cabinet_retrieval_planner.grasp_the_bar`), which is
   BIMBO's reach-then-grasp; the finger-gap test after the close is BIMBO's. The swing is a
-  per-step loop here: the lead angle, the hand servo to the carried grasp frame
-  (`door_swing.door_frames`, a damped-least-squares step on the arm's seven joints through the
-  robot's own Pinocchio model) and the base creep.
+  per-step loop (`_swing`): the lead angle (BIMBO's 0.36 rad/s), the hand servoed to the
+  grasp frame carried round the hinge (`door_swing.door_frames`; a weighted damped-least-
+  squares step on the arm's seven joints through the articulation's own Pinocchio model), the
+  base creeping, the door angle also read from the hand (logged next to the hinge's).
 * The base creep is NOT BIMBO's `follow_base`. R1Pro's base strafes; a Fetch base has a
   forward speed and a yaw rate only, so the creep is the exact unicycle law that keeps the
-  servo's goal at its place in the base frame (`door_swing.unicycle_hold_cmd`; its
-  feed-forward part is the shipped K103 arc law).
-* The hand does NOT turn with the leaf by default. BIMBO's frames carry the hand's
-  orientation round the hinge with the bar (`rz @ rot`). On a Fetch standing on the handle's
-  side that is out of reach: carrying the bar ~0.5 m sideways turns a unicycle base the OTHER
-  way (the arc pull turns it ~-60 deg while the leaf turns +100 deg), so the arm would have to
-  turn the hand ~160 deg against the base. `HAND_TURN` is the fraction of the door's turn the
-  hand's yaw follows; 0 keeps the hand's world orientation, which is the end state the
-  friction grip reaches in the shipped arc pull and the one every later stage of the round
-  was measured from. What the servo adds over the shipped arc pull is that the orientation is
-  COMMANDED: with the weld (rotation free at the bar) nothing else holds it, and the compliant
-  hold let the hand turn a further ~40 deg with the base, into the leaf's free edge
-  (off-normal -0.74 instead of -0.16 at the release, measured 2026-10-16).
+  servo's goal at a chosen place in the base frame (`door_swing.unicycle_hold_cmd`; its
+  feed-forward part is the shipped K103 arc law). The place moves from the grasp's lever to
+  the stance the shipped arc pull ENDS in (LEVER_END), and settles there: every later stage of
+  the round (the push from here, the tuck, the touch-dock drive) was measured from that stance,
+  and a swing that kept the grasp's lever (BIMBO's fixed point in front of the chest) lost
+  them (2026-10-16: 0/10 and 1/5 with assisted grasp).
+* The hand does NOT turn with the leaf. BIMBO's frames carry the hand's orientation round the
+  hinge with the bar (`rz @ rot`). On a Fetch standing on the handle's side that is out of
+  reach: carrying the bar ~0.5 m sideways turns a unicycle base the OTHER way (~-60 deg while
+  the leaf turns +100 deg), so the arm would have to turn the hand ~160 deg against the base.
+  `HAND_TURN` is the fraction of the door's turn the hand's yaw follows; 0 keeps the hand's
+  world orientation, which is the end state the friction grip reaches in the shipped arc
+  pull. What the servo adds over that pull is that the orientation is COMMANDED: with the weld
+  (rotation free at the bar) nothing else holds it, and the held arm let the hand turn a
+  further ~40 deg with the base, into the leaf's free edge (off-normal -0.74 instead of -0.16
+  at the release); the servo releases at -0.21..-0.26.
+* The servo stays inside the collection's roll window (`roll_window`) and keeps the non-roll
+  joints near the grasp configuration in its null space, as the held arm of the shipped pull
+  does; an unconstrained servo broke the window and every later plan.
 * door_wide and door_prop are not transferred: the hinges of kitchen 102 hold where they are
   released (1.778 -> 1.757 rad over the release, measured), so the base need not prop the
   leaf, and the swing goes straight to `DOOR_OPEN_TARGET`.
+* Added for a Fetch, not in BIMBO: `lower_the_hand` (a found can's tuck that would sweep the
+  leaf starts under its bottom edge) and, opt-in and not working yet, `close_by_the_bar` (when
+  the shipped push from here finds no plan, take the bar again and swing toward shut; see
+  CLOSE_BY_BAR for why the re-grasp misses).
 
 Selection lives in `planners/cabinet_search_planner.py` (`door_mode`): `MIKASA_CS_DOOR=bimbo|arc`,
 default `bimbo` with assisted grasp on and `arc` (the shipped K104-K108 path, byte-identical)
@@ -85,22 +96,20 @@ W_ROT = 0.5
 ROLL_COST = _f("MIKASA_BD_ROLL_COST", 0.5)
 ROLL_HOLD = _f("MIKASA_BD_ROLL_HOLD", 0.0)
 ARM_HOLD = _f("MIKASA_BD_ARM_HOLD", 0.3)
-"Null-space pull of the NON-roll arm joints toward the grasp configuration, per control (0 = off)."
+"""How the servo spends the arm's redundancy. A roll joint (upperarm, forearm, wrist) costs
+ROLL_COST of another joint's motion; the null space pulls the roll joints toward where the grasp
+left them at ROLL_HOLD and the other four at ARM_HOLD per control. Measured 2026-10-16 (seeds
+0-4, assisted grasp): this split (the shipped pull's held arm keeps pan/lift/elbow/wrist-flex and
+twists in its rolls) kept every later plan; rolls ten times dearer stalled two swings at
+1.67-1.71 rad, and a free servo flipped the elbow branch (+0.15..+0.56)."""
 LEVER_END = (_f("MIKASA_BD_LEVER_END_X", 0.66), _f("MIKASA_BD_LEVER_END_Y", 0.34))
-"""Where the swing's goal should stand in the base frame when the door reaches its target:
-(forward, left toward the hinge's side of the opening, i.e. mirrored for a leaf that opens
-clockwise). The creep moves it there from the grasp's lever in proportion to the swing.
-A negative forward keeps the grasp's lever all the way (BIMBO's `follow_base` holds a fixed
-point in front of the chest). The shipped arc pull ENDS with its hand at (0.59, 0.46) of
-cab_main's right leaf (W22's pull-end pose (2.504, -1.514, 0.482 rad) and its bar), because
-the held arm yields sideways under the pull; every later stage of the round (the push from
-here, the tuck, the touch-dock drive) was measured from that stance."""
-"""The three roll joints (upperarm, forearm, wrist) cost ROLL_COST times more to move, and the
-null space pulls them back toward where the grasp left them at ROLL_HOLD per control. The
-collection solver keeps every roll joint inside one window of width pi - 0.05 over the WHOLE
-episode (`RollPathPlanner`): a swing that spends a radian of roll there leaves the later plans
-(the push from here, the tuck) a radian less, measured 2026-10-16 as `IK Failed` and
-`collection joint limit: no bounded path` on every round after an unweighted swing."""
+"""Where the swing's goal (the bar) should stand in the base frame when the door reaches its
+target: (forward, toward the side the leaf opens to — mirrored for a leaf that opens clockwise).
+The creep moves it there from the grasp's lever by LEVER_LEAD_FRAC of the swing and settles.
+It is the shipped arc pull's END stance, read off its pull-end base poses and the bar at the
+pull-end angle (2026-10-16, collection runs without assisted grasp): cab_main L (0.64, -0.33),
+cab_2 R (0.68, 0.34), cab_2 L (0.64, -0.34) — the held arm yields sideways under the pull. A
+forward value <= 0 keeps the grasp's lever all the way (BIMBO's fixed point before the chest)."""
 ARM_LEAD_MAX = 0.20
 """The arm's commanded joints integrate the servo's steps but stay within this of the measured
 joints (rad): a pull against the door's resistance keeps its force, a blocked arm does not wind up."""
@@ -109,6 +118,16 @@ joints (rad): a pull against the door's resistance keeps its force, a blocked ar
 BASE_GAIN = _f("MIKASA_BD_BASE_GAIN", 2.0)
 LEVER_LEAD_FRAC = _f("MIKASA_BD_LEVER_LEAD_FRAC", 0.8)
 "The lever reaches LEVER_END at this fraction of the swing (it lags the command otherwise)."
+STANCE_TURN = _f("MIKASA_BD_STANCE_TURN", 0.977)
+"""How far the base has turned at the end of the shipped arc pull, rad, toward the side the leaf
+opens to (the pull-end headings 34.2-34.7 deg for right leaves and 147.0 deg for left ones, from
+a 90 deg dock; collection runs without assisted grasp, 2026-10-16). With the lever alone the swing
+ended right leaves 3-7 deg short of it (27.6-31.5 deg), 6-9 cm from the shipped stance, and the
+push from here found no IK there (seed 9). <= 0 turns the correction off."""
+STANCE_TOL_M, STANCE_TOL_RAD = 0.02, 0.035
+STANCE_AIM_MAX = 0.8
+"Rad: a position leg that needs a bigger turn to aim is skipped (the arm holds the bar meanwhile)."
+STANCE_MAX_STEPS = 120
 SETTLE_STEPS = int(_f("MIKASA_BD_SETTLE_STEPS", 40))
 SETTLE_TOL_M = 0.01
 """After the door reaches its target the goal stays on the bar and the creep runs on, at most
@@ -351,6 +370,48 @@ def _lever(point_xy, q) -> tuple:
             float(d @ np.array([-np.sin(yaw), np.cos(yaw)])))
 
 
+def _square_stance(env, planner, task, drv, goal, *, yaw_goal: float, lever_goal):
+    """Turn, drive, turn the base to the stance (heading `yaw_goal`, the goal at `lever_goal` in
+    the base frame), the hand held on the bar by the servo. A unicycle cannot correct heading
+    and lever together by feedback; three straight legs can. Returns the last 5-tuple, None when
+    the horizon struck, or "" when nothing needed doing."""
+    q = _qpos(task)
+    P = goal[:2, 3]
+    b_goal = P - ds.rot2(yaw_goal) @ np.asarray(lever_goal, dtype=np.float64)
+    d = b_goal - q[:2]
+    dyaw = float((yaw_goal - q[2] + np.pi) % (2 * np.pi) - np.pi)
+    if float(np.linalg.norm(d)) < STANCE_TOL_M and abs(dyaw) < STANCE_TOL_RAD:
+        return ""
+    res = ""
+    legs = []
+    if float(np.linalg.norm(d)) >= STANCE_TOL_M:
+        aim = float(np.arctan2(d[1], d[0]))
+        back = abs((aim - q[2] + np.pi) % (2 * np.pi) - np.pi) > np.pi / 2
+        aim = aim + (np.pi if back else 0.0)
+        if abs((aim - q[2] + np.pi) % (2 * np.pi) - np.pi) <= STANCE_AIM_MAX:
+            legs += [("turn", aim), ("drive", (b_goal, back))]
+    legs.append(("turn", yaw_goal))
+    for kind, arg in legs:
+        for _ in range(STANCE_MAX_STEPS):
+            q = _qpos(task)
+            if kind == "turn":
+                err = float((arg - q[2] + np.pi) % (2 * np.pi) - np.pi)
+                if abs(err) < 0.01:
+                    break
+                vw = (0.0, float(np.clip(2.0 * err, -0.4, 0.4)))
+            else:
+                target_xy, back = arg
+                f = np.array([np.cos(q[2]), np.sin(q[2])])
+                along = float((target_xy - q[:2]) @ f)
+                if abs(along) < 0.004:
+                    break
+                vw = (float(np.clip(2.0 * along, -0.10, 0.10)), 0.0)
+            res, _, _, _ = drv.step(goal, vw)
+            if common.stopped_by_horizon(planner):
+                return None
+    return res
+
+
 def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, start, target,
            lever_a, lever_b, res, label):
     """Ride the held leaf from `start` toward `target` (how open, either way), BIMBO's door_swing.
@@ -536,11 +597,25 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     q = _qpos(task)
     lever = _lever(G0[:2, 3], q)
     lever_end = lever if LEVER_END[0] <= 0 else (LEVER_END[0], s * LEVER_END[1])
+    yaw0 = float(q[2])
     res, reason, goal = _swing(env, planner, task, door, drv, servo, G0=G0, rad0=rad0,
                                anchor_xy=anchor_xy, s=s, start=rad0, target=target,
                                lever_a=lever, lever_b=lever_end, res=res, label="swing")
     if res is None:
         return planner._guard.last_step
+    if reason == "target" and STANCE_TURN > 0 and LEVER_END[0] > 0:
+        q1 = _qpos(task)
+        out = _square_stance(env, planner, task, drv, goal, yaw_goal=yaw0 - s * STANCE_TURN,
+                             lever_goal=lever_end)
+        if out is None:
+            return planner._guard.last_step
+        if out != "":
+            res = out
+        q2 = _qpos(task)
+        say(env, "stance squared (bimbo)", before=[round(float(v), 3) for v in q1[:3]],
+            after=[round(float(v), 3) for v in q2[:3]], yaw_goal=round(yaw0 - s * STANCE_TURN, 3),
+            lever=[round(v, 3) for v in _lever(goal[:2, 3], q2)],
+            door_rad=round(float(crp.door_rad_now(task, door)), 3))
     if record is not None:
         record["bimbo"] = dict(G0=G0.copy(), rad0=rad0, anchor_xy=anchor_xy.copy(), s=s,
                                lever=lever, lever_end=lever_end)
@@ -661,6 +736,15 @@ def lower_the_hand(env, planner, task, *, door, dz: float = LOWER_M):
         z=round(float(_T(task.agent.tcp.pose.sp)[2, 3]), 3), leaf_moved=round(moved, 4))
     return res
 
+
+CLOSE_BY_BAR = os.environ.get("MIKASA_BD_CLOSE_BY_BAR", "0") == "1"
+"""Whether the search's closing may hand over to `close_by_the_bar`. OFF, measured 2026-10-16 on
+the three rounds that needed it (seed 9 with assisted grasp, seeds 2 and 9 without): the hand
+gets back to the bar (2.4 cm out along the face's normal, 1 mm along it) but the fingers close on
+nothing. With the hand turned ~100 deg to the leaf the pads close along the face's NORMAL, which
+is the direction the bar moves when the free leaf turns: the first pad to touch sweeps the bar
+away (the leaf opens 0.03-0.05 rad) and the pads meet on air. The opening's grasp closes ALONG
+the leaf, where the hinge holds the bar still."""
 
 CLOSE_TARGET_RAD = 0.004
 """The swing back stops once the leaf reads this shut; its command runs on to 0.02 under it,
