@@ -319,3 +319,55 @@ free-navigation direction changes 6 → 4 and reverse frames 191 → 136; D6 max
 identical-pair fraction 4.73 % → 3.08 %, longest pause 15 → 6 frames. The eight
 profile-13 wrong-branch seeds (six of them in this pool, plus 7860000 and 7860003)
 all succeed on the published branch with both physical replays.
+
+## Assisted grasp: the BIMBO door (development, 2026-10-16)
+
+Not a profile change. With `gym.make(..., assisted_grasp=True)` (OmniGibson's weld,
+`utils/mikasa/assisted_grasp.py`) the shipped arc pull opens the leaf but leaves the welded
+hand turned into the leaf's free edge (off-normal -0.74 against -0.16 with friction), so the
+retreat starts in collision and the round is lost. The search planner therefore selects the
+opening stage:
+
+| `MIKASA_CS_DOOR` | stage | default when |
+|---|---|---|
+| `arc` | `cabinet_retrieval_planner.open_the_door` (K104-K108, the collected path) | assisted grasp off |
+| `bimbo` | `planners/cabinet_door_bimbo.open_the_door` | assisted grasp on |
+
+Unset, the mode follows assisted grasp, so every collected CabinetSearch dataset's path is
+untouched. The bimbo stage is BIMBO_EvoX's task-62 fridge door (`phases/door.py`) on a Fetch:
+the same dock and bar grasp, the finger gap checked after the close (retry once), then every
+control a lead angle (0.36 rad/s, never more than 0.15 rad ahead of the leaf), the hand servoed
+to the grasp frame carried round the hinge (damped least squares through the articulation's
+Pinocchio model, inside the collection's roll window), the base creeping by the exact unicycle
+law to the stance the shipped arc pull ends in (the bar 0.66 m ahead, 0.34 m toward the opening
+side), the arm relaxed, the fingers opened, and the open hand slid 0.15 m off the bar in the
+leaf's plane. The hand keeps its world orientation instead of turning with the leaf: a unicycle
+base carrying the bar sideways turns the other way, out of the arm's reach. Not transferred:
+BIMBO's base prop in the closing sector (these hinges hold where released). Knobs are
+`MIKASA_BD_*` in the module; `MIKASA_CS_PUSH_HAND=fist|open` (default fist) chooses the closing
+hand, and `MIKASA_BD_CLOSE_BY_BAR=1` enables a re-grasp closing that is measured not to work yet.
+The collection-faithful runner is `scripts/collection_episode.py cabinet_search <seed>
+[--assisted-grasp] [--video-dir DIR]`.
+
+Measured 2026-10-16 on the GPU server, `scripts/collection_episode.py` (profile 15, seeds 0-9,
+commit 453cd19; development numbers, not a qualification):
+
+| arm | door | assisted grasp | success | losses |
+|---|---|---|---|---|
+| a | bimbo (default) | on | 9/10 | seed 9: push from here, no IK (cab_main R) |
+| b | bimbo (`MIKASA_CS_DOOR=bimbo`) | off | 6/10 | push from here no IK (2, 9); touch-dock drive refused (7, 8) |
+| c | arc (default) | off | 10/10 | — (step counts identical to the run before the change) |
+| d | arc (`MIKASA_CS_DOOR=arc`) | on | 4/10 | tuck blocked by the leaf (0, 1, 3, 5, 7); door not closed (8) |
+
+Arm a, 26 openings: all reached the target (1.715-1.765 rad after the stance settles, 96
+controls on average), the door angle read from the hand within 0.003 rad of the hinge's, every
+grasp held at the first close (finger gap 0.026 on the 26 mm bar), one weld per opening and none
+from a push. Release: 1.744 -> 1.687 rad on average (lowest 1.641), off-normal -0.13..-0.25
+(arc with the weld: -0.63..-0.81). The clear moved the leaf at most 0.021 rad and ended with no
+contact. Arm b: 14 of 24 swings stalled at 1.69-1.75 rad (the friction grip slips; the hand's
+angle then differs from the hinge's by up to 0.09 rad), all above `theta_reveal`. The remaining
+loss of arm a and two of arm b are the shipped push from here finding no IK on cab_main's right
+leaf: the servoed stance ends 3-7 deg short of the shipped pull's heading there. Tried and
+measured off: squaring the base onto that heading after the swing (8/10, 7/10: a turn under the
+held bar slides the base) and re-grasping the bar to close by the reversed swing (0/3: pads that
+close along the face's normal sweep the free leaf away).
