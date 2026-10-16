@@ -261,6 +261,36 @@ def objaverse_mjcf(category: str, index: int = 0) -> str:
     return paths[index % len(paths)]
 
 
+def objaverse_index(category: str, instance: str) -> int:
+    """The registry index of one named objaverse instance, for `objaverse_mjcf(index=)`.
+
+    The registry's list is sorted as STRINGS and skips excluded instances, so the index
+    of `ketchup_10` is 2, not 10 (`ketchup_0, ketchup_1, ketchup_10, ...`), and an
+    excluded or missing instance has none. A task that means one particular object says
+    its folder name and resolves the index here; an index typed by hand is a different
+    object the day the asset tree changes.
+
+    Raises:
+        KeyError: the instance is not in the category's registry list (excluded, or not
+            on disk).
+
+    Example:
+        >>> objaverse_index("shaker", "shaker_1")                # doctest: +SKIP
+        1
+    """
+    entry = OBJ_CATEGORIES.get(category)
+    if entry is None:
+        raise KeyError(f"{category!r} is not a RoboCasa object category")
+    cat = entry["objaverse"]
+    excluded = set(cat.exclude or [])
+    names = [os.path.basename(os.path.dirname(p)) for p in cat.mjcf_paths]
+    names = [n for n in names if n not in excluded]
+    if instance not in names:
+        raise KeyError(f"{instance!r} is not an objaverse instance of {category!r} "
+                       f"(registry has {names})")
+    return names.index(instance)
+
+
 # The three body types both loaders below dispatch on, in the order upstream does
 # (actors/common.py:28-35). "kinematic" is the one a two-valued dynamic/static
 # flag cannot express: immovable, but still poseable under GPU sim.
