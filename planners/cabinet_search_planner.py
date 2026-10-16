@@ -76,6 +76,7 @@ import os
 
 import numpy as np
 
+from planners import cabinet_door_bimbo as _bimbo
 from planners.oracle import oracle_common as common
 from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 from planners import cabinet_retrieval_planner as _crp
@@ -410,6 +411,43 @@ def fail(env, stage: str, **extra):
     return _fail(env, WHO, stage, **extra)
 
 
+DOOR_MODES = ("bimbo", "arc")
+
+
+def door_mode(task) -> str:
+    """How S2 opens a leaf: `MIKASA_CS_DOOR=bimbo|arc`, else by assisted grasp.
+
+    `arc` is the shipped stage (`cabinet_retrieval_planner.open_the_door`: the base rides the
+    hinge's arc with the arm held, K104-K108) — the path every CabinetSearch dataset was
+    collected on, so it stays the default whenever assisted grasp is OFF. `bimbo` is
+    `planners/cabinet_door_bimbo.py` (BIMBO_EvoX's task-62 fridge door: a lead angle, the hand
+    servoed along the arc, the base creeping), the default when assisted grasp is ON, because
+    the shipped arc pull leaves a welded hand turned into the leaf's free edge.
+
+    Example:
+        >>> door_mode(types.SimpleNamespace(_ag=None))   # doctest: +SKIP
+        'arc'
+    """
+    mode = os.environ.get("MIKASA_CS_DOOR", "").strip().lower()
+    if mode:
+        if mode not in DOOR_MODES:
+            raise ValueError(f"MIKASA_CS_DOOR={mode!r}; expected one of {DOOR_MODES}")
+        return mode
+    return "bimbo" if getattr(task, "_ag", None) is not None else "arc"
+
+
+def push_with_fist(task) -> bool:
+    """Whether the closing push makes a fist: `MIKASA_CS_PUSH_HAND=fist|open`, else by
+    assisted grasp (open with it on — a closing hand beside the bar welds the leaf it pushes;
+    the shipped fist with it off)."""
+    hand = os.environ.get("MIKASA_CS_PUSH_HAND", "").strip().lower()
+    if hand:
+        if hand not in ("fist", "open"):
+            raise ValueError(f"MIKASA_CS_PUSH_HAND={hand!r}; expected fist or open")
+        return hand == "fist"
+    return getattr(task, "_ag", None) is None
+
+
 def _np(x):
     return x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)
 
@@ -713,7 +751,8 @@ def close_and_verify(env, planner, task, door: DoorSpec, res):
         r = close_the_door(env, planner, task, door=door,
                           arrive_tol=CLOSE_ARRIVE_TOL, from_here=True,
                           allow_stow=False, physical_close=True,
-                          v_handle=getattr(planner, "closing_speed_m_s", CLOSE_SPEED_M_S))
+                          v_handle=getattr(planner, "closing_speed_m_s", CLOSE_SPEED_M_S),
+                          fist=push_with_fist(task))
     finally:
         planner.forward_navigation = previous
     if r != -1:
@@ -1065,6 +1104,9 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
     rng, order = search_plan(seed, n)
     say(env, "episode", n=n, blind=bool(blind),
         route=("coin" if blind else [int(v) for v in order]))
+    say(env, "door stages", open=door_mode(task),
+        push=("fist" if push_with_fist(task) else "open hand"),
+        assisted_grasp=getattr(task, "_ag", None) is not None)
     # The rest TCP in the base frame while the arm still sits on the reset
     # keyframe — fold_via_tcp's target, exact under any dock yaw.
     rest_tcp = task.agent.base_link.pose.sp.inv() * task.agent.tcp.pose.sp
@@ -1139,8 +1181,11 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         # the leaf by undoing this stage instead of driving around it. Per round, and
         # dead at the end of it: this is a memory task, and no state may outlive a round.
         rec: dict = {}
-        r = open_the_door(env, planner, task, door=door, park_rad=park, record=rec,
-                          fold=not LOOK_BY_TURN)
+        if door_mode(task) == "bimbo":
+            r = _bimbo.open_the_door(env, planner, task, door=door, park_rad=park, record=rec)
+        else:
+            r = open_the_door(env, planner, task, door=door, park_rad=park, record=rec,
+                              fold=not LOOK_BY_TURN)
         committed = committed or int(getattr(planner, "gripper_state", 1)) == _CLOSED
         if r == -1:
             if not committed:
