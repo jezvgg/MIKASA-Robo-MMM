@@ -1886,7 +1886,7 @@ def finish_by_the_handle(env, planner, task, *, door: DoorSpec, anchor=None, res
 def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=None,
                    arrive_tol: float | None = None, from_here: bool | None = None,
                    allow_stow: bool = True, v_handle: float = 0.05,
-                   physical_close: bool = False):
+                   physical_close: bool = False, fist: bool = True):
     """Close the opened door by pushing a fist along its arc (W15, the probe run).
 
     There is no handle on this side of a door standing at ~1.7 rad, so the fist
@@ -1922,6 +1922,11 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
             `turn_in_place` — the unplanned spin, because the refusal IS the sweep.
             Without it the fist ends ~100 deg off the panel and the push moves the
             door 0.05 rad (W20a, run 6).
+        fist: True (default, every shipped path) closes the hand before the push. False
+            pushes with the hand OPEN, for assisted grasp: a closing hand is "applying" by
+            OmniGibson's rule, and one that closes beside the bar or the leaf's edge welds
+            the leaf it is meant to push (b1k_rl_guys: "pressing must not become an
+            assisted re-grasp"). An open hand never applies, so it never welds.
 
     Returns:
         -1 (a `fail(...)` said why, before any push), or the last gym 5-tuple.
@@ -2011,7 +2016,12 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         afford the push. Nothing executes when the plan refuses, so the arm is left
         exactly as the drive left it and the next rung starts clean."""
         if not push.get("fisted"):
-            r = planner.close_gripper(t=12)  # the fist is the tool, not a failed grasp
+            if fist:
+                r = planner.close_gripper(t=12)  # the fist is the tool, not a failed grasp
+            else:
+                # The open hand is the tool (assisted grasp): no command below open, no weld.
+                r = planner.open_gripper() if int(getattr(planner, "gripper_state", 1)) != 1 else -1
+                say(env, "push with the hand open (assisted grasp)")
             push["fisted"] = True
             if r != -1 and common.stopped_by_horizon(planner):
                 push["stop"] = r

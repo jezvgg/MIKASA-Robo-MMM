@@ -20,6 +20,20 @@ The route (design blank I, plan step 4), one ROUND per compartment:
       else MISSED. Then a short look-idle and ONLY `info["success"]` /
       `info["fail"]` are read — `cube_cab` is never touched (the AST test in
       tests/test_cabinet_search.py says so). Success -> settle and return.
+      THE OPENING STAGE IS SELECTED (`door_mode`, 2026-10-16): `MIKASA_CS_DOOR=arc` is the
+      stage above, `cabinet_retrieval_planner.open_the_door`; `MIKASA_CS_DOOR=bimbo` is
+      `planners/cabinet_door_bimbo.open_the_door`, BIMBO_EvoX's task-62 fridge door on a
+      Fetch — the same dock and bar grasp, the finger gap checked after the close, then
+      every control a lead angle, the hand servoed to the bar's place on the arc with its
+      orientation commanded, the base creeping to the shipped arc's end stance, the arm
+      relaxed before the release and the open hand slid off the bar in the leaf's plane.
+      Unset, the mode follows assisted grasp: `bimbo` with `gym.make(..., assisted_grasp=
+      True)`, `arc` without — so every collected CabinetSearch dataset's path is untouched.
+      Only in the bimbo mode: a found can's blocked tuck first drops the open hand under the
+      leaf (`lower_the_hand`); `close_by_the_bar` (the opening reversed on the bar, for a
+      push from here with no plan) is opt-in and measured not to work yet. `MIKASA_CS_PUSH_HAND=fist|open`
+      (default fist) chooses the hand S3 pushes with. Measurements in
+      utils/collection/CABINET_SEARCH.md, "Assisted grasp: the BIMBO door".
   S3  the compartment was empty: `close_the_door(door=spec)` (K106's fist
       push), verdict by state (`<= theta_closed`), one re-push, else MISSED.
       The env's detent zeroes the hinge once the hand is away.
@@ -76,6 +90,7 @@ import os
 
 import numpy as np
 
+from planners import cabinet_door_bimbo as _bimbo
 from planners.oracle import oracle_common as common
 from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 from planners import cabinet_retrieval_planner as _crp
@@ -410,6 +425,76 @@ def fail(env, stage: str, **extra):
     return _fail(env, WHO, stage, **extra)
 
 
+DOOR_MODES = ("bimbo", "arc")
+
+
+#: Metres the base backs off along its own heading before the touch-dock turn, when the
+#: BIMBO door mode would otherwise turn the long way round (`_touch_turn_is_short`).
+TOUCH_BACKOFF_M = float(os.environ.get("MIKASA_CS_TOUCH_BACKOFF_M", "0.15"))
+
+
+def _opening_turn(planner, dock, view) -> float | None:
+    """The opening turn `drive_base` would make toward `dock`, rad, signed; None if every
+    aim is refused. Dry-run of each approach aim in `drive_base`'s own order: the first
+    whose turn plans is the one it executes, and the turn it plans may be the long way
+    round (`base_yaw.sweep_yaw` takes it when the short arc collides)."""
+    yaw_index = list(planner.planner.move_group_joint_indices).index(planner.YAW_JOINT_INDEX)
+    for aim, _rev, _cost in planner.approach_aims(dock, view, reverse_ok=True):
+        if abs(planner._yaw_to(aim)) < 1e-2:
+            return 0.0          # rotate_base_z idles one step here, even on a dry run: skip it
+        plan = planner.rotate_base_z(aim, dry_run=True)
+        if plan == -1 or not isinstance(plan, dict) or "position" not in plan:
+            continue
+        pos = np.asarray(plan["position"])
+        if len(pos) == 0:
+            return 0.0
+        return float(pos[-1][yaw_index] - pos[0][yaw_index])
+    return None
+
+
+def _touch_turn_is_short(planner, dock, view) -> tuple:
+    """(short?, turn rad or None) for the touch-dock drive's opening turn."""
+    turn = _opening_turn(planner, dock, view)
+    return (turn is not None and abs(turn) <= math.pi), turn
+
+
+def door_mode(task) -> str:
+    """How S2 opens a leaf: `MIKASA_CS_DOOR=bimbo|arc`, else by assisted grasp.
+
+    `arc` is the shipped stage (`cabinet_retrieval_planner.open_the_door`: the base rides the
+    hinge's arc with the arm held, K104-K108) — the path every CabinetSearch dataset was
+    collected on, so it stays the default whenever assisted grasp is OFF. `bimbo` is
+    `planners/cabinet_door_bimbo.py` (BIMBO_EvoX's task-62 fridge door: a lead angle, the hand
+    servoed along the arc, the base creeping), the default when assisted grasp is ON, because
+    the shipped arc pull leaves a welded hand turned into the leaf's free edge.
+
+    Example:
+        >>> door_mode(types.SimpleNamespace(_ag=None))   # doctest: +SKIP
+        'arc'
+    """
+    mode = os.environ.get("MIKASA_CS_DOOR", "").strip().lower()
+    if mode:
+        if mode not in DOOR_MODES:
+            raise ValueError(f"MIKASA_CS_DOOR={mode!r}; expected one of {DOOR_MODES}")
+        return mode
+    return "bimbo" if getattr(task, "_ag", None) is not None else "arc"
+
+
+def push_with_fist(task) -> bool:
+    """Whether the closing push makes a fist: `MIKASA_CS_PUSH_HAND=fist|open`, default fist.
+
+    `open` is the b1k_rl_guys rule ("pressing must not become an assisted re-grasp"): an open
+    hand is never "applying", so it cannot weld. The fist stays the default because the weld
+    it was suspected of came from the shipped arc's retreat leaving the pads on the bar, where
+    the fist then closed; after the bimbo stage's clear the fist closes on air (no weld from a
+    push in the 2026-10-16 runs), while the open fingers, 10 cm wide, met the leaf on the way
+    to the push point (seed 2 and others, `finger <-> leaf` in the pre-contact screw)."""
+    hand = os.environ.get("MIKASA_CS_PUSH_HAND", "fist").strip().lower()
+    if hand not in ("fist", "open"):
+        raise ValueError(f"MIKASA_CS_PUSH_HAND={hand!r}; expected fist or open")
+    return hand == "fist"
+
+
 def _np(x):
     return x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)
 
@@ -691,8 +776,13 @@ def drive_home(env, planner, task):
     return res
 
 
-def close_and_verify(env, planner, task, door: DoorSpec, res):
-    """Physical panel push, at most two handle corrections, then release dwell."""
+def close_and_verify(env, planner, task, door: DoorSpec, res, record=None):
+    """Physical panel push, at most two handle corrections, then release dwell.
+
+    In the bimbo door mode, with `MIKASA_BD_CLOSE_BY_BAR=1` (off: it does not work yet, see
+    `cabinet_door_bimbo.CLOSE_BY_BAR`), a push from here that finds no plan (it steps nothing)
+    hands over to `cabinet_door_bimbo.close_by_the_bar` — the opening reversed on the bar the
+    hand has just let go of — before the corrections; `record` is the round's opening record."""
     def verify(result):
         # The environment independently checks all leaves and the hand distance.
         for _ in range(int(task.cfg.close_dwell_steps)):
@@ -713,13 +803,18 @@ def close_and_verify(env, planner, task, door: DoorSpec, res):
         r = close_the_door(env, planner, task, door=door,
                           arrive_tol=CLOSE_ARRIVE_TOL, from_here=True,
                           allow_stow=False, physical_close=True,
-                          v_handle=getattr(planner, "closing_speed_m_s", CLOSE_SPEED_M_S))
+                          v_handle=getattr(planner, "closing_speed_m_s", CLOSE_SPEED_M_S),
+                          fist=push_with_fist(task))
     finally:
         planner.forward_navigation = previous
     if r != -1:
         res = r
     if common.stopped_by_horizon(planner):
         return res, False
+    if r == -1 and door_mode(task) == "bimbo" and record and _bimbo.CLOSE_BY_BAR:
+        res, _ = _bimbo.close_by_the_bar(env, planner, task, door=door, record=record, res=res)
+        if common.stopped_by_horizon(planner):
+            return res, False
     res, closed = verify(res)
     if closed:
         return res, True
@@ -850,6 +945,37 @@ def nudge_the_cube(env, planner, task, res, cab=None):
     # the own open leaf on some seeds). Never push from the handle dock: the pose has no
     # IK there and one attempt took pinocchio down (log3 assertion) on 2102-2104.
     docked = False
+    view = np.array([0.0, 1.0, 0.0])
+    # BIMBO door mode only: the servoed swing leaves the base turned a few degrees and the
+    # arm in another configuration than the arc pull, and from there the short turn to the
+    # touch dock collides, so `drive_base` turned the LONG way round, ~306 deg, on 9 of 10
+    # episodes (2026-10-16; never with the arc). Fold the arm first, then back the base off
+    # the leaf, and only then accept a long turn, logged.
+    if door_mode(task) == "bimbo":
+        planner.planner.update_from_simulation()
+        short, turn = _touch_turn_is_short(planner, dock, view)
+        if not short:
+            say(env, "touch-dock turn would go the long way; folding first",
+                turn_deg=None if turn is None else round(math.degrees(turn), 1))
+            r = drive_posture(env, planner, task, label="duck for the touch drive")
+            if r != -1:
+                res = r
+                if common.stopped_by_horizon(planner):
+                    return res
+            planner.planner.update_from_simulation()
+            short, turn = _touch_turn_is_short(planner, dock, view)
+        if not short and TOUCH_BACKOFF_M > 0:
+            say(env, "touch-dock turn still long; backing off the leaf", m=TOUCH_BACKOFF_M,
+                turn_deg=None if turn is None else round(math.degrees(turn), 1))
+            r = planner.drive_straight(-TOUCH_BACKOFF_M, v=0.10)
+            if r != -1:
+                res = r
+                if common.stopped_by_horizon(planner):
+                    return res
+            planner.planner.update_from_simulation()
+            short, turn = _touch_turn_is_short(planner, dock, view)
+        say(env, "touch-dock turn", short=short,
+            turn_deg=None if turn is None else round(math.degrees(turn), 1))
     for posture in ("as-is", "drive"):
         if posture == "drive":
             r = drive_posture(env, planner, task, label="duck for the touch drive")
@@ -858,7 +984,7 @@ def nudge_the_cube(env, planner, task, res, cab=None):
                 if common.stopped_by_horizon(planner):
                     return res
         say(env, "drive to the touch dock", dock=[round(float(v), 3) for v in dock[:2]], posture=posture)
-        r = planner.drive_base(target_pos=dock, target_view_vec=np.array([0.0, 1.0, 0.0]), freeze_arm=True)
+        r = planner.drive_base(target_pos=dock, target_view_vec=view, freeze_arm=True)
         if r != -1:
             res = r
             if common.stopped_by_horizon(planner):
@@ -1065,6 +1191,9 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
     rng, order = search_plan(seed, n)
     say(env, "episode", n=n, blind=bool(blind),
         route=("coin" if blind else [int(v) for v in order]))
+    say(env, "door stages", open=door_mode(task),
+        push=("fist" if push_with_fist(task) else "open hand"),
+        assisted_grasp=getattr(task, "_ag", None) is not None)
     # The rest TCP in the base frame while the arm still sits on the reset
     # keyframe — fold_via_tcp's target, exact under any dock yaw.
     rest_tcp = task.agent.base_link.pose.sp.inv() * task.agent.tcp.pose.sp
@@ -1139,8 +1268,11 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         # the leaf by undoing this stage instead of driving around it. Per round, and
         # dead at the end of it: this is a memory task, and no state may outlive a round.
         rec: dict = {}
-        r = open_the_door(env, planner, task, door=door, park_rad=park, record=rec,
-                          fold=not LOOK_BY_TURN)
+        if door_mode(task) == "bimbo":
+            r = _bimbo.open_the_door(env, planner, task, door=door, park_rad=park, record=rec)
+        else:
+            r = open_the_door(env, planner, task, door=door, park_rad=park, record=rec,
+                              fold=not LOOK_BY_TURN)
         committed = committed or int(getattr(planner, "gripper_state", 1)) == _CLOSED
         if r == -1:
             if not committed:
@@ -1159,6 +1291,18 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 theta_reveal=float(cfg.theta_reveal), **_latches(res[-1]))
             return res
         say(env, "door open", compartment=comp.name, door_rad=round(rad, 3))
+        if os.environ.get("MIKASA_CS_DEBUG") == "1":
+            # stdout only (no trace event): the arm and the collection's roll window
+            _jm = task.agent.robot.active_joints_map
+            _q = _np(task.agent.robot.get_qpos()).reshape(-1)
+            print("[cabinet_search_planner] debug arm after the opening",
+                  {n: round(float(_q[int(_jm[n].active_index[0])]), 3) for n in
+                   ["torso_lift_joint"] + list(task.agent.controller.controllers["arm"].config.joint_names)},
+                  "roll_low", np.round(getattr(planner, "_roll_low", np.zeros(3)), 3).tolist(),
+                  "roll_high", np.round(getattr(planner, "_roll_high", np.zeros(3)), 3).tolist(),
+                  "base", np.round(_q[:3], 3).tolist(),
+                  "tcp", np.round(_np(task.agent.tcp.pose.sp.p).reshape(-1)[:3], 3).tolist(),
+                  flush=True)
         planner.planner.update_from_simulation()
         # LOOK. W22 (2026-09-02, pixel counts on the ds_fetch rig, cube present
         # vs hidden): from the pose the ARC PULL leaves the base in — measured
@@ -1315,6 +1459,19 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
             planner.planner.update_from_simulation()
             r = plan_joints(env, planner, task, tuck,
                             label="tuck after finding the can", tries=1, line_only=True)
+            if r == -1 and door_mode(task) == "bimbo":
+                # The servoed swing leaves the arm in another joint configuration than the
+                # shipped arc pull, and from beside the open leaf the line to the tuck can
+                # sweep it (seed 0, finger <-> leaf at knot 4/23). From under the leaf's
+                # bottom edge it cannot.
+                r = _bimbo.lower_the_hand(env, planner, task, door=door)
+                if r != -1:
+                    res = r
+                    if common.stopped_by_horizon(planner):
+                        return res
+                    planner.planner.update_from_simulation()
+                    r = plan_joints(env, planner, task, tuck, label="tuck after finding the can "
+                                    "(hand under the leaf)", tries=1, line_only=True)
             if r == -1:
                 say(env, "MISSED: cannot clear the door for the can approach")
                 return res
@@ -1381,7 +1538,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 if common.stopped_by_horizon(planner):
                     return res
             if not closed:
-                res, closed = close_and_verify(env, planner, task, door, res)
+                res, closed = close_and_verify(env, planner, task, door, res, record=rec)
             if common.stopped_by_horizon(planner):
                 return res
             if not closed:

@@ -8,7 +8,9 @@ env kwargs, motion parameters, waypoint and execution noise), the planner is cal
 planners' own command lines build a different env (no motion parameters, no noise), so
 their outcomes are not the collection's. ``--assisted-grasp`` adds
 ``assisted_grasp=True`` to the env kwargs; with ``MIKASA_AG_LOG=1`` every weld and release
-is printed when it happens, between the planner's own lines.
+is printed when it happens, between the planner's own lines. ``--video-dir DIR`` records the
+render camera to DIR (RecordEpisode, ``render_mode="rgb_array"``); the planner's actions are
+the same, only frames are kept.
 """
 import argparse
 import json
@@ -23,6 +25,7 @@ def main():
     ap.add_argument("seed", type=int)
     ap.add_argument("--assisted-grasp", action="store_true")
     ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None, help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
+    ap.add_argument("--video-dir", default=None, help="record the render camera's clip here")
     args = ap.parse_args()
     if args.ik_backend is not None:
         import os
@@ -40,10 +43,17 @@ def main():
     kwargs = dict(profile["env_kwargs"], obs_mode="state")
     if args.assisted_grasp:
         kwargs["assisted_grasp"] = True
+    if args.video_dir:
+        kwargs["render_mode"] = "rgb_array"
     seed = args.seed
     seed_everything(seed)
     env = gym.make(profile["env_id"], **kwargs)
     base = env.unwrapped
+    if args.video_dir:
+        from mani_skill.utils.wrappers.record import RecordEpisode
+
+        env = RecordEpisode(env, args.video_dir, save_trajectory=False, save_video=True,
+                            video_fps=20, max_steps_per_video=None)
     base.motion_parameters = dict(profile["planner"].get("motion_parameters", {}))
     env.log_event = lambda event, message, **extra: print(
         f"[event] step={int(base.elapsed_steps.reshape(-1)[0])} {event} {message}", flush=True)
@@ -73,6 +83,10 @@ def main():
 
             print(f"curobo calls={curobo_client.STATS['calls']} server_ms={curobo_client.STATS['server_ms']:.0f}",
                   flush=True)
+        if args.video_dir:
+            name = f"{args.task}_seed{seed}{'_ag' if args.assisted_grasp else ''}_{verdict}"
+            env.flush_video(name=name)
+            print(f"video {args.video_dir}/{name}.mp4", flush=True)
     finally:
         env.close()
 
