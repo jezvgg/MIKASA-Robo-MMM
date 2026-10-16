@@ -371,3 +371,11 @@ leaf: the servoed stance ends 3-7 deg short of the shipped pull's heading there.
 measured off: squaring the base onto that heading after the swing (8/10, 7/10: a turn under the
 held bar slides the base) and re-grasping the bar to close by the reversed swing (0/3: pads that
 close along the face's normal sweep the free leaf away).
+
+**Touch-dock turn (0e41583).** After the servoed swing the short turn toward the touch dock
+collided and `drive_base` turned the long way round, ~306 deg, in 9 of 10 episodes (never
+with the arc pull). The BIMBO mode now dry-runs that turn first; when it would go the long
+way the arm folds into the drive posture, and if the turn were still long the base would
+back 15 cm off the leaf (`MIKASA_CS_TOUCH_BACKOFF_M`). Seeds 0-9 with assisted grasp:
+**9/10** as before (seed 9 still misses the door close), every touch-dock turn short (47-57
+deg, folding sufficed, no back-off needed), episodes 100-208 steps shorter.
