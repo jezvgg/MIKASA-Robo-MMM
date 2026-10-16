@@ -701,13 +701,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--blind", action="store_true")
+    parser.add_argument("--assisted-grasp", action="store_true", help="weld the picked object to the hand by OmniGibson's rule (utils/mikasa/assisted_grasp.py; changes the physics)")
     args = parser.parse_args()
     env = gym.make("MikasaSameDrawer-v0", scene_idx=0, sim_backend="cpu",
                    obs_mode="state", control_mode="pd_joint_pos",
-                   sim_config={"control_freq":20, "sim_freq":100})
+                   sim_config={"control_freq":20, "sim_freq":100},
+                   assisted_grasp=args.assisted_grasp)
     try:
         result = solve(env, args.seed, blind=args.blind)
         print("RESULT", result if isinstance(result, int) else result[-1])
+        ag = env.unwrapped._ag
+        if ag is not None:
+            kinds = [k for _, k, _ in ag.events]
+            print(f"assisted_grasp establish={kinds.count('establish')} "
+                  f"release={kinds.count('release')} events={ag.events}")
     finally:
         env.close()
 

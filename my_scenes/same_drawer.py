@@ -36,6 +36,7 @@ from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneB
 from mani_skill.utils.structs import Actor, Pose
 
 from utils.initial_pose import randomize_initial_joints
+from utils.mikasa.assisted_grasp import AssistedGraspTask
 from utils.robocasa_utils import (
     parking_pose,
     counter_frame,
@@ -221,7 +222,7 @@ def score_same_drawer(
     max_episode_steps=SameDrawerConfig.horizon,
     asset_download_ids=["RoboCasa"],
 )
-class SameDrawerTask(BaseEnv):
+class SameDrawerTask(AssistedGraspTask, BaseEnv):
     """Close the open drawer, put the apple on the plate, open the same drawer.
 
     A blind final choice is uniform over the three eligible drawers. Physical
@@ -362,6 +363,10 @@ class SameDrawerTask(BaseEnv):
         self.agent.base_link.set_collision_group_bit(group=2, bit_idx=31, bit=1)
 
     # ---------------------------------------------------------------- buffers --
+
+    def _assisted_grasp_objects(self):
+        """The apple is the one thing picked up; the plate is kinematic scenery."""
+        return [self.apple]
 
     def _after_reconfigure(self, options: dict):
         super()._after_reconfigure(options)

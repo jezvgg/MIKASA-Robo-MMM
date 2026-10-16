@@ -35,6 +35,7 @@ from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneB
 from mani_skill.utils.structs import Actor, Pose
 
 from utils.initial_pose import randomize_initial_joints
+from utils.mikasa.assisted_grasp import AssistedGraspTask
 from utils.robocasa_utils import (require_get_fixture, restore_task_tensor, parking_pose,
                                   load_objaverse_actor, objaverse_mjcf)
 from pathlib import Path
@@ -1267,7 +1268,7 @@ def step_search_latches(latches, *, step: torch.Tensor, theta: torch.Tensor,
     max_episode_steps=CabinetSearchConfig.horizon,
     asset_download_ids=["RoboCasa"],
 )
-class CabinetSearchTask(BaseEnv):
+class CabinetSearchTask(AssistedGraspTask, BaseEnv):
     """Find the hidden cube; close behind you; home between openings; never twice.
 
     Example:
@@ -1616,6 +1617,10 @@ class CabinetSearchTask(BaseEnv):
         self.agent.base_link.set_collision_group_bit(group=2, bit_idx=31, bit=1)
 
     # ------------------------------------------------------------ initialize --
+
+    def _assisted_grasp_objects(self):
+        """The can (`cube`, its historical key) is the one thing picked up."""
+        return [self.cube]
 
     def _after_reconfigure(self, options: dict):
         # The layout built in __init__ lives on the CPU (no device yet); the latch

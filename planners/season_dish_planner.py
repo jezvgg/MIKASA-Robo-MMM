@@ -1580,6 +1580,8 @@ def parse_args(argv=None):
         action="store_true",
         help="arm B of the control experiment: ignore the cue, take a uniformly random condiment (seeded)",
     )
+    parser.add_argument("--assisted-grasp", action="store_true",
+                        help="weld the picked object to the hand by OmniGibson's rule (utils/mikasa/assisted_grasp.py; changes the physics)")
     return parser.parse_args(argv)
 
 
@@ -1597,6 +1599,7 @@ def main(argv=None):
         human_render_camera_configs=dict(
             width=args.render_width, height=args.render_height
         ),
+        assisted_grasp=args.assisted_grasp,
     )
     env = RecordEpisode(
         env,
@@ -1614,6 +1617,10 @@ def main(argv=None):
         print("failed_motion_plan")
     else:
         print("success:", bool(res[-1]["success"][0]))
+    ag = env.unwrapped._ag
+    if ag is not None:
+        kinds = [k for _, k, _ in ag.events]
+        print(f"assisted_grasp establish={kinds.count('establish')} release={kinds.count('release')} events={ag.events}")
     env.close()
     return res
 

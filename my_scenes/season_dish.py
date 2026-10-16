@@ -50,6 +50,7 @@ from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneB
 from mani_skill.utils.structs import Actor, Pose
 
 from utils.initial_pose import randomize_initial_joints
+from utils.mikasa.assisted_grasp import AssistedGraspTask
 from my_scenes.season_salad import decorate_bowl
 from utils.fridge_picture import FridgePictures
 from pathlib import Path
@@ -363,7 +364,7 @@ class SeasonDishConfig:
     max_episode_steps=SeasonDishConfig.horizon,
     asset_download_ids=["RoboCasa"],
 )
-class SeasonDishTask(BaseEnv):
+class SeasonDishTask(AssistedGraspTask, BaseEnv):
     """Fetch the condiment the recipe asked for, and season the dish with it."""
 
     # ds_fetch is what the planner in this repo actually drives. "none" is
@@ -732,6 +733,10 @@ class SeasonDishTask(BaseEnv):
             for bit in range(25, 31):
                 link.set_collision_group_bit(group=2, bit_idx=bit, bit=1)
         self.agent.base_link.set_collision_group_bit(group=2, bit_idx=31, bit=1)
+
+    def _assisted_grasp_objects(self):
+        """The two condiments are picked up; the bowl stays where it is."""
+        return [self.shaker, self.condiment_bottle]
 
     def _after_reconfigure(self, options: dict):
         # Task buffers are allocated here, once, at full num_envs width. Allocating
