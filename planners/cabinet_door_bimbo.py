@@ -669,10 +669,10 @@ CLOSE_BACK_M = 0.30
 "The withdrawal after the release at the shut leaf, as the shipped physical close's."
 REGRASP_REACH_M = CLEAR_M + 0.10
 "The hand must stand within this of the bar to take it again (it left by CLEAR_M)."
-REGRASP_OFF_FACE_M = 0.01
-"""The bar is taken again 1 cm out from its axis along the face's normal: the inner pad passes
-the 3 cm between bar and face without touching the face (the open pads span 10 cm round a
-26 mm bar, so the closing still centres it)."""
+REGRASP_OFF_FACE_M = 0.02
+"""The bar is taken again with the TCP 2 cm out from its axis along the face's normal. The open
+pads stand 5 cm either side of the TCP and the bar 5 cm off the face, so this puts the inner
+pad mid-way in the 3.7 cm between the bar's surface and the face (1 cm brushed the face)."""
 
 
 def close_by_the_bar(env, planner, task, *, door, record, res):
@@ -710,38 +710,57 @@ def close_by_the_bar(env, planner, task, *, door, record, res):
         return res, False
     say(env, "close by the bar (bimbo)", door_rad=round(rad, 3), hand_to_bar=round(far, 3))
     drv = _Driver(planner, task, servo, _torso(task))
-    # -- back onto the bar, open: the bar followed live, the inner pad kept off the face ------
-    # The way back is the clear reversed, the pads sliding round the bar in the leaf's plane.
-    # The leaf may yield toward shut if the inner pad brushes the face (seed 9, -0.035 rad):
-    # harmless here, so only a leaf pushed further OPEN (or its sibling moved) stops the stage.
+    # -- back onto the bar, open: out, then the clear reversed --------------------------------
+    # With the hand turned ~100 deg to the leaf the pads close along the face's normal, so the
+    # inner pad has to pass between bar and face (3.7 cm): the only way in is the way the clear
+    # went out, sliding along the leaf. The hand first steps REGRASP_OFF_FACE_M out (past the
+    # free edge, nothing there), then slides back to the bar's radius; the bar followed live.
+    # A leaf yielding toward shut is harmless before a close; a leaf pushed further open, or a
+    # sibling that moves, stops the stage.
     rad_start = rad
     sib0 = crp._leaf_joints(task, door)
     _names = [j.name for j in task.scene.articulations[crp._art_key(task, door)].get_active_joints()]
     own = _names.index(door.hinge) if door.hinge in _names else -1
-    k = 0
-    for k in range(CLEAR_MAX_STEPS):
+    sense = int(np.sign(s * door.open_dir))
+    p0 = _T(task.agent.tcp.pose.sp)[:3, 3].copy()
+
+    def bar_now():
         live = float(crp.door_rad_now(task, door))
-        turn = s * (live - rad0)
-        bar = ds.door_frames(G0, anchor_xy, turn, hand_turn=HAND_TURN * turn)[1]
-        n = _leaf_normal(task, door, anchor_xy, int(np.sign(s * door.open_dir)))
-        bar[:2, 3] = bar[:2, 3] + REGRASP_OFF_FACE_M * n
-        res, dp, _, _ = drv.step(bar)
-        if common.stopped_by_horizon(planner):
-            return res, True
+        turn_l = s * (live - rad0)
+        g = ds.door_frames(G0, anchor_xy, turn_l, hand_turn=HAND_TURN * turn_l)[1]
+        return g, _leaf_normal(task, door, anchor_xy, sense)
+
+    def wrong_way() -> tuple:
         sib = crp._leaf_joints(task, door)
         m = min(len(sib), len(sib0))
         d_sib = np.abs(sib[:m] - sib0[:m])
         if 0 <= own < m:
             d_sib[own] = 0.0
         opened = float(crp.door_rad_now(task, door)) - rad_start
-        moved_other = float(np.max(d_sib)) if m else 0.0
-        if opened > CLEAR_LEAF_TOL or moved_other > CLEAR_LEAF_TOL:
-            planner.open_gripper()
-            say(env, "close by the bar: a leaf moved the wrong way on the way back to the bar",
-                opened=round(opened, 4), others=round(moved_other, 4))
-            return res, True
-        if float(np.linalg.norm(dp)) < 0.004:
-            break
+        return opened, (float(np.max(d_sib)) if m else 0.0)
+
+    k = 0
+    for leg in ("out", "in"):
+        for k in range(CLEAR_MAX_STEPS):
+            g, n = bar_now()
+            goal_k = g.copy()
+            off = (g[:2, 3] + REGRASP_OFF_FACE_M * n) - g[:2, 3]
+            if leg == "out":       # where the hand stands, stepped out to the re-grasp offset
+                o_hand = float((p0[:2] - g[:2, 3]) @ n)
+                goal_k[:2, 3] = p0[:2] + (REGRASP_OFF_FACE_M - o_hand) * n
+            else:
+                goal_k[:2, 3] = g[:2, 3] + off
+            res, dp, _, _ = drv.step(goal_k)
+            if common.stopped_by_horizon(planner):
+                return res, True
+            opened, others = wrong_way()
+            if opened > CLEAR_LEAF_TOL or others > CLEAR_LEAF_TOL:
+                planner.open_gripper()
+                say(env, "close by the bar: a leaf moved the wrong way on the way back to the bar",
+                    leg=leg, opened=round(opened, 4), others=round(others, 4))
+                return res, True
+            if float(np.linalg.norm(dp)) < 0.004:
+                break
     r = planner.close_gripper(t=12)
     if r != -1:
         res = r
