@@ -1,6 +1,8 @@
 """MikasaDepthRecall-v1: retrieve the deepest prop and restore its three blockers.
 
-Four coloured props occupy a seeded front-to-back permutation on a cabinet shelf.
+Four props occupy a seeded front-to-back permutation on a cabinet shelf. They are
+RoboCasa kitchen objects, spices and sauces (`PROPS`: ketchup, pepper and salt shakers,
+mustard), each with its own body colour; three of them are recoloured (see `PROPS`).
 The counter carries four pads, one in each prop's colour, and the episode shuffles
 which counter slot each colour's pad lies on. The props are cleared onto their own
 pads, the one from the deepest position stays there, and the others go back to their
@@ -39,7 +41,8 @@ from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneB
 from mani_skill.utils.structs import Pose
 
 from utils.mikasa.assisted_grasp import AssistedGrasp
-from utils.robocasa_utils import parking_pose, require_get_fixture, restore_task_tensor
+from utils.robocasa_utils import (load_objaverse_actor, objaverse_index, parking_pose,
+                                  require_get_fixture, restore_task_tensor)
 
 #: Everything `get_state_dict` adds beyond sim state. All of it is task MEMORY or a
 #: latch; every entry is rank <= 2 (`flatten_state_dict` ends in `torch.hstack`).
@@ -65,19 +68,77 @@ INSTRUCTIONS = (
 #: the chore says to put each prop, and a viewer (or a policy reading pixels) cannot
 #: see a coordinate. Kinematic and collision-free — `hide_visual` asserts no collision
 #: shapes and the pose setter asserts a non-static body under GPU sim, which is the pair
-#: of constraints every marker in this package is built to. 9 cm across: wider than a
-#: prop (4.5 cm) by a finger's clearance a side, so the colour shows around a standing
-#: prop from the head cameras.
+#: of constraints every marker in this package is built to. 9 cm across: wider than the
+#: widest prop (5.2 cm, the shakers) by 1.9 cm a side, so the colour shows around a
+#: standing prop from the head cameras.
 PAD_HALF = (0.045, 0.045, 0.002)
 
 #: Fixed identity palette — a prop cannot be recoloured per episode, so colour IS
 #: identity and the episode's ticket permutes which SLOT each colour occupies. The pads
-#: use the same colours: pad c belongs to prop c.
+#: use the same colours: pad c belongs to prop c. These four hues are the ones the
+#: coloured-box version of this task measured its pads and its perception on.
 PROP_COLORS = (
     (1.0, 0.1, 0.1, 1.0),   # red
     (0.1, 0.8, 0.1, 1.0),   # green
     (0.15, 0.3, 1.0, 1.0),  # blue
     (1.0, 0.85, 0.0, 1.0),  # yellow
+)
+
+
+@dataclass(frozen=True)
+class PropSpec:
+    """One prop: which RoboCasa object it is, how it is coloured, what it measures.
+
+    ``half_xy`` and ``height`` are the collision mesh's footprint half-width (largest
+    |x| or |y| of its bounds about the origin) and z-extent at the scale RoboCasa
+    declares for the category, measured 2026-10-16 (`load_objaverse_actor` applies that
+    scale). They are what `DepthRecallV1Config.validate` checks the row against, and
+    `DepthRecallV1Task._load_scene` re-measures the loaded mesh and refuses to build if
+    the asset has drifted from them by more than a millimetre.
+    """
+
+    label: str
+    category: str
+    instance: str
+    half_xy: float
+    height: float
+    recolor: tuple = ()
+    "(visual mesh file name, rgba) pairs: those visual parts are drawn in a flat colour."
+
+
+#: The four props, in identity (colour) order: prop i has colour `PROP_COLORS[i]` and
+#: pad i. Spices and sauces, the owner's choice (2026-10-16).
+#:
+#: Why three of them are recoloured. Identity is by colour, and the planner's camera mode
+#: names a prop by hue, so the four need four hues. Measured 2026-10-16 (every RoboCasa
+#: objaverse shaker, condiment, ketchup, jam, spray, liquor and bottled-drink instance,
+#: rendered on this kitchen's counter and segmented): the objects that fit the row
+#: (footprint half-width <= 2.8 cm) are red sauces (ketchup_2/7/8/9/10/11, condiment_0,
+#: hues 0-8 deg) and achromatic shakers (black, white, cream glass, clear glass,
+#: saturation <= 0.13 except the cream one at 0.27). No spice or sauce with another hue
+#: fits: the peach dressing (condiment_3) is 7.4 cm across, the BBQ sauce 7.9, the
+#: orange and purple jam jars 5.6-6.6 cm across and only 5.5-6.8 cm tall, the
+#: yellow-green cooking spray 10.8 cm deep. So the ketchup keeps its own red, and the
+#: other three keep their geometry and get a flat body colour:
+#:
+#: - the pepper shaker's black body is drawn green and the salt shaker's white body blue;
+#:   their tops (black and white, a separate visual part) are untouched, so the pair
+#:   still reads as pepper and salt;
+#: - a second squeeze bottle (ketchup_8, flat orange-red, a different shape from the
+#:   ketchup's) is drawn mustard yellow.
+#:
+#: Measured sizes (collision mesh, RoboCasa scale), all 2026-10-16:
+#: ketchup_7 4.20 x 4.33 x 16.50 cm 19.3 g; shaker_0 / shaker_1 5.17 x 5.09 x 9.45 cm
+#: 15.8 g; ketchup_8 4.28 x 4.30 x 15.00 cm 17.4 g. Each origin is its mesh's centre
+#: (xy within 0.6 mm, z exactly half the height).
+PROPS = (
+    PropSpec("ketchup", "ketchup", "ketchup_7", half_xy=0.0217, height=0.1650),
+    PropSpec("pepper", "shaker", "shaker_0", half_xy=0.0262, height=0.0945,
+             recolor=(("model_normalized_0.obj", PROP_COLORS[1]),)),
+    PropSpec("salt", "shaker", "shaker_1", half_xy=0.0262, height=0.0945,
+             recolor=(("model_normalized_1.obj", PROP_COLORS[2]),)),
+    PropSpec("mustard", "ketchup", "ketchup_8", half_xy=0.0215, height=0.1500,
+             recolor=(("model_normalized_0.obj", PROP_COLORS[3]),)),
 )
 
 
@@ -103,9 +164,11 @@ class DepthRecallV1Config:
     door_hinge: str = "rightdoorhinge"
     door_open_rad: float = 1.75
     n_props: int = 4
-    prop_half_xy: float = 0.0225
-    prop_half_h: float = 0.06
-    "4.5 x 4.5 x 12 cm — v0's prop, and the object `MikasaCabinetStowProp-v0` measured."
+    props: tuple = PROPS
+    """The objects, in identity order (`PROPS`). Until 2026-10-16 every prop was one
+    4.5 x 4.5 x 12 cm box (v0's prop, the object `MikasaCabinetStowProp-v0` measured);
+    now each has its own footprint and height, and everything that depended on the box's
+    `prop_half_xy` / `prop_half_h` reads the prop's own (`max_half_xy` for the row)."""
     shelf_top_z: float = 1.4200
     spawn_clearance: float = 0.004
     finger_reach: float = 0.030
@@ -134,8 +197,8 @@ class DepthRecallV1Config:
     возврат на место — допустим"); v1 cannot, because a neighbour dragged OUT of the
     cabinet is then staged on the counter as if it had been chosen, and the restore is
     aiming at a row that no longer holds what it thinks. The arithmetic `validate`
-    enforces: pitch - prop_half_xy > finger_reach + 5 mm, i.e. > 5.75 cm at this
-    gripper. 7 cm leaves 1.75 cm.
+    enforces: pitch - max_half_xy > finger_reach + 5 mm, i.e. > 6.12 cm with the
+    5.2 cm shakers (5.75 cm with the old 4.5 cm box). 7 cm leaves 0.88 cm.
 
     Both ends stay inside W18's measured band: the front moves 3 cm nearer the opening
     (easier, and inside the retrieval family's own -0.28 spawn limit) and the deep slot
@@ -176,8 +239,10 @@ class DepthRecallV1Config:
     upright_tilt_deg: float = 15.0
     "Maximum lean from vertical for a standing prop, in degrees."
     upright_tol: float = 0.015
-    """A standing prop's centre sits `prop_half_h` above its surface; a tipped 12 cm
-    prop's centre drops ~3.5 cm, far outside this."""
+    """A standing prop's origin sits its own rest lift (`DepthRecallV1Task._rest_lift`,
+    origin to mesh bottom; half its height for these four) above its surface; a tipped
+    one's drops to about its footprint half-width — 2.1 cm for the 9.45 cm shakers, the
+    shortest, and 5.3-6.1 cm for the bottles, all outside this."""
     hold_steps: int = 15
     """Consecutive steps the finished arrangement must hold before success latches.
 
@@ -198,6 +263,11 @@ class DepthRecallV1Config:
     slot point. Success requires all three blockers to have left and come back, so
     "reach past the row without touching it" cannot be credited as a restore."""
 
+    @property
+    def max_half_xy(self) -> float:
+        """The widest prop's footprint half-width: what the row pitch must clear."""
+        return max(p.half_xy for p in self.props)
+
     def validate(self) -> None:
         assert self.horizon > 0
         assert self.n_props in (3, 4), (
@@ -209,15 +279,24 @@ class DepthRecallV1Config:
             "every prop has to have a slot to stand on while the row is apart"
         )
         assert 0.9 <= self.door_open_rad <= 2.9
-        assert 0 < self.prop_half_xy <= 0.028
-        assert 0.04 <= self.prop_half_h <= 0.10
+        assert len(self.props) == self.n_props, "one PropSpec per prop"
+        assert len(self.props) <= len(PROP_COLORS), "one identity colour per prop"
+        for spec in self.props:
+            assert 0 < spec.half_xy <= 0.028, (
+                f"{spec.label} ({spec.instance}) is {2 * spec.half_xy * 100:.1f} cm across: "
+                "wider than 5.6 cm does not fit the 7 cm row with the fingers' reach")
+            assert 0.08 <= spec.height <= 0.18, (
+                f"{spec.label} ({spec.instance}) is {spec.height * 100:.1f} cm tall: below "
+                "8 cm the side grasp's wrist (6.7 cm under the hand axis) meets the shelf "
+                "before the finger pads (+-1.3 cm) are on the prop; above 18 cm it is "
+                "taller than any prop this task has been run with")
         assert len(self.row_slots_y) == self.n_props
         ys = list(self.row_slots_y)
         assert ys == sorted(ys), "row slots must run front (south) -> deep"
         for a, b in zip(ys, ys[1:]):
-            assert b - a - self.prop_half_xy > self.finger_reach + 0.005, (
+            assert b - a - self.max_half_xy > self.finger_reach + 0.005, (
                 f"row pitch {b - a:.3f} m leaves "
-                f"{b - a - self.prop_half_xy:.3f} m between the TCP and the next prop's "
+                f"{b - a - self.max_half_xy:.3f} m between the TCP and the next prop's "
                 f"face, and the fingers reach {self.finger_reach:.3f} past the TCP: "
                 "grasping one prop would touch its neighbour and carry it along "
                 "(measured 2026-09-10)"
@@ -234,7 +313,7 @@ class DepthRecallV1Config:
         assert offs == sorted(offs), "slot offsets run west -> east"
         for a, b in zip(offs, offs[1:]):
             assert b - a >= 0.10, (
-                "slots closer than 10 cm: a 4.5 cm prop plus the ~2.8 cm a side the "
+                "slots closer than 10 cm: a 5.2 cm prop plus the ~2.4 cm a side the "
                 "pads need does not fit between them"
             )
             assert b - a >= 2 * self.slot_radius, (
@@ -255,11 +334,13 @@ class DepthRecallV1Config:
         assert self.hold_steps * 2 < self.horizon, (
             "the hold must fit after the work with room to spare"
         )
-        assert 0 < self.slot_xy_tol < 2 * self.prop_half_xy
+        assert 0 < self.slot_xy_tol < 2 * min(p.half_xy for p in self.props)
         assert 0 < self.upright_tilt_deg <= 45.0
-        assert 0 < self.upright_tol < self.prop_half_h / 2
+        assert 0 < self.upright_tol < min(p.height / 2 - p.half_xy for p in self.props), (
+            "a tipped prop's origin must drop by more than the tolerance (standing: half "
+            "its height over the surface; lying: about its footprint half-width)")
         assert self.slot_xy_tol < self.leave_tol <= 0.10
-        assert self.slot_radius > 2 * self.prop_half_xy
+        assert self.slot_radius > 2 * self.max_half_xy
         assert -0.65 < self.place_across < -0.448, "outside the open-sky counter band"
 
     # -- the robot start -------------------------------------------------------
@@ -355,20 +436,35 @@ class DepthRecallV1Task(BaseEnv):
             assert self.cfg.door_hinge in names, (_name, names)
             self._door.append((art, names.index(self.cfg.door_hinge)))
 
-        # Three props. Colour is identity and is FIXED per index; the episode ticket
-        # permutes which row slot each index occupies, which is the answer.
+        # The four props, RoboCasa objects at RoboCasa's scale (`PROPS`). Colour is
+        # identity and is FIXED per index; the episode ticket permutes which row slot each
+        # index occupies, which is the answer. Parked high and apart until the episode
+        # stands them in the row.
         self.props = [
-            actors.build_box(
-                self.scene,
-                half_sizes=[self.cfg.prop_half_xy, self.cfg.prop_half_xy,
-                            self.cfg.prop_half_h],
-                color=list(PROP_COLORS[i]),
-                name=f"prop_{i}",
-                body_type="dynamic",
-                initial_pose=sapien.Pose(p=[2.50, -0.19, 1.60 + 0.15 * i]),
+            load_objaverse_actor(
+                self, spec.category, f"prop_{i}",
+                sapien.Pose(p=[2.50, -0.19, 1.70 + 0.25 * i]),
+                index=objaverse_index(spec.category, spec.instance),
+                body_type="dynamic", recolor=dict(spec.recolor),
             )
-            for i in range(self.cfg.n_props)
+            for i, spec in enumerate(self.cfg.props)
         ]
+        # Origin to mesh bottom, per prop: what a standing prop's origin sits above its
+        # surface. Read in the actor's own frame (no pose needed, so it also works while
+        # GPU sim has no body data yet — SeasonDish's K55). The objaverse origin is the
+        # mesh's centre, NOT its base: spawning by origin would bury half the prop.
+        lifts = []
+        for spec, prop in zip(self.cfg.props, self.props):
+            b = np.asarray(prop.get_first_collision_mesh(to_world_frame=False).bounds)
+            half_xy = float(np.abs(b[:, :2]).max())
+            height = float(b[1, 2] - b[0, 2])
+            # The row's arithmetic (`validate`) was done on the recorded sizes; an asset
+            # that has changed since is a different row.
+            assert abs(half_xy - spec.half_xy) <= 0.001 and abs(height - spec.height) <= 0.001, (
+                f"{spec.instance} measures half_xy {half_xy:.4f} / height {height:.4f} m, "
+                f"PROPS records {spec.half_xy} / {spec.height}: the asset changed")
+            lifts.append(-float(b[0, 2]))
+        self._rest_lift = torch.as_tensor(lifts, dtype=torch.float32, device=self.device)
 
         # One flat pad per prop, in that prop's colour; the episode puts each on a slot.
         self.pads = [
@@ -495,13 +591,14 @@ class DepthRecallV1Task(BaseEnv):
                 mp[:, 2] = mp[:, 2] + PAD_HALF[2] + 0.001
                 pad.set_pose(Pose.create_from_pq(p=mp))
 
-            # Each prop onto its drawn row slot, by MESH BOTTOM: a box's origin sits
-            # `prop_half_h` above its base, and spawning by origin buries it in the shelf.
+            # Each prop onto its drawn row slot, by MESH BOTTOM: its origin sits its own
+            # `_rest_lift` above its base, and spawning by origin buries it in the shelf.
             for i, prop in enumerate(self.props):
                 p = torch.zeros((b, 3))
                 own = row_pts[torch.arange(b), slots[:, i]]
                 p[:, :2] = own[:, :2]
-                p[:, 2] = self.cfg.shelf_top_z + self.cfg.spawn_clearance + self.cfg.prop_half_h
+                p[:, 2] = (self.cfg.shelf_top_z + self.cfg.spawn_clearance
+                           + float(self._rest_lift[i]))
                 prop.set_pose(Pose.create_from_pq(p=p, q=self._yaw_quat(b)))
                 prop.set_linear_velocity(torch.zeros((b, 3), device=self.device))
                 prop.set_angular_velocity(torch.zeros((b, 3), device=self.device))
@@ -554,7 +651,10 @@ class DepthRecallV1Task(BaseEnv):
     # --------------------------------------------------------------- evaluate --
 
     def _prop_state(self):
-        """Positions, tilts, grasp flags and settle flags for the four props."""
+        """Origins, tilts, grasp flags and settle flags for the four props.
+
+        Positions are the actors' ORIGINS, which for these objects are their mesh centres
+        (`PROPS`); a slot test on the origin is a test on the prop's middle."""
         pos = torch.stack([p.pose.p for p in self.props], dim=1)                # (N, k, 3)
         rot = torch.stack([p.pose.to_transformation_matrix()[:, :3, :3]
                            for p in self.props], dim=1)                          # (N, k, 3, 3)
@@ -589,9 +689,11 @@ class DepthRecallV1Task(BaseEnv):
         d_slot = torch.linalg.norm(
             pos[:, :, None, :2] - self._slot_points[:, None, :, :2], dim=-1)     # (N, k, 4)
 
-        shelf_h = torch.abs(pos[:, :, 2] - (cfg.shelf_top_z + cfg.prop_half_h)) <= cfg.upright_tol
+        # Standing on a surface: the origin its own rest lift above it (per prop).
+        lift = self._rest_lift.to(pos.device).unsqueeze(0)                     # (1, k)
+        shelf_h = torch.abs(pos[:, :, 2] - (cfg.shelf_top_z + lift)) <= cfg.upright_tol
         counter_h = torch.abs(
-            pos[:, :, 2] - (self._counter_top_z[:, None] + cfg.prop_half_h)) <= cfg.upright_tol
+            pos[:, :, 2] - (self._counter_top_z[:, None] + lift)) <= cfg.upright_tol
         on_shelf = shelf_h & upright
         on_counter = counter_h & upright
 

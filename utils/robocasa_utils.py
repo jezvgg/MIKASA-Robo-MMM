@@ -307,6 +307,7 @@ def load_objaverse_actor(
     index: int = 0,
     dynamic: bool = True,
     body_type: str | None = None,
+    recolor: dict | None = None,
 ):
     """Load one RoboCasa object at the scale RoboCasa intends it to have.
 
@@ -339,6 +340,13 @@ def load_objaverse_actor(
             sim (`structs/actor.py:344-347`). `load_accessory_actor` takes the same
             argument for the same reason; `MikasaWaterPlants-v0`'s bucket is the
             objaverse-side case.
+        recolor: ``{visual mesh file name: rgba}`` — draw those visual parts in one flat
+            colour (e.g. ``{"model_normalized_0.obj": (0.1, 0.8, 0.1, 1)}``). The part's
+            texture is dropped, because SAPIEN's shaders take the albedo from the texture
+            when there is one and ignore ``base_color`` (vulkan_shader/default/
+            gbuffer.frag); specular, roughness and metallic are kept. Geometry, collision
+            and mass are untouched. A name that matches no visual part raises: a typo
+            would otherwise leave the object in its own colour silently.
 
     Returns:
         The built `Actor`.
@@ -366,6 +374,8 @@ def load_objaverse_actor(
 
     builder = loader.parse(path, package_dir=os.path.dirname(path))["actor_builders"][0]
     builder.initial_pose = initial_pose
+    if recolor:
+        recolor_visuals(builder, recolor)
     # Explicit, the way upstream dispatches the same three (actors/common.py:28-35).
     if body_type == "dynamic":
         return builder.build_dynamic(name=name)
@@ -377,6 +387,32 @@ def load_objaverse_actor(
 
 
 
+
+
+def recolor_visuals(builder, colors: dict) -> None:
+    """Give the builder's visual parts named in ``colors`` (mesh file name -> rgba) a new
+    flat-colour material, before the actor is built. See `load_objaverse_actor`.
+
+    Raises:
+        KeyError: a name in ``colors`` matches none of the builder's visual mesh files.
+    """
+    from sapien.render import RenderMaterial
+
+    seen = set()
+    for rec in builder.visual_records:
+        name = os.path.basename(getattr(rec, "filename", "") or "")
+        if name not in colors:
+            continue
+        old = rec.material
+        new = RenderMaterial(base_color=[float(v) for v in colors[name]])
+        if old is not None:
+            new.specular, new.roughness, new.metallic = old.specular, old.roughness, old.metallic
+        rec.material = new
+        seen.add(name)
+    missing = set(colors) - seen
+    if missing:
+        raise KeyError(f"no visual part {sorted(missing)} in this object; it has "
+                       f"{[os.path.basename(r.filename) for r in builder.visual_records]}")
 
 
 def accessory_mjcf(rel_xml: str) -> str:
