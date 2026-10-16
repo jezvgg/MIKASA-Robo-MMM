@@ -317,9 +317,11 @@ the leaf is watched by state instead of by a collision sweep. Well under the tas
 RETREAT_LIFT_M = float(os.environ.get("MIKASA_RETREAT_LIFT_M", "0.0"))
 
 #: With assisted grasp on, how far the open hand backs straight off a released handle
-#: before the usual retreat, metres (`open_the_door`, at the release). The pads reach 3 cm
-#: past the TCP and the bar is ~1.3 cm thick.
-AG_BAR_BACKOFF_M = float(os.environ.get("MIKASA_AG_BAR_BACKOFF_M", "0.05"))
+#: before the usual retreat, metres (`open_the_door`, at the release). OFF: measured
+#: 2026-10-16 (CabinetSearch seed 0) the release itself leaves the leaf where it was
+#: (1.778 -> 1.757 rad), and 5 cm back along the approach then dragged it to 1.663 —
+#: after a 100 deg pull the approach runs nearly along the leaf, so the pad sweeps the bar.
+AG_BAR_BACKOFF_M = float(os.environ.get("MIKASA_AG_BAR_BACKOFF_M", "0"))
 RETREAT_ALONG_FACE = os.environ.get("MIKASA_RETREAT_ALONG_FACE", "1") == "1"
 """The retreat after the release runs along the LEAF's plane — the hand's own axis
 projected onto it — instead of along the hand's axis as it stands. Measured
