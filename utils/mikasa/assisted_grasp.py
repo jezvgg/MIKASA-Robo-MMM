@@ -155,6 +155,12 @@ def pick_candidate(touch: Sequence[int], ray_hit: Sequence[bool], dist: Sequence
     return i if touch[i] >= min_fingers else None
 
 
+#: Rotation range of a link's hold, rad: as free as PhysX allows (twist below 2 pi,
+#: cone below pi).
+LINK_TWIST = 3.1
+LINK_CONE = 3.0
+
+
 def _entity_id(obj) -> int:
     """Scene id of an actor's entity, or of the entity a link's component lives on."""
     o = obj._objs[0]
@@ -226,6 +232,14 @@ class AssistedGrasp:
                 # The swing axes: a cone limit does not lock them on a drive, a stiff
                 # slerp drive to the identity does.
                 component.set_drive_property_slerp(self.cfg.weld_stiffness, self.cfg.weld_damping)
+            else:
+                # Free rotation for a link. NOT the default: a fresh drive limits twist to
+                # +-90 deg and the cone to 90 deg (SAPIEN 3.0.3), and a CabinetSearch door
+                # pulled ~100 deg open hit that stop and dragged the hand round with it
+                # (measured 2026-10-16: the hand ended facing the leaf at -0.77 instead of
+                # -0.16, and the retreat started in collision).
+                component.set_limit_twist(-LINK_TWIST, LINK_TWIST)
+                component.set_limit_cone(LINK_CONE, LINK_CONE)
             component.set_drive_target(sapien.Pose())
             component.disable()
             self._drives.append(component)
