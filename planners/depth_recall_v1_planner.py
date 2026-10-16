@@ -381,8 +381,13 @@ def dock_at(env, planner, task, x: float, *, stage: str, noise=None):
     return res
 
 
-def torso_to(env, planner, task, rungs, *, label: str):
-    """First rung that plans, reached in `TORSO_CHUNK` steps. Returns (res, rung)."""
+def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
+    """First rung that plans, reached in `TORSO_CHUNK` steps. Returns (res, rung).
+
+    ``sync=False`` skips the planning world's re-read between chunks: required inside
+    `common.touchable`, where an object taken out of the world makes mplib's
+    `update_from_simulation` raise (measured: every episode of a sweep crashed).
+    """
     amap = task.agent.robot.active_joints_map
     j = amap.get("torso_lift_joint")
     ji = int(np.asarray(j.active_index).reshape(-1)[0]) if j is not None else None
@@ -401,7 +406,8 @@ def torso_to(env, planner, task, rungs, *, label: str):
                                    qpos_step=TORSO_LINE_STEP)
             if res == -1:
                 break
-            planner.planner.update_from_simulation()
+            if sync:
+                planner.planner.update_from_simulation()
             if common.stopped_by_horizon(planner):
                 return res, torso
         if res != -1:
@@ -540,7 +546,8 @@ def release_and_clear(env, planner, task, prop, place):
     # (`gripper_link <-> prop`), and once the base no longer backs away from a pad after a
     # counter placement, nothing else separated the two before the next transfer.
     with common.touchable(planner, prop.name):
-        up, torso = torso_to(env, planner, task, SHELF_TORSO_RUNGS, label="torso up to")
+        up, torso = torso_to(env, planner, task, SHELF_TORSO_RUNGS, label="torso up to",
+                             sync=False)
     if up != -1:
         res = up
         if common.stopped_by_horizon(planner):
