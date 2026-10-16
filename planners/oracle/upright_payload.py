@@ -2,7 +2,6 @@
 from contextlib import contextmanager
 from planners.oracle.search_budget import measured
 import math
-import os
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -108,19 +107,6 @@ def upright_wrist_candidates(axis_in_wrist, up_in_parent, previous, limits):
     return sorted(candidates, key=lambda x: float(np.linalg.norm(x - previous)))
 
 
-#: A wrist step over 0.20 rad between two knots of the upright fold is refused as a branch
-#: change. Near the wrist's singular posture the compensating roll turns FAST but still
-#: continuously, and one coarse step cannot tell the two apart: measured 2026-10-17 on
-#: SeasonDish seed 1021, ten loaded-hover candidates were refused this way while the same
-#: geometry planned a few millimetres away. With this on (``MIKASA_UPRIGHT_REFINE``,
-#: default 1) the offending step is re-solved in `UPRIGHT_REFINE_STEPS` sub-steps; it is
-#: kept, with its sub-knots, only if no sub-step moves the wrist over
-#: `UPRIGHT_REFINE_JUMP` — a real branch change stays one large step at any resolution.
-UPRIGHT_REFINE = os.environ.get("MIKASA_UPRIGHT_REFINE", "1") == "1"
-UPRIGHT_REFINE_STEPS = 8
-UPRIGHT_REFINE_JUMP = 0.10
-
-
 @measured
 def upright_path(planner, task, current, goal, hand_object, *, max_tilt_degrees=5., terminal="hover"):
     """Compensate the wrist throughout a monotone fold, then collision-check TOPP."""
@@ -144,53 +130,28 @@ def upright_path(planner, task, current, goal, hand_object, *, max_tilt_degrees=
     count = max(81, int(np.ceil(np.linalg.norm(goal - current) / .02)) + 1)
     # Time progress can curve around fixtures without introducing another pose
     # or reversing the elbow. All candidates preserve the same compact endpoint.
-    def knot(alpha, previous, shoulder_power, elbow_power):
-        """The fold at progress `alpha` with the wrist compensated nearest `previous`, or None."""
-        progress = np.full(len(current), alpha)
-        progress[[fk.indices['shoulder_pan_joint'], fk.indices['shoulder_lift_joint']]] = alpha ** shoulder_power
-        progress[[fk.indices['upperarm_roll_joint'], fk.indices['elbow_flex_joint']]] = alpha ** elbow_power
-        q = current + progress * (goal - current)
-        q[wrist] = 0.
-        wr = fk.matrix(q, 'wrist_roll_link')[:3, :3]
-        hand = fk.matrix(q)[:3, :3]
-        up = (1 - min(1., alpha * 8)) * start_axis + min(1., alpha * 8) * np.array([0., 0., 1.])
-        up /= np.linalg.norm(up)
-        candidates = upright_wrist_candidates(wr.T @ hand @ local_axis, wr.T @ up, previous, limits)
-        if not candidates:
-            return None
-        q[wrist] = candidates[0]
-        return q
-
-    alphas = np.linspace(0., 1., count)
     for shoulder_power, elbow_power in ((1., 1.), (2., 1.)):
         full = [current.copy()]
-        complete = True
-        for before, alpha in zip(alphas[:-1], alphas[1:]):
-            q = knot(alpha, full[-1][wrist], shoulder_power, elbow_power)
-            if q is None:
+        for alpha in np.linspace(0., 1., count)[1:]:
+            progress = np.full(len(current), alpha)
+            progress[[fk.indices['shoulder_pan_joint'], fk.indices['shoulder_lift_joint']]] = alpha ** shoulder_power
+            progress[[fk.indices['upperarm_roll_joint'], fk.indices['elbow_flex_joint']]] = alpha ** elbow_power
+            q = current + progress * (goal - current)
+            q[wrist] = 0.
+            wr = fk.matrix(q, 'wrist_roll_link')[:3, :3]
+            hand = fk.matrix(q)[:3, :3]
+            up = (1 - min(1., alpha * 8)) * start_axis + min(1., alpha * 8) * np.array([0., 0., 1.])
+            up /= np.linalg.norm(up)
+            candidates = upright_wrist_candidates(wr.T @ hand @ local_axis, wr.T @ up, full[-1][wrist], limits)
+            if not candidates:
                 failures.append("wrist_limit_or_unreachable_axis")
-                complete = False
                 break
+            q[wrist] = candidates[0]
             if np.max(np.abs(q[wrist] - full[-1][wrist])) > .20:
-                sub = []
-                if UPRIGHT_REFINE:
-                    previous = full[-1]
-                    for a in np.linspace(before, alpha, UPRIGHT_REFINE_STEPS + 1)[1:]:
-                        r = knot(a, previous[wrist], shoulder_power, elbow_power)
-                        if r is None or np.max(np.abs(r[wrist] - previous[wrist])) > UPRIGHT_REFINE_JUMP:
-                            sub = []
-                            break
-                        sub.append(r)
-                        previous = r
-                if not sub:
-                    failures.append("configuration_jump")
-                    complete = False
-                    break
-                failures.append("fast_wrist_refined")
-                full.extend(sub)
-                continue
+                failures.append("configuration_jump")
+                break
             full.append(q)
-        if not complete:
+        if len(full) != count:
             continue
         full = np.asarray(full)
         with elbow_only(planner, task):

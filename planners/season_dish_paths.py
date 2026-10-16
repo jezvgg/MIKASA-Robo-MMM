@@ -1,6 +1,7 @@
 """Connected horizontal grasp, vertical lift and one compact carry posture."""
 from contextlib import contextmanager
 from collections import Counter
+import os
 import time
 from planners.season_dish_candidates import candidates as grasp_candidates, journal, failure_kind
 from planners.oracle.search_budget import measured
@@ -183,6 +184,23 @@ def chain_contact_path(planner, task, start, knots):
                 acceleration=acc, duration=duration)
 
 
+#: With the IK chain on, a grasp under the ``carry_or_direct`` rule is accepted at once
+#: only if the whole transfer also previews from it: the loaded drive, the hover and the
+#: 165 deg wrist pour, with the roll window the grasp, lift and fold have spent (the
+#: ``complete`` rule's previews), or a direct pour from the station. Measured 2026-10-17
+#: on SeasonDish seed 1021: the chained grasp passed the carry check, and after the lift
+#: every hover's pour was refused by the roll window in both directions on 3 of 4 mplib
+#: streams. A grasp that passes only the old rule is kept as the fallback and used when no
+#: candidate passes the whole preview, so nothing the old rule accepted is lost. At most
+#: `ROUTE_CHECK_MAX` candidates pay the preview (a few seconds each); ``MIKASA_GRASP_ROUTE_CHECK=0``
+#: turns it off.
+ROUTE_CHECK_MAX = 3
+
+
+def route_check_enabled():
+    return ik_chain.enabled() and os.environ.get("MIKASA_GRASP_ROUTE_CHECK", "1") == "1"
+
+
 @measured
 def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
     """Reject grasps whose lift or carry would require changing elbow branch."""
@@ -206,6 +224,8 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
     moves = list(p.move_group_joint_indices)
     other=task.condiment_bottle if obj is task.shaker else task.shaker
     above_m = float(getattr(task,'motion_parameters',{}).get('approach_via_above_m', 0.))
+    route_check = route_check_enabled() and rule == 'carry_or_direct'
+    checked = 0; fallback = None
     for q,grasp,reach,record in candidates:
         candidate_start = time.perf_counter()
         down=None;target=q
@@ -300,6 +320,26 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
                         # suffices; the loaded route is checked after lifting.
                         direct=None if fold is not None else plan_loaded_hover(planner,task,raised,attachment)
                         if direct is not None:fold=direct['approach']
+                        if route_check and checked < ROUTE_CHECK_MAX and fold is not None and direct is None:
+                            # See ROUTE_CHECK_MAX: the complete rule's previews, as a preference.
+                            checked += 1
+                            carry_fold=fold
+                            carried=raised.copy();carried[moves]=fold['position'][-1]
+                            fold_prefix=np.broadcast_to(raised,(len(fold['position']),len(raised))).copy()
+                            fold_prefix[:,moves]=fold['position']
+                            dock=np.asarray(task._bowl_dock_np)[0]
+                            face=np.array([np.cos(dock[2]),np.sin(dock[2]),0.])
+                            with preview_roll_history(planner,fold_prefix):
+                                route=plan_bowl_drive(planner,task,carried,attachment,np.r_[dock[:2],0.],face)
+                            if route is None:
+                                direct=plan_loaded_hover(planner,task,raised,attachment)
+                                if direct is not None:fold=direct['approach']
+                            reasons['grasp route '+str(route is not None or direct is not None)]+=1
+                            if route is None and direct is None:
+                                journal(planner,record,'loaded_continuation','route_preview_refused',height_m=z,
+                                        tried=getattr(planner,'_route_failures',[]))
+                                fold=carry_fold
+                                route='refused'
                 reasons['direct pour '+str(direct is not None)]+=1
                 reasons['upright continuation '+str(fold is not None)]+=1
                 if fold is None:
@@ -312,23 +352,39 @@ def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
             journal(planner,record,'rejected','no_continuation',seconds=time.perf_counter()-candidate_start)
             continue
         up,fold,z,direct,route=continuation
+        refused = isinstance(route, str)
+        if refused:
+            route = None
         all_knots=np.vstack([line['position']]+([down['position']] if down is not None else [])
                             +[contact['position'],up['position'],fold['position']])
         if direct is not None:all_knots=np.vstack([all_knots,direct['pour']['position']])
+        complete_knots=all_knots
         if route is not None:
-            all_knots=np.vstack([all_knots,route['hover']['approach']['position'],route['hover']['pour']['position']])
+            complete_knots=np.vstack([all_knots,route['hover']['approach']['position'],route['hover']['pour']['position']])
+            if not route_check:
+                all_knots=complete_knots
         with elbow_only(planner,task):
             if not p.accepts(all_knots,move_group=True):
                 journal(planner,record,'complete_path','joint_limit',seconds=time.perf_counter()-candidate_start)
                 continue
+            if route_check and route is not None and not p.accepts(complete_knots,move_group=True):
+                refused = True
+        result = dict(approach=line,down=down,reach_pose=reach,above_m=above_m,contact=contact,lift_z=z,grasp_pose=grasp,
+                      contact_knots=knots,
+                      grasp_qpos=closed,carry=fold,direct_pour=direct is not None,
+                      progress_powers=line.get('progress_powers'),
+                      total_joint_travel=float(np.abs(np.diff(all_knots,axis=0)).sum()))
+        if refused:
+            journal(planner,record,'fallback','whole_transfer_preview_refused',seconds=time.perf_counter()-candidate_start)
+            if fallback is None:
+                fallback = result
+            continue
         journal(planner,record,'accepted',seconds=time.perf_counter()-candidate_start,
                 direct_pour=direct is not None,complete_wrist_pour=route is not None or direct is not None)
-        return dict(approach=line,down=down,reach_pose=reach,above_m=above_m,contact=contact,lift_z=z,grasp_pose=grasp,
-                    contact_knots=knots,
-                    grasp_qpos=closed,carry=fold,direct_pour=direct is not None,
-                    progress_powers=line.get('progress_powers'),
-                    total_joint_travel=float(np.abs(np.diff(all_knots,axis=0)).sum()))
-    return None
+        return result
+    if fallback is not None:
+        reasons['grasp route fallback']+=1
+    return fallback
 
 
 def grasp_with_continuation(env,planner,task,obj,grasp,reach):

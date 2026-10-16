@@ -30,15 +30,20 @@ def pour_targets(planner, task, q, hand_object):
     parameters=getattr(task,'motion_parameters',{})
     clearance_reserve=float(parameters.get('pour_preview_clearance_reserve_m',0.))
     wrist_reserve=float(parameters.get('pour_preview_wrist_reserve_rad',0.))
+    reasons = getattr(planner, '_pour_reasons', None)
+    def note(key, delta):
+        if reasons is not None:
+            reasons.append(f"{key}{'+' if delta > 0 else '-'}")
     for delta in tilt_angles(axis, obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body), 165.):
         end = pivot + rotation(axis, delta) @ (obj[:3, 3] - pivot)
-        if (np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius
-                or not task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve):
-            continue
+        if np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius:
+            note('miss_xy', delta); continue
+        if not task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve:
+            note('miss_height', delta); continue
         goal = q.copy(); goal[index] += delta
         reserve=goal.copy();reserve[index]+=np.sign(delta)*wrist_reserve
         if not p.accepts(np.vstack([q,goal,reserve])):
-            continue
+            note('roll_window', delta); continue
         yield goal, reserve
 
 
@@ -158,11 +163,12 @@ def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferr
                                          extra=extra,back=back,spin=spin))
                     continue
                 reached = current.copy(); reached[moves] = path['position'][-1]
+                planner._pour_reasons = []
                 arc = preview_pour(planner, task, reached, hand_object)
                 if arc is not None and p.accepts(np.vstack([path['position'], arc['position'],
                                                            arc['preview_reserve_qpos'][moves]]), move_group=True):
                     return dict(approach=path, pour=arc, hover_extra=extra, hover_back=back, hover_spin=spin, hover_yaw_anchor=math.degrees(yaw_anchor), hover_ik_records=ik_records, hover_goal=goal.tolist())
-                failures.append(dict(stage='wrist_pour',reason='pour_unavailable_or_joint_span',
+                failures.append(dict(stage='wrist_pour',reason='pour:' + ','.join(sorted(set(planner._pour_reasons))) or 'pour_line_refused',
                                      extra=extra,back=back,spin=spin))
     return None
 
