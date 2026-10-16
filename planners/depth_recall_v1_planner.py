@@ -445,8 +445,12 @@ def choose_dock_dx(env, planner, task, row_pts, slot_pts) -> float:
     The scene check is item 1's chain with the base where that dock puts it, on the two
     transfers the doors and the counter decide: the front row prop's shelf grasp walked
     back to its pre-grasp from the work stance (driven in, torso at the shelf rung, the
-    prop out of the world as for the grasp screw), and the far pad's place walked up to
-    the cross 20 cm above it from the dock line (torso at the counter rung).
+    prop out of the world as for the grasp screw), and the far pad's place walked up by
+    the release lift from the dock line (torso at the counter rung) — the arm-only stroke
+    that follows that place. (Not the cross above it: the planner crosses at the shelf
+    torso and lowers the torso, and at the counter rung the arm cannot rise 20 cm over
+    the far pad — measured 2026-10-17, seed 1000, torso 0: both branches walked broke on
+    IK going up 20 cm, both held going up 10 cm, and at torso 0.20 both held 20 cm.)
     """
     p = planner.planner
     sim = _np(task.agent.robot.get_qpos()).reshape(-1).astype(np.float64)
@@ -460,7 +464,7 @@ def choose_dock_dx(env, planner, task, row_pts, slot_pts) -> float:
     z_top = float(_np(task._counter_top_z).reshape(-1)[0])
     place = sapien.Pose(p=[float(far[0]), float(far[1]),
                            z_top + task.cfg.prop_half_h + GRASP_LIFTS[0] + 0.005], q=grasp.q)
-    cross = sapien.Pose(p=np.asarray(place.p) + np.array([0.0, 0.0, 0.20]), q=grasp.q)
+    lifted = sapien.Pose(p=np.asarray(place.p) + np.array([0.0, 0.0, sp.RELEASE_LIFT_RUNGS[0]]), q=grasp.q)
     row_x = float(row_pts[0][0])
     verdicts = []
 
@@ -476,7 +480,7 @@ def choose_dock_dx(env, planner, task, row_pts, slot_pts) -> float:
             shelf = ik_chain.chain_back(ik_chain.mplib_solver(planner, held), deeper, pre,
                                         start_at(x, retr.WORK_DOCK_Y, SHELF_TORSO_RUNGS[0]),
                                         cols=arm, n_hard=16, keep=2)
-        counter = ik_chain.chain_back(ik_chain.mplib_solver(planner, held), place, cross,
+        counter = ik_chain.chain_back(ik_chain.mplib_solver(planner, held), place, lifted,
                                       start_at(x, retr.READY_DOCK_Y, COUNTER_TORSO_RUNGS[0]),
                                       cols=arm, n_hard=16, keep=2) if shelf else []
         verdicts.append(dict(dx=dx, shelf=len(shelf), counter=len(counter)))
