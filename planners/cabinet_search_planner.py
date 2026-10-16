@@ -1213,6 +1213,8 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                    ["torso_lift_joint"] + list(task.agent.controller.controllers["arm"].config.joint_names)},
                   "roll_low", np.round(getattr(planner, "_roll_low", np.zeros(3)), 3).tolist(),
                   "roll_high", np.round(getattr(planner, "_roll_high", np.zeros(3)), 3).tolist(),
+                  "base", np.round(_q[:3], 3).tolist(),
+                  "tcp", np.round(_np(task.agent.tcp.pose.sp.p).reshape(-1)[:3], 3).tolist(),
                   flush=True)
         planner.planner.update_from_simulation()
         # LOOK. W22 (2026-09-02, pixel counts on the ds_fetch rig, cube present

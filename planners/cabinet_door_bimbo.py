@@ -84,6 +84,17 @@ CAP_POS, CAP_ROT, CAP_Q = 0.04, 0.10, 0.08
 W_ROT = 0.5
 ROLL_COST = _f("MIKASA_BD_ROLL_COST", 10.0)
 ROLL_HOLD = _f("MIKASA_BD_ROLL_HOLD", 0.3)
+ARM_HOLD = _f("MIKASA_BD_ARM_HOLD", 0.0)
+"Null-space pull of the NON-roll arm joints toward the grasp configuration, per control (0 = off)."
+LEVER_END = (_f("MIKASA_BD_LEVER_END_X", -1.0), _f("MIKASA_BD_LEVER_END_Y", 0.0))
+"""Where the swing's goal should stand in the base frame when the door reaches its target:
+(forward, left toward the hinge's side of the opening, i.e. mirrored for a leaf that opens
+clockwise). The creep moves it there from the grasp's lever in proportion to the swing.
+A negative forward keeps the grasp's lever all the way (BIMBO's `follow_base` holds a fixed
+point in front of the chest). The shipped arc pull ENDS with its hand at (0.59, 0.46) of
+cab_main's right leaf (W22's pull-end pose (2.504, -1.514, 0.482 rad) and its bar), because
+the held arm yields sideways under the pull; every later stage of the round (the push from
+here, the tuck, the touch-dock drive) was measured from that stance."""
 """The three roll joints (upperarm, forearm, wrist) cost ROLL_COST times more to move, and the
 null space pulls them back toward where the grasp left them at ROLL_HOLD per control. The
 collection solver keeps every roll joint inside one window of width pi - 0.05 over the WHOLE
@@ -198,7 +209,7 @@ class HandServo:
         q = np.asarray(q, dtype=np.float64)
         dp, dr = ds.pose_error(self.pose(q), T_goal)
         meas = q[self.idx]
-        bias = np.where(self.roll, ROLL_HOLD * (self.roll_ref - meas), 0.0)
+        bias = np.where(self.roll, ROLL_HOLD, ARM_HOLD) * (self.roll_ref - meas)
         dq = ds.dls_step(self.jacobian(q), dp, dr, k_pos=K_POS, k_rot=K_ROT, cap_pos=CAP_POS,
                          cap_rot=CAP_ROT, cap_q=CAP_Q, w_rot=W_ROT, joint_cost=self.cost,
                          bias=bias)
@@ -367,10 +378,17 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     f = np.array([np.cos(yaw), np.sin(yaw)])
     l = np.array([-np.sin(yaw), np.cos(yaw)])
     lever = (float((G0[:2, 3] - base_xy) @ f), float((G0[:2, 3] - base_xy) @ l))
+    lever_end = lever if LEVER_END[0] <= 0 else (LEVER_END[0], s * LEVER_END[1])
+
+    def lever_at(sw_now: float) -> tuple:
+        k = float(np.clip((sw_now - rad0) / max(target - rad0, 1e-6), 0.0, 1.0))
+        return (lever[0] + k * (lever_end[0] - lever[0]), lever[1] + k * (lever_end[1] - lever[1]))
     dt = float(planner.base_env.control_timestep)
     say(env, "swing the door (bimbo)", target_rad=round(target, 3), start_rad=round(rad0, 3),
         lead_rate=LEAD_RATE, lead_max=LEAD_MAX, hand_turn=HAND_TURN,
-        lever=[round(v, 3) for v in lever], hinge=[round(float(v), 3) for v in anchor_xy],
+        lever=[round(v, 3) for v in lever], lever_end=[round(v, 3) for v in lever_end],
+        arm_hold=ARM_HOLD, roll_cost=ROLL_COST, roll_hold=ROLL_HOLD,
+        hinge=[round(float(v), 3) for v in anchor_xy],
         sense=int(s), ten_hz=drv.ten_hz)
     sw = rad0
     goal = G0.copy()
@@ -398,7 +416,7 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         _, goal = ds.door_frames(G0, anchor_xy, turn, hand_turn=HAND_TURN * turn)
         q = _qpos(task)
         pvel = (goal[:2, 3] - prev[:2, 3]) / dt
-        v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], pvel, q[:2], float(q[2]), lever,
+        v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], pvel, q[:2], float(q[2]), lever_at(sw),
                                             gain=BASE_GAIN, v_max=BASE_V_MAX, w_max=BASE_W_MAX)
         res, dp, dr, fresh = drv.step(goal, (v, w))
         if fresh:
@@ -418,6 +436,7 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         why=reason, steps=i + 1, perr_max=round(perr_max, 3), rerr_max=round(rerr_max, 3),
         arm_moved=[round(float(v), 3) for v in q_end[servo.idx] - q_arm0],
         base_moved=[round(float(v), 3) for v in q_end[:3] - q_base0],
+        base_end=[round(float(v), 3) for v in q_end[:3]],
         trace="[i, sw, rad, hand, perr, rerr, v, w, a_x, a_y] " + str(trace[-16:]),
         **({"door_tail": [round(v, 3) for v in hist[-20:]]} if reason != "target" else {}))
 
