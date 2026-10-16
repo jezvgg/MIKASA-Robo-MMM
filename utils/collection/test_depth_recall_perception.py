@@ -61,3 +61,31 @@ def test_holding_is_read_from_the_command_and_the_finger_encoders(world):
     _gripper(env, -1.0)                     # shut on nothing: the fingers meet
     assert not belief.fingers_holding()
     _gripper(env, 1.0)
+
+
+def test_closing_box_is_the_space_between_the_pads():
+    """Pure geometry: two pads 10 cm apart along y, overlapping 4 cm along z."""
+    pytest.importorskip("sapien")
+    from planners.depth_recall_v1_perception import closing_box, count_between
+
+    a = ((-0.01, -0.06, -0.03), (0.01, -0.05, 0.03))
+    b = ((-0.01, 0.05, -0.01), (0.01, 0.06, 0.05))
+    lo, hi, axis = closing_box(a, b)
+    assert axis == 1
+    assert np.allclose(lo, [-0.01, -0.05, -0.01]) and np.allclose(hi, [0.01, 0.05, 0.03])
+    G = np.eye(4)
+    G[:3, 3] = [1.0, 2.0, 3.0]
+    pts = np.array([[1.0, 2.0, 3.01],      # between the pads
+                    [1.0, 2.0, 3.04],      # past the shorter pad
+                    [1.0, 2.055, 3.01]])   # inside a pad, not between
+    n, centre = count_between(pts, G, lo, hi, inset=0.003)
+    assert n == 1 and np.allclose(centre, [0.0, 0.0, 0.01])
+
+
+def test_between_pads_refuses_a_hand_with_nothing_in_it(world):
+    """The live check at the rest pose, far from every prop: no prop points, no close."""
+    env, belief, solver = world
+    for i in range(len(env.unwrapped.props)):
+        chk = belief.between_pads(i)
+        assert not chk["ok"] and chk["n"] == 0, chk
+        assert chk["gap_mm"] > 0

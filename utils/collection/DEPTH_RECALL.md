@@ -1,8 +1,15 @@
 # Depth Recall v1 collection
 
 `MikasaDepthRecall-v1` uses four coloured props in a cabinet row. The expert
-removes them onto four shuffled counter slots, keeps the deepest prop, and
-returns the three blockers to their original shelf positions. This profile
+removes each onto the counter pad of its own colour (the episode shuffles which
+counter slot each colour's pad lies on), keeps the deepest prop, and returns the
+three blockers to their original shelf positions.
+
+> **Task changed 2026-10-16 (branch `feat/depth-recall-v1-colored-pads`).** The pads are
+> coloured per prop and 18 cm apart (were all yellow, 12 cm, any free slot). Everything
+> under "Qualified implementation" below was measured on the previous version and does
+> not qualify this one; the validation seed list and source hash are void for it. See
+> [Coloured pads](#coloured-pads-2026-10-16). This profile
 implements the shared [16-point data contract](../DATA_CONTRACT.md) for kitchen 0
 with the unmodified master DSFetch (`4c5c8b3de941565ee2d57b153a10254fe64c2849`).
 
@@ -15,23 +22,25 @@ prerequisites merge, rebase the task changes onto master before merging.
 
 The remembered answer associates each prop's identity with its original depth.
 The initial permutation is seeded; the front prop hides deeper props, which
-become visible as the row is cleared. A separate oracle RNG (`seed + 10007`)
-shuffles counter destinations. After staging, the policy receives no original
+become visible as the row is cleared. Counter destinations are the pads of the
+props' own colours, drawn by the episode RNG after the row permutation and the
+start jitter (so a seed keeps its row and start); they are drawn independently of
+the row order, so the staged layout carries no information about it. After staging, the policy receives no original
 slot labels, target identity or task counters: only three RGBs, 12D proprio and
 the task instruction. Answers and stage metrics remain in debug state / info.
 
-Random expert staging does not prevent an unrestricted policy from encoding
-order in its own placement choices. The 1/6 guessing reference conditions on
+Since 2026-10-16 the pad of each colour is fixed by the episode, so a policy can
+no longer encode the row order in where it stages the props. The 1/6 guessing reference conditions on
 the three blockers and randomly assigns them to their three original slots;
 it is not a universal bound for policies without internal memory. No learned
 memory-performance claim follows from expert feasibility or data qualification.
 
 Every blocker must have left its shelf position and previously stood upright,
-settled and released on a counter slot after a grasp. A sideways shelf nudge
-cannot count as staging. Wrong settled assignments, returning the deepest prop,
-or two props in one row slot latch an error. Final completion requires all three
-blockers in their own slots and the target standing on a counter slot for 15
-control steps. `success` describes the current final arrangement;
+settled and released on its OWN pad after a grasp. A sideways shelf nudge
+cannot count as staging. A prop released on another colour's pad (`wrong_pad`),
+wrong settled assignments, returning the deepest prop, or two props in one row
+slot latch an error. Final completion requires all three blockers in their own
+slots and the target standing on its own pad for 15 control steps. `success` describes the current final arrangement;
 `success_once` separately remembers whether completion happened earlier.
 
 The scene restores the private v1 staging predicate, checkpoints it, resets
@@ -42,9 +51,9 @@ URDF/SRDF, controllers, cameras and meshes are unchanged.
 ## Geometry and motion
 
 The four props measure 4.5 × 4.5 × 12 cm. The shelf row has 7 cm pitch; the counter
-slots retain 12 cm pitch across a 36 cm span west of the row. Their 7.6 cm visual
-pads are collision-free markings on the existing physical countertop, not
-separate platforms. Increasing a marker would not add support surface or grasp
+slots have 18 cm pitch across a 54 cm span west of the row, at y = -0.56 (see
+[Coloured pads](#coloured-pads-2026-10-16)). Their 9 cm pads, one per prop colour, are
+collision-free markings on the existing physical countertop, not separate platforms. Increasing a marker would not add support surface or grasp
 clearance. The initial 16-case development sweep staged all four props in every
 episode; its failures occurred on the return into the cabinet, not from a lack
 of counter space. No countertop geometry was enlarged on that evidence.

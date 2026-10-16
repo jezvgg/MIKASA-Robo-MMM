@@ -16,6 +16,10 @@ docked at the object's own x, the arm reaches sideways far enough that NO transf
 carries a prop while the base moves (measured 2026-09-10: onto the counter 36 cm toward
 smaller x, into the shelf 36 cm toward larger x, both 5/5).
 
+**Where each prop is staged** is the pad of its own colour: read off the task in simulator
+mode (scenery, like the slot points), by colour from the head cameras in perception mode
+(`PropBelief.identify_pads`).
+
 **Where the answer is read, and it is one line.** The extraction order is taken from the
 props' own poses — front first, which physics enforces anyway — so it needs no
 privileged information. The only privileged read is the RESTORE assignment: which staged
@@ -105,6 +109,28 @@ UNSHELVE_DZ = retr.UNSHELVE_DZ
 #: up AND back moves the fingers off the neighbour's face from the first knot.
 UNSHELVE_BACK = float(os.environ.get("MIKASA_DR1_UNSHELVE_BACK", "0.06"))
 
+#: How far in front of the cabinet's face the carried prop's front stands, at least,
+#: before it crosses to its pad, metres.
+CARRY_CLEAR = 0.05
+
+
+def carry_out(base_y: float, prop_y: float, face_y: float, half: float) -> float:
+    """How far the extraction backs the base off with the prop in the hand, metres.
+
+    Back to the dock line, the stand the restore later takes the prop off its pad from, so
+    the place and that grasp are made from one stand; further only if the prop's front
+    would not yet stand `CARRY_CLEAR` in front of the cabinet's face (the deepest row
+    slot: 2 cm more). ``base_y`` and ``prop_y`` are where they are now, after the unshelve.
+
+    The old rule backed off until the prop stood over the pads' line, which leaves the
+    base 0.96 m behind a pad for a prop from the deepest slot. Measured 2026-10-16 with
+    cuRobo's scan of the planner's own poses (`scripts/dr_pad_reach.py`, every grasp lift,
+    the row's +-4 cm jitter, self-collision, hits re-checked in float64): from there the
+    place reaches 44 cm west of the row; from the dock line 62 cm.
+    """
+    return max(base_y - retr.READY_DOCK_Y, prop_y + half - (face_y - CARRY_CLEAR))
+
+
 #: Where the TCP sits above a prop's mid-height, tried in order.
 #:
 #: The retrieval family's single `GRASP_LIFT` (0.02) exists to keep `wrist_flex_link`,
@@ -125,6 +151,17 @@ GRASP_LIFTS = tuple(
 #: which is 21 cm over the tops of the props already standing on the slots. Going lower
 #: buys reach and starts sweeping them.
 CROSS_TORSO_RUNGS = (None, 0.30, 0.20)
+
+#: The cross's rungs, in order: (torso, how far the HAND goes down from the carry
+#: height). A torso rung lowers the hand WITH the shoulder, so it changes what the
+#: carried prop can hit but not what the arm can reach; a hand drop lowers the hand
+#: UNDER the shoulder, and that is what the reach to a far pad needs. Measured
+#: 2026-10-16, seed 1000 with the pads 54 cm west: every torso rung was `IK Failed`
+#: for the cross, while cuRobo's scan (torso free, so it kept the torso up) reached the
+#: same heights. The drops stop at 0.20, the old floor: the carried prop's base still
+#: rides 21 cm over the props standing on the other pads. The torso rungs stay as the
+#: last resort, for a cross that a drop makes collide.
+CROSS_RUNGS = ((None, 0.0), (None, 0.10), (None, 0.20)) + tuple((t, 0.0) for t in CROSS_TORSO_RUNGS[1:])
 
 #: Joint-space step the TORSO lines are planned with, metres.
 #:
@@ -160,6 +197,18 @@ TORSO_CHUNK = float(os.environ.get("MIKASA_DR1_TORSO_CHUNK", "0.08"))
 #: stops planning.
 CROSS_SAFE_TORSO = tuple(
     float(v) for v in os.environ.get("MIKASA_DR1_CROSS_TORSO", "0.15,0.20,0.10,0.25").split(",")
+)
+
+#: Hand heights over the counter top for the RESTORE's cross, tried first, with the
+#: torso left where the previous transfer put it (up). `CROSS_SAFE_TORSO` lowers the
+#: torso and the hand rides down with it, so the hand stays as high over the SHOULDER as
+#: it was, and a pad 54 cm west is then out of reach: measured 2026-10-16, seed 1000,
+#: `IK Failed` at all four torso rungs, after which the approach "from where we are"
+#: tipped the prop over and grasped it lying (tilt 89.8). A hand 25-35 cm over the
+#: counter is under the closed left door's panel (z >= 1.39) and, with the wrist hanging
+#: 6.7 cm under it, still over the props standing on the other pads (tops at +12 cm).
+RESTORE_CROSS_Z = tuple(
+    float(v) for v in os.environ.get("MIKASA_DR1_RESTORE_CROSS_Z", "0.30,0.25,0.35").split(",")
 )
 
 #: Roll joints, by name. Their travel is what `roll_rank` minimises.
@@ -397,6 +446,15 @@ def grasp_ladder(env, planner, task, prop, *, where: str, lift: float = None):
         if res == -1:
             planner.planner.update_from_simulation()
             continue
+        if _BELIEF is not None:
+            # Close only on something: the prop's own points have to be between the
+            # pads (BIMBO_EvoX's rays-between-the-pads rule, from the cameras). A
+            # close on air is a wasted rung that also nudges the prop.
+            chk = _BELIEF.between_pads(_index(task, prop))
+            say(env, f"{where}: between the pads", prop=prop.name, depth=depth, **chk)
+            if not chk["ok"]:
+                planner.planner.update_from_simulation()
+                continue
         res = planner.close_gripper(t=12)
         if res != -1 and common.stopped_by_horizon(planner):
             return res, False
@@ -569,10 +627,13 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         return res, False
     planner.planner.update_from_simulation()
 
-    # Carry out: the base backs off until the prop stands over the counter band. Loaded,
-    # so the hold is latched (see `_drive_kw`).
+    # Carry out: the base backs off to the dock line (`carry_out`). Loaded, so the hold is
+    # latched (see `_drive_kw`).
     prop_y = float(_np(_seen(prop).pose.p).reshape(-1)[1])
-    back = float(prop_y - float(np.asarray(slot_xyz).reshape(3)[1]))
+    cab = task.cabinets[0]
+    face_y = float(np.asarray(cab.pos)[1] - np.asarray(cab.size)[1] / 2.0)
+    back = carry_out(float(_np(task.agent.base_link.pose.p).reshape(-1)[1]), prop_y, face_y,
+                     float(task.cfg.prop_half_xy))
     say(env, "carry out", distance=round(back, 3))
     res = planner.drive_straight(-back, v=0.10, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
@@ -600,7 +661,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     # the move back onto the slot line was refused on 3 of 10 seeds (6/10 overall).
     slot = np.asarray(slot_xyz, dtype=np.float64).reshape(3)
     crossed = False
-    for torso in CROSS_TORSO_RUNGS:
+    for torso, drop in CROSS_RUNGS:
         if torso is not None:
             lowered = retr.plan_joints(env, planner, task, {"torso_lift_joint": torso},
                                        label=f"torso to {torso} for the cross",
@@ -612,16 +673,16 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
                 return res, False
             planner.planner.update_from_simulation()
         tcp = task.agent.tcp.pose.sp
-        across = sapien.Pose(p=[float(slot[0]), float(slot[1]), float(tcp.p[2])], q=tcp.q)
+        across = sapien.Pose(p=[float(slot[0]), float(slot[1]), float(tcp.p[2]) - drop], q=tcp.q)
         if noise is not None:
             across = noise.pose(f"high counter cross {prop.name}", across)
-        say(env, "across to the slot's column", prop=prop.name, torso=torso,
+        say(env, "across to the slot's column", prop=prop.name, torso=torso, drop=drop,
             dx=round(float(slot[0]) - float(tcp.p[0]), 3))
         # A joint LINE to the nearest IK branch, not a screw: this is the longest
         # Cartesian stroke of the episode and `plan_screw` is a least-norm Jacobian walk
         # that spreads it over every joint, which is the arm rotation the owner saw.
         res = _ready_by_line(env, planner, task, across, drive=0.0, grasp=across,
-                                 label=f"across to the slot ({prop.name}, torso {torso})",
+                                 label=f"across to the slot ({prop.name}, torso {torso}, drop {drop})",
                                  slack=(0.0, 0.0, -0.005), touch_needle=None,
                                  rank=roll_rank(task))
         if res == -1:
@@ -634,7 +695,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         planner.planner.update_from_simulation()
     if not crossed:
         return fail(env, f"cross to the slot column for {prop.name}",
-                    rungs=list(CROSS_TORSO_RUNGS)), False
+                    rungs=list(CROSS_RUNGS)), False
     if not _grasping(task, prop):
         say(env, f"MISSED: {prop.name} left the gripper crossing to the slot")
         return res, False
@@ -689,8 +750,11 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
             source="fit" if fit.get("accepted") else "cluster" if "coarse_xy" in fit
             else "release")
     p0 = _np(_seen(prop).pose.p).reshape(-1)[:3]
+    z0 = float(_np(task._counter_top_z).reshape(-1)[0])
     moved = -1
-    for torso in tuple(CROSS_SAFE_TORSO) + (None,):
+    rungs = ([(None, z0 + dz) for dz in RESTORE_CROSS_Z]
+             + [(t, None) for t in CROSS_SAFE_TORSO] + [(None, None)])
+    for torso, hand_z in rungs:
         if torso is not None:
             lowered = retr.plan_joints(env, planner, task, {"torso_lift_joint": torso},
                                        label=f"torso to {torso} for the cross",
@@ -702,14 +766,15 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
                 return res, False
             planner.planner.update_from_simulation()
         tcp0 = task.agent.tcp.pose.sp
-        over = sapien.Pose(p=[float(p0[0]), float(tcp0.p[1]), float(tcp0.p[2])], q=tcp0.q)
+        z = float(tcp0.p[2]) if hand_z is None else hand_z
+        over = sapien.Pose(p=[float(p0[0]), float(tcp0.p[1]), z], q=tcp0.q)
         if noise is not None:
             over = noise.pose(f"counter approach {prop.name}", over, (True, False, True))
         say(env, "across to the prop's column", prop=prop.name, torso=torso,
             dx=round(float(p0[0]) - float(tcp0.p[0]), 3),
-            tcp_z=round(float(tcp0.p[2]), 3))
+            tcp_z=round(float(tcp0.p[2]), 3), to_z=round(z, 3))
         moved = _ready_by_line(env, planner, task, over, drive=0.0, grasp=over,
-                                   label=f"across to {prop.name}'s column (torso {torso})",
+                                   label=f"across to {prop.name}'s column (torso {torso}, z {round(z, 3)})",
                                    slack=(0.0, 0.0, -0.005), touch_needle=None,
                                    rank=roll_rank(task))
         if moved == -1:
@@ -1007,7 +1072,10 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         return fail(env, "dock at the row")
 
     # --- take the row apart, front first (read off the poses, not the answer) ---
-    free = list(range(4))
+    # Each prop goes onto its own colour's pad. Simulator mode reads which slot that is
+    # off the task; perception mode reads the pads' colours after the row is calibrated.
+    pad_of = (None if _BELIEF is not None else
+              {i: int(k) for i, k in enumerate(_np(task.pad_slots).reshape(-1, len(props))[0])})
     staged = {}
     # Simulator mode keeps its original rule exactly: one ordering read at the start.
     # Perception mode orders by what it sees, below; no true pose enters.
@@ -1042,6 +1110,17 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                     if res == -1 or common.stopped_by_horizon(planner):
                         return res
                 _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts, trust_anchor_x=False)
+            if pad_of is None:
+                res = gaze(slot_pts, .35)
+                if res == -1 or common.stopped_by_horizon(planner):
+                    return res
+                pad_of = _BELIEF.identify_pads(slot_pts)
+                if pad_of is None:
+                    return fail(env, "read the pads' colours")
+                res = gaze(row_pts, -.20)
+                if res == -1 or common.stopped_by_horizon(planner):
+                    return res
+                _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts, trust_anchor_x=False)
             seen = [i for i in remaining if _BELIEF.has(i)]
             if not seen:
                 return fail(env, "perceive the row", remaining=[props[i].name for i in remaining])
@@ -1056,8 +1135,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                             seen_slot=slot_seen, front_slot=front)
             say(env, "front-most seen", prop=props[prop_i].name, row_slot=slot_seen)
         remaining.remove(prop_i)
-        slot_k = int(rng.choice(free))
-        free.remove(slot_k)
+        slot_k = int(pad_of[prop_i])
         staged[prop_i] = slot_k
         say(env, "extract", prop=props[prop_i].name, to_slot=slot_k,
             where={q.name: [round(float(v), 3) for v in _np(q.pose.p).reshape(-1)[:3]]
@@ -1092,7 +1170,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
             props=[round(float(v), 1) for v in _np(info["prop_tilt_deg"]).reshape(-1)])
     say(env, "episode over", success=ok,
         restored=_np(info["restored"]).reshape(-1).tolist(),
-        target_on_a_slot=_b(info, "target_on_a_slot"),
+        target_on_its_pad=_b(info, "target_on_its_pad"),
+        wrong_pad=_b(info, "wrong_pad"),
         wrong_assign=_b(info, "wrong_assign"),
         target_returned=_b(info, "target_returned"),
         two_in_slot=_b(info, "two_in_slot"),
@@ -1121,15 +1200,26 @@ if __name__ == "__main__":
                     help="IK restarts: mplib's random draws, or a fixed table (robots/fetch/ik_backend.py)")
     ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None,
                     help="IK proposals from mplib alone, or from cuRobo (needs MIKASA_CUROBO_PY)")
+    ap.add_argument("--video-dir", default="videos/depth_recall_v1",
+                    help="where the render camera's clip goes (unless --no-video)")
     args = ap.parse_args()
     for flag, var in ((args.ik_starts, "MIKASA_IK_STARTS"), (args.ik_backend, "MIKASA_IK_BACKEND")):
         if flag is not None:
             os.environ[var] = flag
     e = gym.make("MikasaDepthRecall-v1", num_envs=1, robot_uids="ds_fetch",
                  control_mode="pd_joint_pos", obs_mode="state", sim_backend="cpu",
-                 assisted_grasp=args.assisted_grasp)
+                 assisted_grasp=args.assisted_grasp,
+                 render_mode=None if args.no_video else "rgb_array")
+    if not args.no_video:
+        from mani_skill.utils.wrappers.record import RecordEpisode
+
+        e = RecordEpisode(e, args.video_dir, save_trajectory=False, save_video=True,
+                          video_fps=30, max_steps_per_video=None)
     out = solve(e, seed=args.seed, blind=args.blind, perception=args.perception)
     print("no_plan" if isinstance(out, int) else f"success={_b(out[-1], 'success')}")
+    if not args.no_video:
+        e.flush_video(name=f"seed{args.seed}_{args.perception}"
+                           f"{'_ag' if args.assisted_grasp else ''}{'_blind' if args.blind else ''}")
     ag = getattr(e.unwrapped, "_ag", None)
     if ag is not None:
         kinds = [k for _, k, _ in ag.events]

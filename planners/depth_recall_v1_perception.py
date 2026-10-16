@@ -25,7 +25,12 @@ observation-only planners work:
   hand at the transform frozen at the grasp, never re-read from the simulator. This is
   BIMBO_EvoX's fair rule: an offline map of static geometry plus the objects as seen;
 * **holding is felt, not read**: `fingers_holding` is the finger encoders — both fingers
-  stopped apart while the gripper is commanded closed — not contact forces.
+  stopped apart while the gripper is commanded closed — not contact forces;
+* **the pads are read by colour**: which counter slot holds which prop's pad is the
+  majority hue of the flat band just over the counter at each slot (`identify_pads`);
+* **close only on something**: before the fingers close, the prop's own points must lie
+  in the volume between the finger pads (`between_pads`) — BIMBO_EvoX's assisted-grasp
+  rule (rays cast between the pads must hit the object) made from the cameras.
 
 What is still read from the simulator: the static scene map above (fixtures, their
 footprints and heights, the props' known size). Truth also goes into the LOGS
@@ -41,6 +46,11 @@ from utils.mikasa import point_cloud as pc
 
 BASE_CAMS = ("left_base_camera_link", "right_base_camera_link")
 HAND_CAM = "fetch_hand"
+FINGERS = ("l_gripper_finger_link", "r_gripper_finger_link")
+
+#: Points of the prop's colour that must lie between the open finger pads before a
+#: close. Seen by three cameras a 4.5 cm prop face between the pads gives hundreds.
+PAD_MIN_POINTS = 15
 
 
 class _BeliefPose:
@@ -92,6 +102,8 @@ class PropBelief:
         self.looks = []              # per look: where, cams, per-prop outcome + audit
         self.row_dx = None           # the row's measured sideways shift, once calibrated
         self.slot_pts = None         # counter slot points the planner uses (map + row_dx)
+        self.pad_of = None           # prop index -> counter slot of its pad, once read
+        self.checks = []             # per between-pads check: (prop index, points, ok)
 
     # --------------------------------------------------------------- regions --
 
@@ -331,11 +343,130 @@ class PropBelief:
         gaps = [float(q[names.index(n)]) for n in ("r_gripper_finger_joint", "l_gripper_finger_joint")]
         return all(lo < g < hi for g in gaps)
 
+    # -------------------------------------------------------------- pads --
+
+    def identify_pads(self, slot_pts, cams=BASE_CAMS, radius: float = 0.035,
+                      min_points: int = 10):
+        """{prop index: counter slot} from the pads' colours, or None if not all read.
+
+        The flat band 3 mm under to 1 cm over the counter top, within `radius` of each
+        slot point (less than the pad's half width, so only the pad's own top), voted by
+        hue against the props' palette. All pads must be read, each colour once.
+        """
+        cloud = pc.capture(self.task, cams)
+        lo, hi, z0 = self._region("counter")
+        flat = pc.band(cloud.points, lo, hi, z0 - 0.003, z0 + 0.010)
+        pts, rgb = cloud.points[flat], cloud.rgb[flat]
+        slots = np.asarray(slot_pts, dtype=np.float64)
+        near = np.linalg.norm(pts[:, None, :2] - slots[None, :, :2], axis=2) <= radius
+        keep = near.any(axis=1)
+        labels = pc.hue_labels(rgb[keep], self.colors)
+        near = near[keep]
+        found, votes = {}, {}
+        for k in range(len(slots)):
+            lab = labels[near[:, k] & (labels >= 0)]
+            counts = np.bincount(lab, minlength=len(self.colors))
+            votes[k] = counts.tolist()
+            if counts.max() >= min_points:
+                found[k] = int(counts.argmax())
+        n = self.cfg.n_props
+        ok = len(set(found.values())) == len(found) and set(found.values()) == set(range(n))
+        pad_of = {c: k for k, c in found.items()} if ok else None
+        # Truth, for the LOG only.
+        truth = np.asarray(self.task.pad_slots.cpu() if hasattr(self.task.pad_slots, "cpu")
+                           else self.task.pad_slots).reshape(-1, n)[0]
+        self.say("pads", ok=ok, slots={k: self.task.props[c].name for k, c in found.items()},
+                 votes=votes, right=None if pad_of is None else
+                 all(int(truth[c]) == pad_of[c] for c in range(n)))
+        self.pad_of = pad_of
+        return pad_of
+
+    # ----------------------------------------------------- grasp volume --
+
+    def _closing_volume(self):
+        """(lo, hi, closing axis, gripper_link 4x4) of the box between the open finger
+        pads, in gripper_link's frame.
+
+        From the fingers' own collision boxes at this moment: along the axis the two
+        fingers are apart on, from one inner face to the other; along the other two,
+        where both pads overlap.
+        """
+        from mani_skill.utils.geometry.trimesh_utils import get_component_meshes
+
+        links = {l.name: l for l in self.task.agent.robot.get_links()}
+        grip = next(l for n, l in links.items() if n.endswith("gripper_link") and "finger" not in n)
+        G = grip.pose.sp.to_transformation_matrix()
+        boxes = []
+        for name in FINGERS:
+            link = next(l for n, l in links.items() if n.endswith(name))
+            v = np.concatenate([np.asarray(m.vertices) for m in get_component_meshes(link._objs[0])])
+            T = np.linalg.inv(G) @ link.pose.sp.to_transformation_matrix()
+            local = v @ T[:3, :3].T + T[:3, 3]
+            boxes.append((local.min(axis=0), local.max(axis=0)))
+        return closing_box(boxes[0], boxes[1]) + (G,)
+
+    def between_pads(self, i: int, cams=(HAND_CAM,) + BASE_CAMS,
+                     min_points: int = PAD_MIN_POINTS, inset: float = 0.003) -> dict:
+        """Are prop ``i``'s own points between the open finger pads? Ask before a close.
+
+        BIMBO_EvoX casts rays from one pad to the other and needs the object to cut them.
+        No camera sees that band: the hand stands in front of it (measured 2026-10-16,
+        seed 1000: 600 prop points within 20 cm of the hand, none in the pads' own
+        band). The prop is a rigid upright prism, so the test is the one the rays make,
+        taken over its whole height: points of its colour between the pads' inner faces
+        (closing axis) and within the pads' length (approach axis), at any height the
+        prop has (the remaining axis, extended by the prop's height both ways). A close
+        on air, or a hand that stopped short of the prop, counts none.
+        """
+        lo, hi, axis, G = self._closing_volume()
+        # gripper_link's z is the approach (`build_grasp_pose`); of the other two, the one
+        # that is not the closing axis runs along the prop's height.
+        up = next((k for k in range(3) if k not in (axis, 2)), None)
+        lo, hi = lo.copy(), hi.copy()
+        H = 2 * self.cfg.prop_half_h
+        if up is not None:
+            lo[up], hi[up] = lo[up] - H, hi[up] + H
+        cloud = pc.capture(self.task, cams)
+        reach = np.linalg.norm(cloud.points - G[:3, 3], axis=1) <= 0.25
+        mine = cloud.points[reach][pc.hue_labels(cloud.rgb[reach], self.colors) == i]
+        n, centre = count_between(mine, G, lo, hi, inset)
+        out = dict(ok=n >= min_points, n=n, near=int(len(mine)),
+                   gap_mm=round(float(hi[axis] - lo[axis]) * 1000, 1))
+        if n:
+            out["off_mm"] = round(float(centre[axis] - (lo[axis] + hi[axis]) / 2) * 1000, 1)
+        self.checks.append((i, n, out["ok"]))
+        return out
+
     def remember_row_slot(self, i: int, row_pts) -> int:
         e = self.est[i]
         d = np.linalg.norm(np.asarray(row_pts)[:, :2] - [e["x"], e["y"]], axis=1)
         self.row_slot[i] = int(np.argmin(d))
         return self.row_slot[i]
+
+
+def closing_box(a, b):
+    """(lo, hi, axis) of the space between two finger boxes, each (lo, hi) in one frame.
+
+    ``axis`` is the one the boxes' centres are furthest apart on; along it the space runs
+    from the nearer box's inner face to the other's, along the other two it is where
+    both boxes overlap.
+    """
+    (a_lo, a_hi), (b_lo, b_hi) = (np.asarray(a[0], float), np.asarray(a[1], float)), \
+        (np.asarray(b[0], float), np.asarray(b[1], float))
+    axis = int(np.argmax(np.abs((a_lo + a_hi) / 2 - (b_lo + b_hi) / 2)))
+    lo, hi = np.maximum(a_lo, b_lo), np.minimum(a_hi, b_hi)
+    first, second = ((a_lo, a_hi), (b_lo, b_hi)) if a_lo[axis] < b_lo[axis] else ((b_lo, b_hi), (a_lo, a_hi))
+    lo[axis], hi[axis] = first[1][axis], second[0][axis]
+    return lo, hi, axis
+
+
+def count_between(points, G, lo, hi, inset: float = 0.0):
+    """(how many world ``points`` lie in the box (lo, hi) of frame ``G`` (4x4), inset on
+    every side, and their mean in that frame or None)."""
+    local = (np.asarray(points, float).reshape(-1, 3) - G[:3, 3]) @ G[:3, :3]
+    inside = np.all((local >= np.asarray(lo) + inset) & (local <= np.asarray(hi) - inset), axis=1)
+    n = int(inside.sum())
+    return n, (local[inside].mean(axis=0) if n else None)
 
 
 def _yaw_quat(yaw: float):

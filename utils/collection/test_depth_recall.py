@@ -1,4 +1,4 @@
-"""Behavioral checks for staging, remembered assignment and final completion."""
+"""Behavioral checks for staging on the props' own pads, remembered assignment and final completion."""
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +11,9 @@ def world():
     cfg = DepthRecallV1Config()
     row = torch.tensor([[[2.5, y, cfg.shelf_top_z] for y in cfg.row_slots_y]])
     slots = torch.tensor([[[2.5+x, cfg.place_across, .92] for x in cfg.slot_x_offsets]])
+    # Pads shuffled against the props, so "own pad" and "slot i" differ for every prop.
     task = SimpleNamespace(cfg=cfg, num_envs=1, original_slots=torch.tensor([[0, 1, 2, 3]]),
+        pad_slots=torch.tensor([[2, 0, 3, 1]]), wrong_pad=torch.tensor([False]),
         _row_points=row, _slot_points=slots, _counter_top_z=torch.tensor([.92]),
         elapsed_steps=torch.tensor([0]), last_eval_step=torch.tensor([-1]),
         arrangement_hold=torch.tensor([0], dtype=torch.int32))
@@ -34,9 +36,14 @@ def evaluate(task, advance=True):
     return DepthRecallV1Task.evaluate(task)
 
 
+def own_pads(task):
+    """Where each prop's own pad is: (1, 4, 3), prop order."""
+    return task._slot_points[:, task.pad_slots[0]].clone()
+
+
 def stage_all(task):
     task.was_lifted[:] = True
-    task.pos = task._slot_points.clone()
+    task.pos = own_pads(task)
     task.pos[:, :, 2] += task.cfg.prop_half_h
     result = evaluate(task)
     assert result['staged'].all()
@@ -66,13 +73,13 @@ def test_reset_arrangement_is_not_a_completed_episode():
 def test_target_alone_and_shelf_nudges_do_not_count_as_clearing():
     task = world()
     task.pos[:, :3, 0] += .08
-    task.pos[:, 3] = task._slot_points[:, 3]
+    task.pos[:, 3] = own_pads(task)[:, 3]
     task.pos[:, 3, 2] += task.cfg.prop_half_h
     task.was_lifted[:] = True
     evaluate(task)
     restore_blockers(task)
     result = hold(task)
-    assert result['all_left'].item() and result['target_on_a_slot'].item()
+    assert result['all_left'].item() and result['target_on_its_pad'].item()
     assert not result['all_restored'].item() and not result['success'].item()
     assert not result['staged'][0, :3].any()
 
@@ -128,13 +135,46 @@ def test_two_released_props_in_one_row_slot_fail():
 def test_counter_staging_requires_released_settled_upright_props(invalid):
     task = world()
     task.was_lifted[:] = True
-    task.pos = task._slot_points.clone()
+    task.pos = own_pads(task)
     task.pos[:, :, 2] += task.cfg.prop_half_h
     if invalid == 'held': task.grasped[:] = True
     if invalid == 'moving': task.settled[:] = False
     if invalid == 'tilted': task.tilt[:] = .6
     if invalid == 'wrong_height': task.pos[:, :, 2] += .2
     assert not evaluate(task)['staged'].any()
+
+
+def test_a_prop_released_on_another_colours_pad_voids_the_episode():
+    task = world()
+    task.was_lifted[:] = True
+    task.pos = task._slot_points.clone()            # slot k, not each prop's own pad
+    task.pos[:, :, 2] += task.cfg.prop_half_h
+    result = evaluate(task)
+    assert result['wrong_pad'].item()
+    assert not result['staged'].any() and not result['on_own_pad'].any()
+    stage_all(task)                                  # moved onto the right pads afterwards
+    restore_blockers(task)
+    result = hold(task)
+    assert result['wrong_pad'].item() and not result['success'].item()
+
+
+def test_target_on_another_pad_is_not_success():
+    task = world()
+    stage_all(task)
+    restore_blockers(task)
+    task.wrong_pad[:] = False
+    task.pos[:, 3] = task._slot_points[:, 0]         # prop 3's pad is slot 1; slot 0 is prop 1's
+    task.pos[:, 3, 2] += task.cfg.prop_half_h
+    result = hold(task)
+    assert result['target_on_a_slot'].item() and not result['target_on_its_pad'].item()
+    assert not result['success'].item()
+
+
+def test_pads_are_one_per_prop_and_far_enough_apart():
+    cfg = DepthRecallV1Config()
+    offs = list(cfg.slot_x_offsets)
+    assert min(b - a for a, b in zip(offs, offs[1:])) >= 2 * cfg.slot_radius
+    assert cfg.n_props <= len(offs)
 
 
 def test_knocking_a_prop_over_after_success_invalidates_final_success():
