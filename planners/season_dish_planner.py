@@ -1580,6 +1580,8 @@ def parse_args(argv=None):
         action="store_true",
         help="arm B of the control experiment: ignore the cue, take a uniformly random condiment (seeded)",
     )
+    parser.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None,
+                        help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
     parser.add_argument("--assisted-grasp", action="store_true",
                         help="weld the picked object to the hand by OmniGibson's rule (utils/mikasa/assisted_grasp.py; changes the physics)")
     return parser.parse_args(argv)
@@ -1587,6 +1589,8 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.ik_backend is not None:
+        os.environ["MIKASA_IK_BACKEND"] = args.ik_backend
 
     env = gym.make(
         "MikasaSeasonDish-v0",

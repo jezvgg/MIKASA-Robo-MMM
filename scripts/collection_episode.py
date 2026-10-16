@@ -22,7 +22,12 @@ def main():
     ap.add_argument("task", choices=("season_dish", "same_drawer", "cabinet_search"))
     ap.add_argument("seed", type=int)
     ap.add_argument("--assisted-grasp", action="store_true")
+    ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None, help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
     args = ap.parse_args()
+    if args.ik_backend is not None:
+        import os
+
+        os.environ["MIKASA_IK_BACKEND"] = args.ik_backend
 
     import gymnasium as gym
 
@@ -56,12 +61,18 @@ def main():
         info = base.get_info()
         success = verdict == "success" and bool(info["success"].reshape(-1)[0])
         print(f"collection_episode task={args.task} seed={seed} assisted_grasp={args.assisted_grasp} "
+              f"ik_backend={args.ik_backend or 'mplib'} "
               f"verdict={verdict} success={success} steps={int(base.elapsed_steps.reshape(-1)[0])}", flush=True)
         ag = base._ag
         if ag is not None:
             kinds = [k for _, k, _ in ag.events]
             print(f"assisted_grasp establish={kinds.count('establish')} release={kinds.count('release')} "
                   f"events={ag.events}", flush=True)
+        if (args.ik_backend or "mplib") == "curobo":
+            from robots.fetch import curobo_client
+
+            print(f"curobo calls={curobo_client.STATS['calls']} server_ms={curobo_client.STATS['server_ms']:.0f}",
+                  flush=True)
     finally:
         env.close()
 
