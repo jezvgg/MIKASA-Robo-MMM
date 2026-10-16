@@ -468,6 +468,14 @@ class DepthRecallV1Task(BaseEnv):
                     for shape in body.get_collision_shapes():
                         shape.set_patch_radius(_pr)
                         shape.set_min_patch_radius(_pr)
+        # Diagnostic only: the props' collision shapes' contact offset, metres (PhysX
+        # generates contacts within the sum of two shapes' offsets; the scene's is 0.02).
+        _co = float(os.environ.get("MIKASA_DR1_CONTACT_OFFSET", "0"))
+        if _co > 0:
+            for prop in self.props:
+                for body in prop._bodies:
+                    for shape in body.get_collision_shapes():
+                        shape.set_contact_offset(_co)
         # Origin to mesh bottom, per prop: what a standing prop's origin sits above its
         # surface. Read in the actor's own frame (no pose needed, so it also works while
         # GPU sim has no body data yet — SeasonDish's K55). The objaverse origin is the
