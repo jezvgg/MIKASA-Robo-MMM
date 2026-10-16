@@ -287,6 +287,15 @@ wall clock is ~30 % longer, which is planning, not motion: ~4.8 refused rungs pe
 episode (the far pad's first extraction rung always, the restore's hand-height rungs for
 near pads) before the one that plans.
 
+**`db43115`: rungs ordered by distance, refused re-dock survivable.** Far pads (more than
+45 cm west of the base) start both crosses with the hand-under-the-shoulder rungs, nearer
+ones with the torso rungs; a re-dock refused for a shift up to 2 cm works from the first
+dock. Seeds 1000-1052 by state **53/53**, 1000-1049 by camera **50/50** (the sweep was
+stopped there, on the owner's word, to free the machine); refused IK attempts per episode
+**0.00** (4.7 on the same seeds before); steps p50 3734 / 3879 (3716 / 3834 before: the
+near pads' torso rung adds a short ride). Seed 3011 by camera, the one miss of the 200
+fresh seeds, now succeeds through the re-dock fallback.
+
 ## Assisted grasp (experimental, off by default)
 
 `MikasaDepthRecall-v1` accepts `assisted_grasp=True`. The prop is then welded to the
