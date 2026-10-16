@@ -89,3 +89,18 @@ def test_between_pads_refuses_a_hand_with_nothing_in_it(world):
         chk = belief.between_pads(i)
         assert not chk["ok"] and chk["n"] == 0, chk
         assert chk["gap_mm"] > 0
+
+
+def test_cross_rungs_are_ordered_by_how_far_the_pad_is():
+    """Far pads start with the hand under the shoulder; near ones keep the first rung that
+    planned there (measured, 68c5f27)."""
+    pytest.importorskip("mplib")
+    from planners import depth_recall_v1_planner as dr
+
+    far, near = dr.extraction_cross_rungs(0.54), dr.extraction_cross_rungs(0.36)
+    assert near == dr.CROSS_RUNGS and far[0] == (None, 0.10)
+    assert sorted(far, key=str) == sorted(near, key=str)          # same rungs, other order
+    z0 = 0.92
+    far_r, near_r = dr.restore_cross_rungs(0.54, z0), dr.restore_cross_rungs(0.18, z0)
+    assert far_r[0] == (None, z0 + dr.RESTORE_CROSS_Z[0]) and near_r[0] == (dr.CROSS_SAFE_TORSO[0], None)
+    assert sorted(far_r, key=str) == sorted(near_r, key=str)

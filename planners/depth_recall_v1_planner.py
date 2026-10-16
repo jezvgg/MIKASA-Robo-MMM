@@ -71,6 +71,12 @@ def _ready_by_line(*args, **kwargs):
 #: row: the dock's own waypoint noise is 5 mm, the row shift up to 4 cm.
 REDOCK_MIN_M = 0.01
 
+#: A refused re-dock is survivable up to this shift: the episode then works from the
+#: first dock. `drive_base` turns the base even for a sideways centimetre, and measured
+#: 2026-10-16 (seed 3011, shift 10.4 mm) that turn's sweep hit the open right door with
+#: the forearm; 2 cm aside is well inside the pads' 18 cm pitch.
+REDOCK_SKIP_MAX_M = 0.02
+
 
 def _grasping(task, prop) -> bool:
     """Is ``prop`` in the hand? Contact forces in simulator mode; in perception mode the
@@ -162,6 +168,34 @@ CROSS_TORSO_RUNGS = (None, 0.30, 0.20)
 #: rides 21 cm over the props standing on the other pads. The torso rungs stay as the
 #: last resort, for a cross that a drop makes collide.
 CROSS_RUNGS = ((None, 0.0), (None, 0.10), (None, 0.20)) + tuple((t, 0.0) for t in CROSS_TORSO_RUNGS[1:])
+
+#: A pad (or a prop on one) further than this west of the base is FAR, and both crosses
+#: to it start with the rungs that lower the hand under the shoulder; nearer ones keep
+#: the order that planned first there. Measured 2026-10-16 on 100 seeds (68c5f27): to the
+#: pad 54 cm west the extraction's first rung (hand where it is) was refused 100/100 and
+#: the 10 cm drop planned 99/100; to the pads at 36 cm and nearer the first rung planned
+#: 100/100. The restore's hand-height rungs planned at 36 and 54 cm and were refused for
+#: the nearer props (3.8 refused rungs per episode, each an IK search and two retries):
+#: that is most of the 30 % the wall clock grew over the 12 cm version.
+FAR_PAD_M = 0.45
+
+
+def extraction_cross_rungs(offset: float) -> tuple:
+    """`CROSS_RUNGS` ordered for a pad ``offset`` metres west of the base."""
+    if offset <= FAR_PAD_M:
+        return CROSS_RUNGS
+    drops = tuple(r for r in CROSS_RUNGS if r[0] is None and r[1] > 0.0)
+    return drops + tuple(r for r in CROSS_RUNGS if r not in drops)
+
+
+def restore_cross_rungs(offset: float, z0: float) -> list:
+    """(torso, hand z) rungs of the restore's cross to a prop ``offset`` metres west of the
+    base, over a counter whose top is at ``z0``: hand heights first when it is far, the
+    torso rungs first when it is near."""
+    heights = [(None, z0 + dz) for dz in RESTORE_CROSS_Z]
+    torsos = [(t, None) for t in CROSS_SAFE_TORSO]
+    first, then = (heights, torsos) if offset > FAR_PAD_M else (torsos, heights)
+    return first + then + [(None, None)]
 
 #: Joint-space step the TORSO lines are planned with, metres.
 #:
@@ -680,7 +714,8 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     # the move back onto the slot line was refused on 3 of 10 seeds (6/10 overall).
     slot = np.asarray(slot_xyz, dtype=np.float64).reshape(3)
     crossed = False
-    for torso, drop in CROSS_RUNGS:
+    base_x = float(_np(task.agent.base_link.pose.p).reshape(-1)[0])
+    for torso, drop in extraction_cross_rungs(base_x - float(slot[0])):
         if torso is not None:
             lowered = retr.plan_joints(env, planner, task, {"torso_lift_joint": torso},
                                        label=f"torso to {torso} for the cross",
@@ -771,9 +806,8 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     p0 = _np(_seen(prop).pose.p).reshape(-1)[:3]
     z0 = float(_np(task._counter_top_z).reshape(-1)[0])
     moved = -1
-    rungs = ([(None, z0 + dz) for dz in RESTORE_CROSS_Z]
-             + [(t, None) for t in CROSS_SAFE_TORSO] + [(None, None)])
-    for torso, hand_z in rungs:
+    base_x = float(_np(task.agent.base_link.pose.p).reshape(-1)[0])
+    for torso, hand_z in restore_cross_rungs(base_x - float(p0[0]), z0):
         if torso is not None:
             lowered = retr.plan_joints(env, planner, task, {"torso_lift_joint": torso},
                                        label=f"torso to {torso} for the cross",
@@ -1129,11 +1163,16 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                                   stage="re-dock at the measured row", noise=noise)
                     if res != -1 and common.stopped_by_horizon(planner):
                         return res
-                    if res == -1:
+                    if res == -1 and abs(_BELIEF.row_dx) > REDOCK_SKIP_MAX_M:
                         return fail(env, "re-dock at the measured row")
-                    res = gaze(row_pts, -.20)
-                    if res == -1 or common.stopped_by_horizon(planner):
-                        return res
+                    if res == -1:
+                        say(env, "re-dock refused; working from the first dock",
+                            dx=round(float(_BELIEF.row_dx), 4))
+                        planner.planner.update_from_simulation()
+                    else:
+                        res = gaze(row_pts, -.20)
+                        if res == -1 or common.stopped_by_horizon(planner):
+                            return res
                 _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts, trust_anchor_x=False)
             if pad_of is None:
                 res = gaze(slot_pts, .35)
