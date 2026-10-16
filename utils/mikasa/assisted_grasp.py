@@ -34,6 +34,7 @@ a task that enables it has to say so wherever its data or scores are reported.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
@@ -355,6 +356,8 @@ class AssistedGrasp:
             self._drives[i].disable()
         step = int(np.asarray(self.env.elapsed_steps).reshape(-1)[0])
         self.events.append((step, kind, self.objects[i].name))
+        if os.environ.get("MIKASA_AG_LOG") == "1":
+            print(f"[assisted_grasp] {kind} {self.objects[i].name} step={step}", flush=True)
 
     def attach(self, i: int) -> None:
         """Weld object ``i`` where it is now, bypassing the rule (tests, scripted setups).
