@@ -197,6 +197,16 @@ def grasp_lifts(task, prop) -> tuple:
 BASE_STILL_M = 0.0005
 BASE_SETTLE_MAX = 20
 
+#: How much further than asked the base goes on a 0.3 m drive into the cabinet at
+#: 0.10 m/s, metres: the drive's own stop (+1-3 mm) and the coast after it (1.1-1.2 cm).
+#: Measured 2026-10-16 (seeds 1000, 1001): 1.15, 1.44 cm. The LOADED drive asks this much
+#: less: the held prop rides over its row slot with the fingertips 0.4-0.9 cm past its
+#: back face, 1.8-2.3 cm short of the next prop in the row, and on seed 1001 the
+#: overshoot put a finger into that prop (11 N) and knocked it and the one behind it
+#: over. The descent that follows is planned after `settle_base` and corrects the
+#: millimetres left either way.
+LOADED_DRIVE_COAST = float(os.environ.get("MIKASA_DR1_LOADED_COAST", "0.013"))
+
 
 def settle_base(planner, task):
     """Idle until the base has stopped, then re-read the planning world. -> the last
@@ -1063,8 +1073,9 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         else:
             say(env, "entry correction refused; driving in as we are")
 
-    say(env, "drive into the cabinet, loaded", distance=round(drive, 3))
-    res = planner.drive_straight(drive, v=0.10, hold_pose=True)
+    say(env, "drive into the cabinet, loaded", distance=round(drive, 3),
+        asked=round(drive - LOADED_DRIVE_COAST, 3))
+    res = planner.drive_straight(drive - LOADED_DRIVE_COAST, v=0.10, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
