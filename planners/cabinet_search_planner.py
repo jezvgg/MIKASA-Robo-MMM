@@ -428,6 +428,36 @@ def fail(env, stage: str, **extra):
 DOOR_MODES = ("bimbo", "arc")
 
 
+#: Metres the base backs off along its own heading before the touch-dock turn, when the
+#: BIMBO door mode would otherwise turn the long way round (`_touch_turn_is_short`).
+TOUCH_BACKOFF_M = float(os.environ.get("MIKASA_CS_TOUCH_BACKOFF_M", "0.15"))
+
+
+def _opening_turn(planner, dock, view) -> float | None:
+    """The opening turn `drive_base` would make toward `dock`, rad, signed; None if every
+    aim is refused. Dry-run of each approach aim in `drive_base`'s own order: the first
+    whose turn plans is the one it executes, and the turn it plans may be the long way
+    round (`base_yaw.sweep_yaw` takes it when the short arc collides)."""
+    yaw_index = list(planner.planner.move_group_joint_indices).index(planner.YAW_JOINT_INDEX)
+    for aim, _rev, _cost in planner.approach_aims(dock, view, reverse_ok=True):
+        if abs(planner._yaw_to(aim)) < 1e-2:
+            return 0.0          # rotate_base_z idles one step here, even on a dry run: skip it
+        plan = planner.rotate_base_z(aim, dry_run=True)
+        if plan == -1 or not isinstance(plan, dict) or "position" not in plan:
+            continue
+        pos = np.asarray(plan["position"])
+        if len(pos) == 0:
+            return 0.0
+        return float(pos[-1][yaw_index] - pos[0][yaw_index])
+    return None
+
+
+def _touch_turn_is_short(planner, dock, view) -> tuple:
+    """(short?, turn rad or None) for the touch-dock drive's opening turn."""
+    turn = _opening_turn(planner, dock, view)
+    return (turn is not None and abs(turn) <= math.pi), turn
+
+
 def door_mode(task) -> str:
     """How S2 opens a leaf: `MIKASA_CS_DOOR=bimbo|arc`, else by assisted grasp.
 
@@ -915,6 +945,37 @@ def nudge_the_cube(env, planner, task, res, cab=None):
     # the own open leaf on some seeds). Never push from the handle dock: the pose has no
     # IK there and one attempt took pinocchio down (log3 assertion) on 2102-2104.
     docked = False
+    view = np.array([0.0, 1.0, 0.0])
+    # BIMBO door mode only: the servoed swing leaves the base turned a few degrees and the
+    # arm in another configuration than the arc pull, and from there the short turn to the
+    # touch dock collides, so `drive_base` turned the LONG way round, ~306 deg, on 9 of 10
+    # episodes (2026-10-16; never with the arc). Fold the arm first, then back the base off
+    # the leaf, and only then accept a long turn, logged.
+    if door_mode(task) == "bimbo":
+        planner.planner.update_from_simulation()
+        short, turn = _touch_turn_is_short(planner, dock, view)
+        if not short:
+            say(env, "touch-dock turn would go the long way; folding first",
+                turn_deg=None if turn is None else round(math.degrees(turn), 1))
+            r = drive_posture(env, planner, task, label="duck for the touch drive")
+            if r != -1:
+                res = r
+                if common.stopped_by_horizon(planner):
+                    return res
+            planner.planner.update_from_simulation()
+            short, turn = _touch_turn_is_short(planner, dock, view)
+        if not short and TOUCH_BACKOFF_M > 0:
+            say(env, "touch-dock turn still long; backing off the leaf", m=TOUCH_BACKOFF_M,
+                turn_deg=None if turn is None else round(math.degrees(turn), 1))
+            r = planner.drive_straight(-TOUCH_BACKOFF_M, v=0.10)
+            if r != -1:
+                res = r
+                if common.stopped_by_horizon(planner):
+                    return res
+            planner.planner.update_from_simulation()
+            short, turn = _touch_turn_is_short(planner, dock, view)
+        say(env, "touch-dock turn", short=short,
+            turn_deg=None if turn is None else round(math.degrees(turn), 1))
     for posture in ("as-is", "drive"):
         if posture == "drive":
             r = drive_posture(env, planner, task, label="duck for the touch drive")
@@ -923,7 +984,7 @@ def nudge_the_cube(env, planner, task, res, cab=None):
                 if common.stopped_by_horizon(planner):
                     return res
         say(env, "drive to the touch dock", dock=[round(float(v), 3) for v in dock[:2]], posture=posture)
-        r = planner.drive_base(target_pos=dock, target_view_vec=np.array([0.0, 1.0, 0.0]), freeze_arm=True)
+        r = planner.drive_base(target_pos=dock, target_view_vec=view, freeze_arm=True)
         if r != -1:
             res = r
             if common.stopped_by_horizon(planner):
