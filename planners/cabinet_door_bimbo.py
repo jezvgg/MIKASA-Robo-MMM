@@ -125,6 +125,9 @@ a 90 deg dock; collection runs without assisted grasp, 2026-10-16). With the lev
 ended right leaves 3-7 deg short of it (27.6-31.5 deg), 6-9 cm from the shipped stance, and the
 push from here found no IK there (seed 9). <= 0 turns the correction off."""
 STANCE_TOL_M, STANCE_TOL_RAD = 0.02, 0.035
+STANCE_SLIDE_M = 0.03
+STANCE_HAND_ERR_M = 0.03
+STANCE_LEG_STEPS = 60
 STANCE_AIM_MAX = 0.8
 "Rad: a position leg that needs a bigger turn to aim is skipped (the arm holds the bar meanwhile)."
 STANCE_MAX_STEPS = 120
@@ -392,8 +395,18 @@ def _square_stance(env, planner, task, drv, goal, *, yaw_goal: float, lever_goal
             legs += [("turn", aim), ("drive", (b_goal, back))]
     legs.append(("turn", yaw_goal))
     for kind, arg in legs:
-        for _ in range(STANCE_MAX_STEPS):
+        q_leg = _qpos(task)
+        for n_step in range(STANCE_MAX_STEPS):
             q = _qpos(task)
+            # The base has to move freely under a held hand. A turn that slides the base or
+            # stalls, or a hand the servo cannot hold, ends the squaring where it stands
+            # (seed 0, 565509e: a 2.7 deg turn ran 120 steps and slid the base 0.17 m).
+            slid = float(np.linalg.norm(q[:2] - q_leg[:2])) if kind == "turn" else 0.0
+            if slid > STANCE_SLIDE_M or float(np.linalg.norm(drv.dp)) > STANCE_HAND_ERR_M \
+                    or n_step >= STANCE_LEG_STEPS:
+                say(env, "stance: leg stopped", leg=kind, steps=n_step, slid=round(slid, 3),
+                    hand_err=round(float(np.linalg.norm(drv.dp)), 3))
+                return res
             if kind == "turn":
                 err = float((arg - q[2] + np.pi) % (2 * np.pi) - np.pi)
                 if abs(err) < 0.01:
