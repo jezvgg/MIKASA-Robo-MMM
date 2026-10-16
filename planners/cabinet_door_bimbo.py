@@ -343,6 +343,116 @@ def _leaf_normal(task, door, anchor_xy, sense):
     return np.asarray(n, dtype=np.float64)
 
 
+def _lever(point_xy, q) -> tuple:
+    """Where a world point stands in the base frame: (forward, left)."""
+    yaw = float(q[2])
+    d = np.asarray(point_xy, dtype=np.float64)[:2] - np.asarray(q[:2], dtype=np.float64)
+    return (float(d @ np.array([np.cos(yaw), np.sin(yaw)])),
+            float(d @ np.array([-np.sin(yaw), np.cos(yaw)])))
+
+
+def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, start, target,
+           lever_a, lever_b, res, label):
+    """Ride the held leaf from `start` toward `target` (how open, either way), BIMBO's door_swing.
+
+    Every control the commanded angle `sw` moves LEAD_RATE * dt toward `target`, never more
+    than LEAD_MAX ahead of the measured leaf; the hand is servoed to the grasp frame carried to
+    `sw` (`door_frames`, its yaw turned by HAND_TURN of the door's); the base creeps so the goal
+    stands at a lever going from `lever_a` to `lever_b` by LEVER_LEAD_FRAC of the way, then
+    settles there. Stops on the target, an empty hand, a stall, or SWING_MAX_STEPS.
+
+    Returns `(res, reason, goal)`; `res` is None when the horizon struck (the caller returns
+    the solver's last step).
+    """
+    direction = 1.0 if target >= start else -1.0
+    span = max(abs(target - start), 1e-6)
+    dt = float(planner.base_env.control_timestep)
+
+    def lever_at(sw_now: float) -> tuple:
+        k = float(np.clip(abs(sw_now - start) / (LEVER_LEAD_FRAC * span), 0.0, 1.0))
+        return (lever_a[0] + k * (lever_b[0] - lever_a[0]),
+                lever_a[1] + k * (lever_b[1] - lever_a[1]))
+
+    def frame(sw_now: float) -> np.ndarray:
+        turn = s * (sw_now - rad0)
+        return ds.door_frames(G0, anchor_xy, turn, hand_turn=HAND_TURN * turn)[1]
+
+    say(env, f"{label} the door (bimbo)", target_rad=round(target, 3), start_rad=round(start, 3),
+        lead_rate=LEAD_RATE, lead_max=LEAD_MAX, hand_turn=HAND_TURN,
+        lever=[round(v, 3) for v in lever_a], lever_end=[round(v, 3) for v in lever_b],
+        arm_hold=ARM_HOLD, roll_cost=ROLL_COST, roll_hold=ROLL_HOLD,
+        hinge=[round(float(v), 3) for v in anchor_xy], sense=int(s), ten_hz=drv.ten_hz)
+    sw = float(start)
+    goal = frame(sw)
+    q = _qpos(task)
+    q_arm0, q_base0 = q[servo.idx].copy(), q[:3].copy()
+    hist: list = []
+    trace: list = []
+    reason = "max-steps"
+    perr_max = rerr_max = 0.0
+    i = -1
+    for i in range(SWING_MAX_STEPS):
+        rad = float(crp.door_rad_now(task, door))
+        hist.append(rad)
+        if direction * (rad - target) >= 0.0:
+            reason = "target"
+            break
+        if _fingers(task) <= common.FINGER_EMPTY_M:
+            reason = "slipped"
+            break
+        if (len(hist) > STALL_STEPS
+                and direction * (hist[-1] - hist[-1 - STALL_STEPS]) < STALL_EPS):
+            reason = "stalled"
+            break
+        if direction > 0:
+            sw = min(target + 0.02, sw + LEAD_RATE * dt, max(sw, rad + LEAD_MAX))
+        else:
+            sw = max(target - 0.02, sw - LEAD_RATE * dt, min(sw, rad - LEAD_MAX))
+        prev = goal
+        goal = frame(sw)
+        q = _qpos(task)
+        pvel = (goal[:2, 3] - prev[:2, 3]) / dt
+        v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], pvel, q[:2], float(q[2]), lever_at(sw),
+                                            gain=BASE_GAIN, v_max=BASE_V_MAX, w_max=BASE_W_MAX)
+        res, dp, dr, fresh = drv.step(goal, (v, w))
+        if fresh:
+            perr_max = max(perr_max, float(np.linalg.norm(dp)))
+            rerr_max = max(rerr_max, float(np.linalg.norm(dr)))
+        if i % 10 == 0:
+            hand = ds.angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
+            trace.append([i, round(sw, 3), round(rad, 3), round(hand, 3),
+                          round(float(np.linalg.norm(dp)), 3), round(float(np.linalg.norm(dr)), 3),
+                          round(v, 3), round(w, 3), round(ax, 3), round(ay, 3)])
+        if common.stopped_by_horizon(planner):
+            return None, "horizon", goal
+    # -- the stance settles: the goal held on the bar, the creep runs on to lever_b -----------
+    settle, lever_err = 0, 0.0
+    if reason == "target" and LEVER_END[0] > 0:
+        for settle in range(1, SETTLE_STEPS + 1):
+            q = _qpos(task)
+            v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], np.zeros(2), q[:2], float(q[2]),
+                                                lever_b, gain=BASE_GAIN, v_max=BASE_V_MAX,
+                                                w_max=BASE_W_MAX)
+            lever_err = float(np.hypot(ax - lever_b[0], ay - lever_b[1]))
+            if lever_err < SETTLE_TOL_M:
+                break
+            res, _, _, _ = drv.step(goal, (v, w))
+            if common.stopped_by_horizon(planner):
+                return None, "horizon", goal
+    rad = float(crp.door_rad_now(task, door))
+    hand_rad = ds.angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
+    q_end = _qpos(task)
+    say(env, f"{label} done (bimbo)", rad=round(rad, 3), door_from_hand=round(hand_rad, 3),
+        why=reason, steps=i + 1, perr_max=round(perr_max, 3), rerr_max=round(rerr_max, 3),
+        arm_moved=[round(float(v), 3) for v in q_end[servo.idx] - q_arm0],
+        base_moved=[round(float(v), 3) for v in q_end[:3] - q_base0],
+        base_end=[round(float(v), 3) for v in q_end[:3]], settle=settle,
+        lever_err=round(lever_err, 3),
+        trace="[i, sw, rad, hand, perr, rerr, v, w, a_x, a_y] " + str(trace[-16:]),
+        **({"door_tail": [round(v, 3) for v in hist[-20:]]} if reason != "target" else {}))
+    return res, reason, goal
+
+
 def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
                   record: dict | None = None):
     """Grasp the leaf's bar, swing it open with the servoed hand, let go and clear the hand.
@@ -424,87 +534,16 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     G0 = _T(task.agent.tcp.pose.sp)                  # the hand on the bar, as it closed
     rad0 = float(crp.door_rad_now(task, door))
     q = _qpos(task)
-    base_xy, yaw = q[:2].copy(), float(q[2])
-    f = np.array([np.cos(yaw), np.sin(yaw)])
-    l = np.array([-np.sin(yaw), np.cos(yaw)])
-    lever = (float((G0[:2, 3] - base_xy) @ f), float((G0[:2, 3] - base_xy) @ l))
+    lever = _lever(G0[:2, 3], q)
     lever_end = lever if LEVER_END[0] <= 0 else (LEVER_END[0], s * LEVER_END[1])
-
-    def lever_at(sw_now: float) -> tuple:
-        k = float(np.clip((sw_now - rad0) / max(LEVER_LEAD_FRAC * (target - rad0), 1e-6),
-                          0.0, 1.0))
-        return (lever[0] + k * (lever_end[0] - lever[0]), lever[1] + k * (lever_end[1] - lever[1]))
-    dt = float(planner.base_env.control_timestep)
-    say(env, "swing the door (bimbo)", target_rad=round(target, 3), start_rad=round(rad0, 3),
-        lead_rate=LEAD_RATE, lead_max=LEAD_MAX, hand_turn=HAND_TURN,
-        lever=[round(v, 3) for v in lever], lever_end=[round(v, 3) for v in lever_end],
-        arm_hold=ARM_HOLD, roll_cost=ROLL_COST, roll_hold=ROLL_HOLD,
-        hinge=[round(float(v), 3) for v in anchor_xy],
-        sense=int(s), ten_hz=drv.ten_hz)
-    sw = rad0
-    goal = G0.copy()
-    q_arm0, q_base0 = q[servo.idx].copy(), q[:3].copy()
-    hist: list = []
-    trace: list = []
-    reason = "max-steps"
-    perr_max = rerr_max = 0.0
-    i = -1
-    for i in range(SWING_MAX_STEPS):
-        rad = float(crp.door_rad_now(task, door))
-        hist.append(rad)
-        if rad >= target:
-            reason = "target"
-            break
-        if _fingers(task) <= common.FINGER_EMPTY_M:
-            reason = "slipped"
-            break
-        if len(hist) > STALL_STEPS and hist[-1] - hist[-1 - STALL_STEPS] < STALL_EPS:
-            reason = "stalled"
-            break
-        sw = min(target + 0.02, sw + LEAD_RATE * dt, max(sw, rad + LEAD_MAX))
-        turn = s * (sw - rad0)
-        prev = goal
-        _, goal = ds.door_frames(G0, anchor_xy, turn, hand_turn=HAND_TURN * turn)
-        q = _qpos(task)
-        pvel = (goal[:2, 3] - prev[:2, 3]) / dt
-        v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], pvel, q[:2], float(q[2]), lever_at(sw),
-                                            gain=BASE_GAIN, v_max=BASE_V_MAX, w_max=BASE_W_MAX)
-        res, dp, dr, fresh = drv.step(goal, (v, w))
-        if fresh:
-            perr, rerr = float(np.linalg.norm(dp)), float(np.linalg.norm(dr))
-            perr_max, rerr_max = max(perr_max, perr), max(rerr_max, rerr)
-        if i % 10 == 0:
-            hand = ds.angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
-            trace.append([i, round(sw, 3), round(rad, 3), round(hand, 3),
-                          round(float(np.linalg.norm(dp)), 3), round(float(np.linalg.norm(dr)), 3),
-                          round(v, 3), round(w, 3), round(ax, 3), round(ay, 3)])
-        if common.stopped_by_horizon(planner):
-            return res
-    # -- the stance settles: the goal held on the bar, the creep runs on to LEVER_END --------
-    settle, lever_err = 0, 0.0
-    if reason == "target" and LEVER_END[0] > 0:
-        for settle in range(1, SETTLE_STEPS + 1):
-            q = _qpos(task)
-            v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], np.zeros(2), q[:2], float(q[2]),
-                                                lever_end, gain=BASE_GAIN, v_max=BASE_V_MAX,
-                                                w_max=BASE_W_MAX)
-            lever_err = float(np.hypot(ax - lever_end[0], ay - lever_end[1]))
-            if lever_err < SETTLE_TOL_M:
-                break
-            res, _, _, _ = drv.step(goal, (v, w))
-            if common.stopped_by_horizon(planner):
-                return res
-    rad = float(crp.door_rad_now(task, door))
-    hand_rad = ds.angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
-    q_end = _qpos(task)
-    say(env, "swing done (bimbo)", rad=round(rad, 3), door_from_hand=round(hand_rad, 3),
-        why=reason, steps=i + 1, perr_max=round(perr_max, 3), rerr_max=round(rerr_max, 3),
-        arm_moved=[round(float(v), 3) for v in q_end[servo.idx] - q_arm0],
-        base_moved=[round(float(v), 3) for v in q_end[:3] - q_base0],
-        base_end=[round(float(v), 3) for v in q_end[:3]], settle=settle,
-        lever_err=round(lever_err, 3),
-        trace="[i, sw, rad, hand, perr, rerr, v, w, a_x, a_y] " + str(trace[-16:]),
-        **({"door_tail": [round(v, 3) for v in hist[-20:]]} if reason != "target" else {}))
+    res, reason, goal = _swing(env, planner, task, door, drv, servo, G0=G0, rad0=rad0,
+                               anchor_xy=anchor_xy, s=s, start=rad0, target=target,
+                               lever_a=lever, lever_b=lever_end, res=res, label="swing")
+    if res is None:
+        return planner._guard.last_step
+    if record is not None:
+        record["bimbo"] = dict(G0=G0.copy(), rad0=rad0, anchor_xy=anchor_xy.copy(), s=s,
+                               lever=lever, lever_end=lever_end)
 
     # -- door_hold: the arm relaxes to where it stands, the weld holds the door --------------
     # The servo's command runs ahead of the measured joints while it pulls (ARM_LEAD_MAX); let
@@ -621,3 +660,112 @@ def lower_the_hand(env, planner, task, *, door, dz: float = LOWER_M):
     say(env, "lowered the open hand", dz=round(float(dz), 3), steps=k + 1,
         z=round(float(_T(task.agent.tcp.pose.sp)[2, 3]), 3), leaf_moved=round(moved, 4))
     return res
+
+
+CLOSE_TARGET_RAD = 0.004
+"""The swing back stops once the leaf reads this shut; its command runs on to 0.02 under it,
+so the hand presses the leaf onto its closed stop (the hinge's limit at 0)."""
+CLOSE_BACK_M = 0.30
+"The withdrawal after the release at the shut leaf, as the shipped physical close's."
+REGRASP_REACH_M = CLEAR_M + 0.10
+"The hand must stand within this of the bar to take it again (it left by CLEAR_M)."
+
+
+def close_by_the_bar(env, planner, task, *, door, record, res):
+    """Take the bar again and swing the leaf shut: the opening, reversed. `(res, attempted)`.
+
+    For a round whose push from here found no plan (the shipped closing; the hand still
+    stands where the clear left it, off the bar along the leaf's plane): the open hand goes
+    back the way it came to the bar's place at the leaf's live angle (the grasp frame carried
+    round the hinge), the fingers close (the weld, when assisted grasp is on), the same swing
+    runs toward shut with the creep bringing the base back to the grasp's lever, the hand
+    relaxes and lets go on the shut leaf, and withdraws CLOSE_BACK_M straight back along its
+    own axis, which at the shut leaf is the face's outward normal. The caller reads the
+    verdict from the env. `attempted` is False when nothing was stepped (no record, hand too
+    far from the bar, no model).
+
+    Example:
+        >>> res, tried = close_by_the_bar(env, planner, task, door=door, record=rec, res=res)  # doctest: +SKIP
+    """
+    b = (record or {}).get("bimbo")
+    if not b:
+        return res, False
+    try:
+        servo = HandServo(task, planner)
+    except Exception as exc:
+        say(env, "close by the bar: no kinematic model", why=f"{type(exc).__name__}"[:80])
+        return res, False
+    G0, rad0, anchor_xy, s = b["G0"], float(b["rad0"]), b["anchor_xy"], float(b["s"])
+    rad = float(crp.door_rad_now(task, door))
+    turn = s * (rad - rad0)
+    bar = ds.door_frames(G0, anchor_xy, turn, hand_turn=HAND_TURN * turn)[1]
+    T = _T(task.agent.tcp.pose.sp)
+    far = float(np.linalg.norm(T[:3, 3] - bar[:3, 3]))
+    if far > REGRASP_REACH_M:
+        say(env, "close by the bar: the hand is not where the clear left it", d=round(far, 3))
+        return res, False
+    say(env, "close by the bar (bimbo)", door_rad=round(rad, 3), hand_to_bar=round(far, 3))
+    drv = _Driver(planner, task, servo, _torso(task))
+    # -- back onto the bar, open ------------------------------------------------------------
+    rad_start = rad
+    k = 0
+    for k in range(CLEAR_MAX_STEPS):
+        res, dp, _, _ = drv.step(bar)
+        if common.stopped_by_horizon(planner):
+            return res, True
+        if abs(float(crp.door_rad_now(task, door)) - rad_start) > CLEAR_LEAF_TOL:
+            planner.open_gripper()
+            say(env, "close by the bar: the leaf moved on the way back to the bar")
+            return res, True
+        if float(np.linalg.norm(dp)) < 0.004:
+            break
+    r = planner.close_gripper(t=12)
+    if r != -1:
+        res = r
+    if common.stopped_by_horizon(planner):
+        return res, True
+    gap = _settled_gap(planner, task)
+    ag = getattr(task, "_ag", None)
+    say(env, "close by the bar: grasp", finger_gap=round(gap, 4), steps_back=k + 1,
+        weld=(None if ag is None else int(ag.held_index())))
+    if not GRASP_GAP[0] < gap <= GRASP_GAP[1]:
+        planner.open_gripper()
+        return res, True
+    # -- the swing, toward shut ---------------------------------------------------------------
+    drv.torso = _torso(task)
+    drv.reset_command()
+    servo.hold_rolls_here()
+    rad = float(crp.door_rad_now(task, door))
+    lever_now = _lever(ds.door_frames(G0, anchor_xy, s * (rad - rad0))[1][:2, 3], _qpos(task))
+    out, reason, goal = _swing(env, planner, task, door, drv, servo, G0=G0, rad0=rad0,
+                               anchor_xy=anchor_xy, s=s, start=rad, target=CLOSE_TARGET_RAD,
+                               lever_a=lever_now, lever_b=tuple(b["lever"]), res=res,
+                               label="close")
+    if out is None:
+        return planner._guard.last_step, True
+    res = out
+    res = planner.idle_steps(t=HOLD_STEPS)
+    if common.stopped_by_horizon(planner):
+        return res, True
+    r = planner.open_gripper()
+    if r != -1:
+        res = r
+    if common.stopped_by_horizon(planner):
+        return res, True
+    # -- withdraw straight back along the hand's axis -----------------------------------------
+    T = _T(task.agent.tcp.pose.sp)
+    goal = T.copy()
+    goal[:3, 3] = T[:3, 3] - CLOSE_BACK_M * np.array([T[0, 2], T[1, 2], 0.0]) / max(
+        float(np.linalg.norm(T[:2, 2])), 1e-6)
+    drv.reset_command()
+    for k in range(2 * CLEAR_MAX_STEPS):
+        res, dp, _, _ = drv.step(goal)
+        if common.stopped_by_horizon(planner):
+            return res, True
+        if float(np.linalg.norm(dp)) < 0.01:
+            break
+    planner.planner.update_from_simulation()
+    say(env, "close by the bar: released and withdrawn", why=reason,
+        door_rad=round(float(crp.door_rad_now(task, door)), 4),
+        withdrawn=round(float(np.linalg.norm(_T(task.agent.tcp.pose.sp)[:3, 3] - T[:3, 3])), 3))
+    return res, True

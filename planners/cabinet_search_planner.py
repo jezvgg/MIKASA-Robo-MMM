@@ -732,8 +732,12 @@ def drive_home(env, planner, task):
     return res
 
 
-def close_and_verify(env, planner, task, door: DoorSpec, res):
-    """Physical panel push, at most two handle corrections, then release dwell."""
+def close_and_verify(env, planner, task, door: DoorSpec, res, record=None):
+    """Physical panel push, at most two handle corrections, then release dwell.
+
+    In the bimbo door mode a push from here that finds no plan (it steps nothing) hands over
+    to `cabinet_door_bimbo.close_by_the_bar` — the opening reversed on the bar the hand has
+    just let go of — before the corrections; `record` is the round's opening record."""
     def verify(result):
         # The environment independently checks all leaves and the hand distance.
         for _ in range(int(task.cfg.close_dwell_steps)):
@@ -762,6 +766,10 @@ def close_and_verify(env, planner, task, door: DoorSpec, res):
         res = r
     if common.stopped_by_horizon(planner):
         return res, False
+    if r == -1 and door_mode(task) == "bimbo" and record:
+        res, _ = _bimbo.close_by_the_bar(env, planner, task, door=door, record=record, res=res)
+        if common.stopped_by_horizon(planner):
+            return res, False
     res, closed = verify(res)
     if closed:
         return res, True
@@ -1454,7 +1462,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 if common.stopped_by_horizon(planner):
                     return res
             if not closed:
-                res, closed = close_and_verify(env, planner, task, door, res)
+                res, closed = close_and_verify(env, planner, task, door, res, record=rec)
             if common.stopped_by_horizon(planner):
                 return res
             if not closed:
