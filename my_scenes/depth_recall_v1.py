@@ -40,6 +40,7 @@ from mani_skill.utils.building import actors
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneBuilder
 from mani_skill.utils.structs import Pose
+from mani_skill.utils.structs.types import SceneConfig, SimConfig
 
 from utils.mikasa.assisted_grasp import AssistedGrasp
 from utils.robocasa_utils import (load_objaverse_actor, objaverse_index, parking_pose,
@@ -84,6 +85,20 @@ PROP_COLORS = (
     (0.15, 0.3, 1.0, 1.0),  # blue
     (1.0, 0.85, 0.0, 1.0),  # yellow
 )
+
+
+#: PhysX's contact offset for every shape in this scene, metres (ManiSkill's default is
+#: 0.02). PhysX makes contacts between two shapes as soon as they are within the SUM of
+#: their offsets, 4 cm at the default, and the solver may act on such a contact before the
+#: shapes touch. Measured 2026-10-16 with the 15-19 g RoboCasa props, it did: a mustard
+#: bottle standing in the row was launched 52 cm out of the cabinet while a shaker was
+#: lowered beside it, with the nearest finger and the shaker 1.6-2.1 cm from it at every
+#: control step and no contact of either with it reported (seed 1004, traced step by
+#: step: geometry, contact list, video). The 243 g boxes never showed it. At 0.005 the
+#: band is 1 cm, under the clearances the oracle keeps in the row: seeds 1000-1009 went
+#: from 36/40 (0.02) to 39/40 over two grasp-depth ladders x both perception modes, and
+#: the knock-overs that were most of the failures at 0.02 did not occur.
+SCENE_CONTACT_OFFSET = 0.005
 
 
 @dataclass(frozen=True)
@@ -379,13 +394,11 @@ class DepthRecallV1Task(BaseEnv):
 
     @property
     def _default_sim_config(self):
-        """Diagnostic only: MIKASA_DR1_SCENE_CONTACT_OFFSET replaces PhysX's scene contact
-        offset (0.02). Unset, the default, is BaseEnv's own config."""
-        co = os.environ.get("MIKASA_DR1_SCENE_CONTACT_OFFSET")
-        if co is None:
-            return super()._default_sim_config
-        from mani_skill.utils.structs.types import SceneConfig, SimConfig
-        return SimConfig(scene_config=SceneConfig(contact_offset=float(co)))
+        """BaseEnv's `SimConfig()` (100 Hz physics, 20 Hz control) with the scene's PhysX
+        contact offset at `SCENE_CONTACT_OFFSET`; MIKASA_DR1_SCENE_CONTACT_OFFSET
+        overrides it for a diagnostic run."""
+        co = float(os.environ.get("MIKASA_DR1_SCENE_CONTACT_OFFSET", SCENE_CONTACT_OFFSET))
+        return SimConfig(scene_config=SceneConfig(contact_offset=co))
 
     # ---------------------------------------------------------------- sensors --
 
@@ -469,23 +482,6 @@ class DepthRecallV1Task(BaseEnv):
                 for body in prop._bodies:
                     body.mass = float(body.mass) * _mx
                     body.inertia = body.inertia * _mx
-        # Diagnostic only: torsional friction on the props' collision shapes (PhysX's
-        # contact patch radius, metres). 0, the default, leaves the shapes as loaded.
-        _pr = float(os.environ.get("MIKASA_DR1_PATCH_R", "0"))
-        if _pr > 0:
-            for prop in self.props:
-                for body in prop._bodies:
-                    for shape in body.get_collision_shapes():
-                        shape.set_patch_radius(_pr)
-                        shape.set_min_patch_radius(_pr)
-        # Diagnostic only: the props' collision shapes' contact offset, metres (PhysX
-        # generates contacts within the sum of two shapes' offsets; the scene's is 0.02).
-        _co = float(os.environ.get("MIKASA_DR1_CONTACT_OFFSET", "0"))
-        if _co > 0:
-            for prop in self.props:
-                for body in prop._bodies:
-                    for shape in body.get_collision_shapes():
-                        shape.set_contact_offset(_co)
         # Origin to mesh bottom, per prop: what a standing prop's origin sits above its
         # surface. Read in the actor's own frame (no pose needed, so it also works while
         # GPU sim has no body data yet — SeasonDish's K55). The objaverse origin is the

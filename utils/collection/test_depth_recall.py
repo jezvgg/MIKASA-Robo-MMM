@@ -266,3 +266,13 @@ def test_loaded_drive_can_hold_targets_without_recentring_head(hold_pose):
         np.testing.assert_array_equal(actions[:,:7],np.tile(actions[0,:7],(len(actions),1)))
     else:
         assert np.ptp(actions[:,1])>.01
+
+
+def test_scene_contact_offset_is_the_tasks():
+    """The scene runs with a 5 mm PhysX contact offset (ManiSkill's default is 2 cm) and
+    otherwise BaseEnv's own sim config."""
+    from my_scenes.depth_recall_v1 import SCENE_CONTACT_OFFSET
+
+    cfg = DepthRecallV1Task._default_sim_config.fget(None)
+    assert cfg.scene_config.contact_offset == SCENE_CONTACT_OFFSET == 0.005
+    assert (cfg.sim_freq, cfg.control_freq) == (100, 20)

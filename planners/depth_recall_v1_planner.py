@@ -150,21 +150,6 @@ GRASP_LIFTS = tuple(
     float(v) for v in os.environ.get("MIKASA_DR1_GRASP_LIFTS", "0.02,0.035,0.045").split(",")
 )
 
-#: Where the TCP stands along the approach relative to the prop's centre, metres
-#: (negative: short of it), tried in order. The retrieval family's ladder
-#: (`cabinet_retrieval_planner.SIDE_GRASP_DEPTHS`, -0.005 first) was set by a cup's palm
-#: clearance; here the fingertips, 3.1 cm past the TCP, are what matters. At -0.005 they
-#: end 1.8-2.2 cm short of the next prop in the 7 cm row, inside the 2.2-4 cm band in which
-#: PhysX already generates contacts (contact offsets 0.02 per shape), and measured
-#: 2026-10-16 (seeds 1000, 1004, 1-2 cm from the next prop each time) that pushed a
-#: 15.8 g shaker 3.6 cm aside on the approach and LAUNCHED a 17 g mustard bottle out of
-#: the row on a placement, with no shape touching it. At -0.015 the tips stop 1.6 cm past
-#: the prop's centre (still past the line the pads close on), 1 cm further from the next
-#: prop; the palm stays 2.1-2.5 cm in front of the prop.
-GRASP_DEPTHS = tuple(
-    float(v) for v in os.environ.get("MIKASA_DR1_GRASP_DEPTHS", "-0.015,-0.010,-0.020").split(",")
-)
-
 #: Half the finger pads' height in this grasp, metres: the finger links' collision boxes
 #: span +-1.32 cm about the TCP along gripper_link's x (robots/fetch/fetch.urdf meshes),
 #: which the side grasp turns vertical.
@@ -555,14 +540,14 @@ def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
 
 
 def grasp_ladder(env, planner, task, prop, *, where: str, lift: float = None):
-    """Screw to the side grasp over `GRASP_DEPTHS`, close, verify. (res, ok).
+    """Screw to the side grasp over `SIDE_GRASP_DEPTHS`, close, verify. (res, ok).
 
     The depth ladder and `GRASP_LIFT` are the retrieval flow's measured ones; the mesh
     is re-read on every rung because a refused close can have moved the prop.
     """
     res = -1
     lift = retr.GRASP_LIFT if lift is None else float(lift)
-    for depth in GRASP_DEPTHS:
+    for depth in retr.SIDE_GRASP_DEPTHS:
         if _BELIEF is not None:
             # Re-fit from the stand the grasp is made from, wrist camera first: every
             # rung, because a refused close can have moved the prop.
@@ -617,7 +602,7 @@ def grasp_ladder(env, planner, task, prop, *, where: str, lift: float = None):
         say(env, f"{where}: close missed", prop=prop.name, depth=depth)
         planner.open_gripper()
         planner.planner.update_from_simulation()
-    return fail(env, f"{where}: grasp {prop.name}", tried=list(GRASP_DEPTHS)), False
+    return fail(env, f"{where}: grasp {prop.name}", tried=list(retr.SIDE_GRASP_DEPTHS)), False
 
 
 def release_and_clear(env, planner, task, prop, place):
@@ -740,7 +725,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     chosen_lift = None
     lifts = grasp_lifts(task, prop)
     for lift in lifts:
-        grasp, pre = retr.side_grasp_pose(task, GRASP_DEPTHS[0],
+        grasp, pre = retr.side_grasp_pose(task, retr.SIDE_GRASP_DEPTHS[0],
                                           lift=lift, obj=_seen(prop))
         if grasp is None:
             return fail(env, f"{prop.name} has no collision mesh"), False
@@ -997,7 +982,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
                 return res, False
             planner.planner.update_from_simulation()
             for lift in grasp_lifts(task, prop):
-                for depth in GRASP_DEPTHS:
+                for depth in retr.SIDE_GRASP_DEPTHS:
                     grasp, pre = retr.side_grasp_pose(task, depth, lift=lift, obj=_seen(prop))
                     if grasp is None:
                         return fail(env, f"{prop.name} has no collision mesh"), False
