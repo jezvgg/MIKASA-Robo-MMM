@@ -437,15 +437,18 @@ def door_mode(task) -> str:
 
 
 def push_with_fist(task) -> bool:
-    """Whether the closing push makes a fist: `MIKASA_CS_PUSH_HAND=fist|open`, else by
-    assisted grasp (open with it on — a closing hand beside the bar welds the leaf it pushes;
-    the shipped fist with it off)."""
-    hand = os.environ.get("MIKASA_CS_PUSH_HAND", "").strip().lower()
-    if hand:
-        if hand not in ("fist", "open"):
-            raise ValueError(f"MIKASA_CS_PUSH_HAND={hand!r}; expected fist or open")
-        return hand == "fist"
-    return getattr(task, "_ag", None) is None
+    """Whether the closing push makes a fist: `MIKASA_CS_PUSH_HAND=fist|open`, default fist.
+
+    `open` is the b1k_rl_guys rule ("pressing must not become an assisted re-grasp"): an open
+    hand is never "applying", so it cannot weld. The fist stays the default because the weld
+    it was suspected of came from the shipped arc's retreat leaving the pads on the bar, where
+    the fist then closed; after the bimbo stage's clear the fist closes on air (no weld from a
+    push in the 2026-10-16 runs), while the open fingers, 10 cm wide, met the leaf on the way
+    to the push point (seed 2 and others, `finger <-> leaf` in the pre-contact screw)."""
+    hand = os.environ.get("MIKASA_CS_PUSH_HAND", "fist").strip().lower()
+    if hand not in ("fist", "open"):
+        raise ValueError(f"MIKASA_CS_PUSH_HAND={hand!r}; expected fist or open")
+    return hand == "fist"
 
 
 def _np(x):

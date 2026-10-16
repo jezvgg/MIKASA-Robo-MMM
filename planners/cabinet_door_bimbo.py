@@ -82,11 +82,11 @@ STALL_EPS = 0.01
 K_POS, K_ROT = _f("MIKASA_BD_K_POS", 0.6), _f("MIKASA_BD_K_ROT", 0.6)
 CAP_POS, CAP_ROT, CAP_Q = 0.04, 0.10, 0.08
 W_ROT = 0.5
-ROLL_COST = _f("MIKASA_BD_ROLL_COST", 10.0)
-ROLL_HOLD = _f("MIKASA_BD_ROLL_HOLD", 0.3)
-ARM_HOLD = _f("MIKASA_BD_ARM_HOLD", 0.0)
+ROLL_COST = _f("MIKASA_BD_ROLL_COST", 0.5)
+ROLL_HOLD = _f("MIKASA_BD_ROLL_HOLD", 0.0)
+ARM_HOLD = _f("MIKASA_BD_ARM_HOLD", 0.3)
 "Null-space pull of the NON-roll arm joints toward the grasp configuration, per control (0 = off)."
-LEVER_END = (_f("MIKASA_BD_LEVER_END_X", -1.0), _f("MIKASA_BD_LEVER_END_Y", 0.0))
+LEVER_END = (_f("MIKASA_BD_LEVER_END_X", 0.66), _f("MIKASA_BD_LEVER_END_Y", 0.34))
 """Where the swing's goal should stand in the base frame when the door reaches its target:
 (forward, left toward the hinge's side of the opening, i.e. mirrored for a leaf that opens
 clockwise). The creep moves it there from the grasp's lever in proportion to the swing.
@@ -106,7 +106,13 @@ ARM_LEAD_MAX = 0.20
 joints (rad): a pull against the door's resistance keeps its force, a blocked arm does not wind up."""
 
 #: the base creep (`door_swing.unicycle_hold_cmd`)
-BASE_GAIN = _f("MIKASA_BD_BASE_GAIN", 1.0)
+BASE_GAIN = _f("MIKASA_BD_BASE_GAIN", 2.0)
+LEVER_LEAD_FRAC = _f("MIKASA_BD_LEVER_LEAD_FRAC", 0.8)
+"The lever reaches LEVER_END at this fraction of the swing (it lags the command otherwise)."
+SETTLE_STEPS = int(_f("MIKASA_BD_SETTLE_STEPS", 40))
+SETTLE_TOL_M = 0.01
+"""After the door reaches its target the goal stays on the bar and the creep runs on, at most
+SETTLE_STEPS controls, until the goal stands within SETTLE_TOL_M of LEVER_END."""
 BASE_V_MAX, BASE_W_MAX = 0.20, 0.6
 
 GRASP_GAP = (common.FINGER_EMPTY_M, crp.RETRACE_GRIP_MAX)
@@ -381,7 +387,8 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     lever_end = lever if LEVER_END[0] <= 0 else (LEVER_END[0], s * LEVER_END[1])
 
     def lever_at(sw_now: float) -> tuple:
-        k = float(np.clip((sw_now - rad0) / max(target - rad0, 1e-6), 0.0, 1.0))
+        k = float(np.clip((sw_now - rad0) / max(LEVER_LEAD_FRAC * (target - rad0), 1e-6),
+                          0.0, 1.0))
         return (lever[0] + k * (lever_end[0] - lever[0]), lever[1] + k * (lever_end[1] - lever[1]))
     dt = float(planner.base_env.control_timestep)
     say(env, "swing the door (bimbo)", target_rad=round(target, 3), start_rad=round(rad0, 3),
@@ -429,6 +436,20 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
                           round(v, 3), round(w, 3), round(ax, 3), round(ay, 3)])
         if common.stopped_by_horizon(planner):
             return res
+    # -- the stance settles: the goal held on the bar, the creep runs on to LEVER_END --------
+    settle, lever_err = 0, 0.0
+    if reason == "target" and LEVER_END[0] > 0:
+        for settle in range(1, SETTLE_STEPS + 1):
+            q = _qpos(task)
+            v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], np.zeros(2), q[:2], float(q[2]),
+                                                lever_end, gain=BASE_GAIN, v_max=BASE_V_MAX,
+                                                w_max=BASE_W_MAX)
+            lever_err = float(np.hypot(ax - lever_end[0], ay - lever_end[1]))
+            if lever_err < SETTLE_TOL_M:
+                break
+            res, _, _, _ = drv.step(goal, (v, w))
+            if common.stopped_by_horizon(planner):
+                return res
     rad = float(crp.door_rad_now(task, door))
     hand_rad = ds.angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
     q_end = _qpos(task)
@@ -436,7 +457,8 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         why=reason, steps=i + 1, perr_max=round(perr_max, 3), rerr_max=round(rerr_max, 3),
         arm_moved=[round(float(v), 3) for v in q_end[servo.idx] - q_arm0],
         base_moved=[round(float(v), 3) for v in q_end[:3] - q_base0],
-        base_end=[round(float(v), 3) for v in q_end[:3]],
+        base_end=[round(float(v), 3) for v in q_end[:3]], settle=settle,
+        lever_err=round(lever_err, 3),
         trace="[i, sw, rad, hand, perr, rerr, v, w, a_x, a_y] " + str(trace[-16:]),
         **({"door_tail": [round(v, 3) for v in hist[-20:]]} if reason != "target" else {}))
 
