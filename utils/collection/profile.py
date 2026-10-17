@@ -183,12 +183,24 @@ def validate_instructions(profile, tokenizer):
             "instruction_tokens": counts}
 
 
+def profile_env_kwargs(profile, **extra):
+    """The profile's env kwargs, with ``assisted_grasp`` explicit.
+
+    The task envs weld by default since 2026-10-18; a profile written before that
+    (no ``assisted_grasp`` key) was collected with the friction grasp and keeps it.
+    """
+    kwargs = {"assisted_grasp": False}
+    kwargs.update(profile["env_kwargs"])
+    kwargs.update(extra)
+    return kwargs
+
+
 def make_env(run, *, rgb=False, render_backend=None):
     import gymnasium as gym
     import my_scenes  # noqa: F401
 
     profile = run["signature"]["profile"]
-    kwargs = dict(profile["env_kwargs"], obs_mode="rgb" if rgb else "state")
+    kwargs = profile_env_kwargs(profile, obs_mode="rgb" if rgb else "state")
     if render_backend is not None and render_backend != kwargs["render_backend"]:
         raise ValueError("Rendering backend differs from the pinned profile")
     env = gym.make(profile["env_id"], **kwargs)
