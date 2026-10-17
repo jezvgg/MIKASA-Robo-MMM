@@ -317,3 +317,33 @@ Same 20 seeds, same gates:
 - export readback of 19 episodes (7375 frames).
 
 Tests: 319 passed, 4 skipped.
+
+**60 more fresh seeds** (7790020–7790079, one stream, through the held 10 Hz replay with
+the motion, clearance and view gates, no RGB):
+
+| | successes | accepted |
+|---|---|---|
+| before the chain | 52/60 | 52 |
+| chain, `827cec6` | 47/60 | 47 |
+
+- No episode was rejected in either arm, so the base fix holds.
+- The success gap is the other way round from the first 20 seeds:
+  - the chain won 5 seeds and lost 10;
+  - 6 of the 10 losses came after the grasp ("no checked loaded route with a complete
+    bowl pour" 5, "no upright hover with a complete wrist-only pour" 1);
+  - 2 were the grasp continuation;
+  - 2 left no failure message.
+- One stream cannot separate the chain from mplib's RNG on a single seed (section 1).
+
+Over all fresh seeds measured so far:
+
+| fresh seeds | before the chain | chain + route check |
+|---|---|---|
+| 1010–1029 × 4 streams | 62/80 | 69/80 |
+| 1030–1049 × 4 streams | 65/80 | 66/80 |
+| 7790000–7790079 × 1 stream (with the base fix) | 67/80 | 66/80 |
+| **total** | **194/240** | **201/240** |
+
+On fresh seeds, then, the chain is close to neutral: +7 of 240. The large gain (21/50 →
+42/50) is on development seeds 1000–1009, the seeds where the contact refusals were
+diagnosed.
