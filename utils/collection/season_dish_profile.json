@@ -1,5 +1,5 @@
 {
-  "profile_version": 25,
+  "profile_version": 26,
   "env_id": "MikasaSeasonDish-v0",
   "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
   "robot_reference": {
@@ -18,7 +18,8 @@
     "sim_config": {
       "control_freq": 20,
       "sim_freq": 100
-    }
+    },
+    "assisted_grasp": true
   },
   "task": {
     "horizon": 1100,
