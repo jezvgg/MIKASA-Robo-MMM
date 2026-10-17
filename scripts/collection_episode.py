@@ -32,6 +32,8 @@ def main():
                     help="choose the stance by a reach scan (planners/oracle/stance_scan.py; SeasonDish's "
                          "needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY); the task's default otherwise")
     ap.add_argument("--video-dir", default=None, help="record the render camera's clip here")
+    ap.add_argument("--trajectory-out", default=None,
+                    help="save every control step's robot qpos and action to this .npz (for comparing arms)")
     args = ap.parse_args()
     import os
 
@@ -64,6 +66,20 @@ def main():
         env = RecordEpisode(env, args.video_dir, save_trajectory=False, save_video=True,
                             video_fps=20, max_steps_per_video=None)
     base.motion_parameters = dict(profile["planner"].get("motion_parameters", {}))
+    trace = {"qpos": [], "action": []}
+    if args.trajectory_out:
+        import numpy as np
+
+        unwrapped_step = base.step
+
+        def traced_step(action):
+            out = unwrapped_step(action)
+            trace["qpos"].append(np.asarray(base.agent.robot.get_qpos().cpu()).reshape(-1).copy())
+            trace["action"].append(np.asarray(action.cpu() if hasattr(action, "cpu") else action,
+                                              dtype=np.float32).reshape(-1).copy())
+            return out
+
+        base.step = traced_step
     env.log_event = lambda event, message, **extra: print(
         f"[event] step={int(base.elapsed_steps.reshape(-1)[0])} {event} {message}", flush=True)
     planner_cfg = profile["planner"]
@@ -92,8 +108,17 @@ def main():
 
             print(f"curobo calls={curobo_client.STATS['calls']} server_ms={curobo_client.STATS['server_ms']:.0f}",
                   flush=True)
+        if args.trajectory_out:
+            import numpy as np
+
+            np.savez_compressed(args.trajectory_out, qpos=np.asarray(trace["qpos"]),
+                                action=np.asarray(trace["action"]), success=success, seed=seed,
+                                ik_chain=os.environ.get("MIKASA_IK_CHAIN", "1"),
+                                joints=np.array([j.name for j in base.agent.robot.get_active_joints()]))
+            print(f"trajectory {args.trajectory_out} steps={len(trace['qpos'])}", flush=True)
         if args.video_dir:
-            name = f"{args.task}_seed{seed}{'_ag' if args.assisted_grasp else ''}_{verdict}"
+            arm = "chain" if os.environ.get("MIKASA_IK_CHAIN", "1") == "1" else "base"
+            name = f"{args.task}_seed{seed}_{arm}{'_ag' if args.assisted_grasp else ''}_{verdict}"
             env.flush_video(name=name)
             print(f"video {args.video_dir}/{name}.mp4", flush=True)
     finally:
