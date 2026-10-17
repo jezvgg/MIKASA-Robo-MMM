@@ -69,6 +69,13 @@ def _ready_by_line(*args, **kwargs):
     return retr.ready_by_line(*args, **kwargs)
 
 
+#: The straight drives into the cabinet and back out peak at the old constant 0.10 m/s and
+#: taper to this floor at both ends (`drive_straight(v_floor=)`). At a constant speed the
+#: arm and head are held, so the whole drive records one repeated 13D action. Measured
+#: 2026-10-18 on seed 7990000: 39 % of the 10 Hz frames repeated the previous action, the
+#: drives holding the longest runs (checklist D6 allows 5 % and 20 frames).
+DRIVE_FLOOR = 0.03
+
 #: Perception mode re-docks when the measured row is further than this from the map's
 #: row: the dock's own waypoint noise is 5 mm, the row shift up to 4 cm.
 REDOCK_MIN_M = 0.01
@@ -749,7 +756,7 @@ def release_and_clear(env, planner, task, prop, place):
 
     base_y = float(_np(task.agent.base_link.pose.p).reshape(-1)[1])
     to_line = float(retr.READY_DOCK_Y - base_y)
-    back = planner.drive_straight(to_line, v=0.10)
+    back = planner.drive_straight(to_line, v=0.10, v_floor=DRIVE_FLOOR)
     if back != -1:
         res = back
         if common.stopped_by_horizon(planner):
@@ -805,7 +812,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     planner.planner.update_from_simulation()
 
     say(env, "drive into the cabinet", distance=round(drive, 3))
-    res = planner.drive_straight(drive, v=0.10)
+    res = planner.drive_straight(drive, v=0.10, v_floor=DRIVE_FLOOR)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
@@ -847,7 +854,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     back = carry_out(float(_np(task.agent.base_link.pose.p).reshape(-1)[1]), prop_y, face_y,
                      float(task.cfg.prop_half_xy))
     say(env, "carry out", distance=round(back, 3))
-    res = planner.drive_straight(-back, v=0.10, hold_pose=True)
+    res = planner.drive_straight(-back, v=0.10, hold_pose=True, v_floor=DRIVE_FLOOR)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
@@ -1181,7 +1188,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
             say(env, "entry correction refused; driving in as we are")
 
     say(env, "drive into the cabinet, loaded", distance=round(drive, 3))
-    res = planner.drive_straight(drive, v=0.10, hold_pose=True)
+    res = planner.drive_straight(drive, v=0.10, hold_pose=True, v_floor=DRIVE_FLOOR)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
