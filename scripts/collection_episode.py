@@ -27,7 +27,7 @@ def main():
     ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None, help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
     ap.add_argument("--ik-chain", action=argparse.BooleanOptionalAction, default=None,
                     help="solve the contact before its standoff (planners/oracle/ik_chain.py); "
-                         "on unless --no-ik-chain or MIKASA_IK_CHAIN=0")
+                         "off unless --ik-chain or MIKASA_IK_CHAIN=1")
     ap.add_argument("--stance-scan", action=argparse.BooleanOptionalAction, default=None,
                     help="choose the stance by a reach scan (planners/oracle/stance_scan.py; SeasonDish's "
                          "needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY); the task's default otherwise")
@@ -96,7 +96,7 @@ def main():
         info = base.get_info()
         success = verdict == "success" and bool(info["success"].reshape(-1)[0])
         print(f"collection_episode task={args.task} seed={seed} assisted_grasp={args.assisted_grasp} "
-              f"ik_backend={args.ik_backend or 'mplib'} ik_chain={os.environ.get('MIKASA_IK_CHAIN', '1')} stance_scan={args.stance_scan} "
+              f"ik_backend={args.ik_backend or 'mplib'} ik_chain={os.environ.get('MIKASA_IK_CHAIN', '0')} stance_scan={args.stance_scan} "
               f"verdict={verdict} success={success} steps={int(base.elapsed_steps.reshape(-1)[0])}", flush=True)
         ag = base._ag
         if ag is not None:
@@ -113,11 +113,11 @@ def main():
 
             np.savez_compressed(args.trajectory_out, qpos=np.asarray(trace["qpos"]),
                                 action=np.asarray(trace["action"]), success=success, seed=seed,
-                                ik_chain=os.environ.get("MIKASA_IK_CHAIN", "1"),
+                                ik_chain=os.environ.get("MIKASA_IK_CHAIN", "0"),
                                 joints=np.array([j.name for j in base.agent.robot.get_active_joints()]))
             print(f"trajectory {args.trajectory_out} steps={len(trace['qpos'])}", flush=True)
         if args.video_dir:
-            arm = "chain" if os.environ.get("MIKASA_IK_CHAIN", "1") == "1" else "base"
+            arm = "chain" if os.environ.get("MIKASA_IK_CHAIN", "0") == "1" else "base"
             name = f"{args.task}_seed{seed}_{arm}{'_ag' if args.assisted_grasp else ''}_{verdict}"
             env.flush_video(name=name)
             print(f"video {args.video_dir}/{name}.mp4", flush=True)

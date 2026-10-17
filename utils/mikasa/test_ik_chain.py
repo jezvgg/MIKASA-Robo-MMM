@@ -132,8 +132,8 @@ def test_mplib_solver_unwraps_toward_the_seed_and_falls_back_to_the_raw_value():
     assert none(sapien.Pose(), np.array([3.0]), 1) == []
 
 
-def test_the_chain_is_on_unless_switched_off(monkeypatch):
+def test_the_chain_is_off_unless_switched_on(monkeypatch):
     monkeypatch.delenv("MIKASA_IK_CHAIN", raising=False)
-    assert ik_chain.enabled()
-    monkeypatch.setenv("MIKASA_IK_CHAIN", "0")
     assert not ik_chain.enabled()
+    monkeypatch.setenv("MIKASA_IK_CHAIN", "1")
+    assert ik_chain.enabled()

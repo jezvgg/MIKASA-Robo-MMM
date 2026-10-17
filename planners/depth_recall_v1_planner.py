@@ -1458,7 +1458,7 @@ if __name__ == "__main__":
                     help="IK proposals from mplib alone, or from cuRobo (needs MIKASA_CUROBO_PY)")
     ap.add_argument("--ik-chain", action=argparse.BooleanOptionalAction, default=None,
                     help="solve the grasp / row place before the posture that leads to it "
-                         "(planners/oracle/ik_chain.py); on unless --no-ik-chain")
+                         "(planners/oracle/ik_chain.py); off unless --ik-chain")
     ap.add_argument("--stance-scan", action=argparse.BooleanOptionalAction, default=None,
                     help="dock at the scanned offset from the row (STANCE_DX, scripts/dr_stance_scan.py); "
                          "on unless --no-stance-scan")

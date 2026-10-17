@@ -1,14 +1,19 @@
 # IK chain from the hardest pose, and stance choice by scan
 
 These are two tricks taken from BIMBO_EvoX and b1k_rl_guys. They apply to SeasonDish and
-Depth Recall v1. **Defaults since 2026-10-17 (the owner's call on the measured gain):**
-- The IK chain is on (`MIKASA_IK_CHAIN=0` or `--no-ik-chain` turns it off).
+Depth Recall v1. **Defaults (the owner's calls, 2026-10-17):**
+- The IK chain is off (`MIKASA_IK_CHAIN=1` or `--ik-chain` turns it on). It was on for part
+  of the day; 240 fresh SeasonDish pairs read 201 with it against 194 without (section 4),
+  and the owner turned it back off. The grasp-time route check runs only with the chain.
+  With it off, the planners reproduce `d29f363` (before the chain) bit for bit: SeasonDish
+  actions identical on 10/10 seeds (7790000–7790009), Depth Recall on 3/3 with the dock
+  offset off as well.
 - Depth Recall's scanned dock offset is on (`MIKASA_STANCE_SCAN=0` / `--no-stance-scan`).
 - SeasonDish's stance scan stays off: it never moved the stance.
 
 | Flag | Environment | What it does |
 |---|---|---|
-| `--[no-]ik-chain` | `MIKASA_IK_CHAIN` (default 1) | IK chain from the hardest pose ([`ik_chain.py`](ik_chain.py)) |
+| `--[no-]ik-chain` | `MIKASA_IK_CHAIN` (default 0) | IK chain from the hardest pose ([`ik_chain.py`](ik_chain.py)) |
 | `--[no-]stance-scan` | `MIKASA_STANCE_SCAN` (Depth Recall default 1, SeasonDish 0) | Stance choice by a reach scan ([`stance_scan.py`](stance_scan.py)). SeasonDish's needs the cuRobo server. |
 | — | `MIKASA_GRASP_ROUTE_CHECK` (default 1, with the chain) | SeasonDish: prefer grasps whose whole transfer previews (below) |
 
