@@ -16,7 +16,7 @@ Both switches exist on `scripts/collection_episode.py` and on the Depth Recall p
 command line. `MIKASA_DOCK_ERR=sx,sy,syaw` is a measurement hook in Depth
 Recall's `dock_at`: it moves the dock target by an error the planner is never told about.
 
-All numbers below are measured on gangway with 10 seeds, paired. They are the only
+All numbers below are measured on the H100 server with 10 seeds, paired. They are the only
 numbers in this file.
 
 ## 1. IK chain from the hardest pose
@@ -277,7 +277,7 @@ route check, which is the new default.
 - **Planning time:** median 33.5 s, p90 64 s, max 117 s of the 120 s budget; no episode
   exhausted it.
 - **Steps:** successful episodes average 784, longest 1060 of 1100.
-- **Tests:** 291 passed; the one failure is the known torch pin on gangway.
+- **Tests:** 291 passed; the one failure is the known torch pin on that server.
 
 **Tried and withdrawn: refining fast wrist steps in the upright fold** (`3802c14`).
 - What it did: split a >0.2 rad wrist step into 8 sub-steps and kept it if continuous.
