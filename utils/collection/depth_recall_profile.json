@@ -127,5 +127,12 @@
     "dock_offset_x_m": -0.04,
     "ik_chain": false,
     "motion_revision": "collection_planner_2026_10_18"
+  },
+  "quality_exceptions": {
+    "D5": {
+      "decision": "recorded_not_gated",
+      "owner_decision_utc": "2026-10-18",
+      "reason": "Every transfer drives the base into the cabinet and back out (seven transfers per episode), so 13-15 base direction changes are part of the task; the alternative was a scene the arm reaches without the base, which changes the task. As for CabinetSearch D5: measured and reported per episode, never used to filter."
+    }
   }
 }
