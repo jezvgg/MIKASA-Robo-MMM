@@ -47,6 +47,22 @@ def class_methods_sha(path):
     return hashlib.sha256("\n".join(methods).encode()).hexdigest()
 
 
+def release(version: str) -> str:
+    """A version without its PEP 440 local label: ``2.14.0+cu126`` -> ``2.14.0``.
+
+    The local label names the build of one release (here torch's CUDA 12.6 wheel from
+    the PyTorch index, where PyPI's wheel of the same release says plain ``2.14.0``);
+    the pinned release is what the profile fixes. The installed string is recorded as
+    is in `runtime_signature` ("installed_packages"). Owner's decision 2026-10-17, for
+    collecting on the lab's H100 server whose simulator venv has the cu126 build.
+
+    Example:
+        >>> release("2.14.0+cu126"), release("3.0.0b22")
+        ('2.14.0', '3.0.0b22')
+    """
+    return str(version).split("+", 1)[0]
+
+
 def load_profile(name="cabinet_search"):
     profile = read_json(PROFILE.with_name(profile_name(name) + "_profile.json"))
     overrides = {k: v for k, v in os.environ.items() if k.startswith("MIKASA_")}
@@ -54,7 +70,7 @@ def load_profile(name="cabinet_search"):
         raise ValueError(f"Pinned collection forbids implicit MIKASA overrides: {sorted(overrides)}")
     for name, expected in profile["runtime_packages"].items():
         actual = importlib.metadata.version(name)
-        if actual != expected:
+        if release(actual) != expected:
             raise ValueError(f"Runtime requires {name}=={expected}, found {actual}")
     reference = read_json(REPO / "robots/fetch/reference.json")
     if reference["commit"] != profile["robot_reference"]["commit"]:
@@ -109,6 +125,7 @@ def runtime_signature(profile=None):
         "source_files": files,
         "engine_sha256": digest.hexdigest(),
         "packages": profile["runtime_packages"],
+        "installed_packages": {name: importlib.metadata.version(name) for name in profile["runtime_packages"]},
         "task_config": task_config(profile),
         "profile": profile,
     }
