@@ -45,6 +45,7 @@ from planners import depth_recall_v1_perception as perc
 from planners.oracle import cabinet_place as sp
 from planners.oracle import ik_chain, stance_scan
 from planners.oracle import oracle_common as common
+from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
 
@@ -685,7 +686,10 @@ def release_and_clear(env, planner, task, prop, place):
     The base always returns to the ONE dock line the episode is run from, so there is no
     per-caller distance to pass.
     """
-    res = planner.open_gripper(t=retr.RELEASE_RAMP + 6, ramp=retr.RELEASE_RAMP)
+    # Collection gripper commands are binary (BIBLE 3, checklist B3): one open command
+    # held as long as the old 12-step ramp plus its 6 steps; the fingers still open at
+    # the unchanged PD controller's speed.
+    res = planner.open_gripper(t=retr.RELEASE_RAMP + 6)
     if _BELIEF is not None:
         _BELIEF.release(_index(task, prop), where="released")
     if res != -1 and common.stopped_by_horizon(planner):
@@ -890,12 +894,15 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         # A joint LINE to the nearest IK branch, not a screw: this is the longest
         # Cartesian stroke of the episode and `plan_screw` is a least-norm Jacobian walk
         # that spreads it over every joint, which is the arm rotation the owner saw.
-        res = _ready_by_line(env, planner, task, across, drive=0.0, grasp=across,
+        # C3 execution noise rides this carry only: the prop is held 21 cm over the
+        # counter's tallest object, with no contact, grasp or release inside it.
+        with transfer_phase(planner, "carry prop across to the counter column"):
+            res = _ready_by_line(env, planner, task, across, drive=0.0, grasp=across,
                                  label=f"across to the slot ({prop.name}, torso {torso}, drop {drop})",
                                  slack=(0.0, 0.0, -0.005), touch_needle=None,
                                  rank=roll_rank(task))
-        if res == -1:
-            res = _straight(env, planner, across, stage="across to the slot", tries=2)
+            if res == -1:
+                res = _straight(env, planner, across, stage="across to the slot", tries=2)
         if res != -1 and common.stopped_by_horizon(planner):
             return res, False
         if res != -1:
@@ -1241,17 +1248,23 @@ def choose_assignment(task, blind: bool, rng):
 
 def solve(env, seed=None, debug=False, vis=False, blind=False, *,
           waypoint_noise_seed=None, waypoint_noise_m=0.005,
-          planner_factory=common.default_planner_factory, perception: str = "state"):
+          planner_factory=common.collection_planner_factory, perception: str = "state",
+          execution_noise_seed=None, action_noise=0.003, noise_hold=10):
     """``perception="pointcloud"`` makes every prop pose the planner acts on an estimate
-    from its own cameras (`depth_recall_v1_perception`); ``"state"`` reads the simulator."""
+    from its own cameras (`depth_recall_v1_perception`); ``"state"`` reads the simulator.
+
+    The collection planner (`oracle_common.collection_planner_factory`) is the default, as
+    for the other collected tasks: binary gripper commands switching on even 20 Hz steps,
+    10 Hz action pairs, and C3 execution noise on the extraction carry."""
     assert perception in ("state", "pointcloud"), perception
     with common.planning_budget(4.0):
         return _solve(env, seed, debug, vis, blind, waypoint_noise_seed,
-                      waypoint_noise_m, planner_factory, perception)
+                      waypoint_noise_m, planner_factory, perception,
+                      execution_noise_seed, action_noise, noise_hold)
 
 
 def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
-           perception="state"):
+           perception="state", execution_noise_seed=None, action_noise=0.003, noise_hold=10):
     """Clear the row onto the counter, keep the deepest prop, put the rest back.
 
     Example:
@@ -1267,6 +1280,11 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                if perception == "pointcloud" else None)
     planner = planner_factory(env, debug, vis)
     planner._dock_err = dock_error_rng(seed)
+    if getattr(planner, "supports_execution_noise", False):
+        configure_execution_noise(
+            planner, env, (0 if seed is None else int(seed)) + 300007
+            if execution_noise_seed is None else execution_noise_seed,
+            action_noise=action_noise, noise_hold=noise_hold)
     if _BELIEF is not None:
         _BELIEF.bind_world(planner)
     noise = WaypointNoise((0 if seed is None else int(seed)) + 200003
