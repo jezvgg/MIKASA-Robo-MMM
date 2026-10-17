@@ -217,7 +217,13 @@ def restore_cross_rungs(offset: float, z0: float) -> list:
 #: better. 0.02 asks ~2 cm a step, a fifth of the channel.
 #:
 #: The arm never clips at either step size (0.000 % on all seven channels, same run).
-TORSO_LINE_STEP = float(os.environ.get("MIKASA_DR1_TORSO_STEP", "0.02"))
+#:
+#: Under `pd_joint_pos` 0.02 a step asks 0.4 m/s, and the torso does not follow it: on
+#: the 2026-10-18 collection trial the command led the joint by up to 14 cm, and the
+#: path follower then held the final target until the torso arrived, the same 13D action
+#: for up to 27 policy frames (checklist D6). 0.004 asks 0.08 m/s, inside the torso's
+#: measured upward speed (p95 0.14 m/s), so the command moves on every step.
+TORSO_LINE_STEP = float(os.environ.get("MIKASA_DR1_TORSO_STEP", "0.004"))
 
 #: Largest torso move issued as ONE joint line, metres; longer rides are chunked.
 #:
@@ -1288,13 +1294,12 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     planner = planner_factory(env, debug, vis)
     planner._dock_err = dock_error_rng(seed)
     if hasattr(planner, "prefer_low_roll_ik"):
-        # D2 and D3 on the collection planner: IK goals and paths stay inside the
-        # episode's running roll window (span < pi, every roll within +-pi), and every
-        # plan keeps the elbow-down, wrist-up branch that 92 % of the grasps already used
-        # (122 of 133 closes over the 2026-10-18 trial's 19 successes). Without the window
-        # 6 of those 19 episodes wound a roll joint past pi re-entering the cabinet.
+        # D2 on the collection planner: IK goals and paths stay inside the episode's
+        # running roll window (span < pi, every roll within +-pi). Without it 6 of the
+        # 2026-10-18 trial's 19 successes wound a roll joint past pi re-entering the
+        # cabinet. An episode-wide grasp branch (elbow down, wrist up) was tried with it
+        # and refused the very first dock on 20 of 20 seeds: the start posture is off it.
         planner.prefer_low_roll_ik()
-        planner.set_grasp_branch(elbow=-1, wrist=1)
     if getattr(planner, "supports_execution_noise", False):
         configure_execution_noise(
             planner, env, (0 if seed is None else int(seed)) + 300007
@@ -1481,7 +1486,7 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--blind", action="store_true")
     ap.add_argument("--no-video", action="store_true")
-    ap.add_argument("--assisted-grasp", action="store_true",
+    ap.add_argument("--assisted-grasp", action=argparse.BooleanOptionalAction, default=True,
                     help="weld props to the hand by OmniGibson's rule (changes the physics)")
     ap.add_argument("--perception", choices=("state", "pointcloud"), default="state",
                     help="where prop poses come from: the simulator, or the robot's cameras")

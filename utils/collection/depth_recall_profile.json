@@ -1,5 +1,5 @@
 {
-  "profile_version": 2,
+  "profile_version": 3,
   "env_id": "MikasaDepthRecall-v1",
   "task_variant": "four_props_counter_staging_restore_three",
   "robot_reference": {
@@ -18,7 +18,8 @@
     "sim_config": {
       "control_freq": 20,
       "sim_freq": 100
-    }
+    },
+    "assisted_grasp": true
   },
   "task": {
     "horizon": 5700,
@@ -126,7 +127,7 @@
     "release_gripper": "binary_open_18_control_steps",
     "dock_offset_x_m": -0.04,
     "ik_chain": false,
-    "motion_revision": "collection_planner_2026_10_18"
+    "motion_revision": "collection_planner_ag_2026_10_18"
   },
   "quality_exceptions": {
     "D5": {
