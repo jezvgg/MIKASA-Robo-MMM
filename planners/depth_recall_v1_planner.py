@@ -1287,6 +1287,14 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                if perception == "pointcloud" else None)
     planner = planner_factory(env, debug, vis)
     planner._dock_err = dock_error_rng(seed)
+    if hasattr(planner, "prefer_low_roll_ik"):
+        # D2 and D3 on the collection planner: IK goals and paths stay inside the
+        # episode's running roll window (span < pi, every roll within +-pi), and every
+        # plan keeps the elbow-down, wrist-up branch that 92 % of the grasps already used
+        # (122 of 133 closes over the 2026-10-18 trial's 19 successes). Without the window
+        # 6 of those 19 episodes wound a roll joint past pi re-entering the cabinet.
+        planner.prefer_low_roll_ik()
+        planner.set_grasp_branch(elbow=-1, wrist=1)
     if getattr(planner, "supports_execution_noise", False):
         configure_execution_noise(
             planner, env, (0 if seed is None else int(seed)) + 300007
