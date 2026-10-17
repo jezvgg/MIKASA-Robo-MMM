@@ -284,3 +284,36 @@ route check, which is the new default.
 - Result: 102/130 against 105/130 for the chain alone (1 pair won, 4 lost).
 - Why it lost: the sub-stepped segments are slow, and one episode ran out of its
   1100 steps.
+
+## 4. Collection trial: the contact leg moved the base (fixed in `827cec6`)
+
+The numbers above count successes only. The first trial through the collection pipeline
+(`utils.collection.campaign --profile season_dish`, then the 2026-09-28 acceptance gates,
+export and `utils.collection.checklist`) found what they could not.
+- Setup: 20 fresh development seeds 7790000–7790019, one stream.
+- **Chain as of `02eac4a`:** 18/20 successes, but 16 of the 18 rejected on D5.
+  - D5 allows at most 2 base direction changes per episode.
+  - These had 4–6 each, every one inside the chained contact leg.
+- **Cause.** The knots keep the base of the grasp-planning step. The settle and the
+  descent move the base by a fraction of a millimetre before the contact leg starts.
+  - TOPP turned that offset into a creeping base correction (every command under 0.0014)
+    whose sign flipped.
+  - The straight contact path never moves the base.
+- **Fix.** `chain_contact_path` keeps the root joints where the leg starts, with zero
+  velocity.
+
+Same 20 seeds, same gates:
+
+| | successes | accepted | D5 failures |
+|---|---|---|---|
+| before the chain (`d29f363` + the torch pin `02eac4a`) | 15/20 | 15 | 0 |
+| chain, `02eac4a` | 18/20 | 2 | 16 |
+| chain, `827cec6` | 19/20 | 19 | 0 |
+
+`827cec6` also passes:
+- the payload and upper clearance audits (0 hit frames), transfer tilt under 15° (max 5.7°)
+  and the wrist-only pour;
+- D2, D4, D6 and D7, one grasp sign combination (19/19), E1 visibility ≥ 0.984;
+- export readback of 19 episodes (7375 frames).
+
+Tests: 319 passed, 4 skipped.
