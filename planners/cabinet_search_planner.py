@@ -1107,6 +1107,9 @@ def nudge_the_cube(env, planner, task, res, cab=None):
         if r == -1:
             continue
         res = r
+        # The event the collection gate reads (audit "can still before the push", 2026-10-18):
+        # everything before this step must leave the can where it spawned. Logging only.
+        say(env, "push start", attempt=attempt)
         with common.touchable(planner, "cube"):
             r = common.arm_move(env, planner, push, who=WHO, stage=f"push (try {attempt})",
                                 disable_lift_joint=raised, tries=2)

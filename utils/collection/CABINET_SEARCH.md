@@ -379,3 +379,23 @@ way the arm folds into the drive posture, and if the turn were still long the ba
 back 15 cm off the leaf (`MIKASA_CS_TOUCH_BACKOFF_M`). Seeds 0-9 with assisted grasp:
 **9/10** as before (seed 9 still misses the door close), every touch-dock turn short (47-57
 deg, folding sufficed, no back-off needed), episodes 100-208 steps shorter.
+
+## Profile 16: the assisted-grasp environment (2026-10-18)
+
+The owner's decision: every task is trained and evaluated with assisted grasp. Profile 16 is
+profile 15 with `assisted_grasp: true` in `env_kwargs`. With the weld on, the planner opens a
+leaf with `planners/cabinet_door_bimbo.py` (`door_mode`). Profile 15's arc pull leaves a welded
+hand turned into the leaf's free edge. The door motion therefore differs from the published
+`cabinetsearch-1000ep`.
+
+One more hard gate, "can still before the push" (collection ACCEPTANCE_RULES v4): from reset to
+the first `push start` event, the can moves at most 1 cm sideways and tilts at most 20°. The
+planner logs `push start` right before its deliberate push; the line is logging only.
+
+Why the gate exists:
+- the owner's E5 review saw the can knocked over before the push;
+- a replay of the 1000 published episodes found 7.5 % moving at least 12 frames before the end,
+  and 62 of those tipped more than 45°;
+- the success check passes such episodes.
+
+A balanced pilot with the full gate comes before mass collection.

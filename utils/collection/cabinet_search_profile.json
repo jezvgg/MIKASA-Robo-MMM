@@ -1,5 +1,5 @@
 {
-  "profile_version": 15,
+  "profile_version": 16,
   "env_id": "MikasaCabinetSearch-v0",
   "task_variant": "four_compartments_cola_random_home_nudge",
   "robot_reference": {
@@ -18,7 +18,8 @@
     "sim_config": {
       "control_freq": 20,
       "sim_freq": 100
-    }
+    },
+    "assisted_grasp": true
   },
   "task": {
     "terminal": "nudge",
@@ -126,5 +127,6 @@
     "door_grasp_branch": "elbow_negative_wrist_positive_endpoint_only_shoulder_lift_held_retry",
     "home_arrival_tolerance_m": 0.03,
     "grasp_point_noise": "BIBLE 5 waypoint noise at the grasp points from the episode-seeded free-floor generator: handle grasp uniform +-5 mm in depth (y) and along the vertical bar (z), none across the bar and none for the rare finisher re-grasp; can touch +-5 mm sideways (x) and vertically (z), push depth unchanged. Paired 80 scenes vs profile 14: 80/80 both, all native and held; D2, D3 (209/209 one combination), D4, closing and transport clearance unchanged; an across-bar variant lost 2 of 80 (door not fully closed) and was rejected."
-  }
+  },
+  "assisted_grasp": "Profile 16 = profile 15 with assisted_grasp=True in env_kwargs (owner 2026-10-18: every task is trained and evaluated with assisted grasp). With the weld on, the planner opens a leaf with planners/cabinet_door_bimbo.py (cabinet_search_planner.door_mode: BIMBO_EvoX task 62's servoed arc) instead of profile 15's arc pull, which leaves a welded hand turned into the leaf's free edge. Every env of the collection is built from these kwargs."
 }
