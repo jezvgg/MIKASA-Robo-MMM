@@ -250,9 +250,11 @@ TORSO_LINE_STEP = float(os.environ.get("MIKASA_DR1_TORSO_STEP", "0.004"))
 #:
 #: The line's own knots are already fine (22-26 for a 0.386 m ride, ~1.5 cm each), so
 #: the per-step speed is set by the follower, not the plan — and the follower is shared
-#: with every other task here. Chunking is the part this oracle owns: a short line
-#: cannot build up the same advance.
-TORSO_CHUNK = float(os.environ.get("MIKASA_DR1_TORSO_CHUNK", "0.08"))
+#: with every other task here. Chunking was the part this oracle owned: a short line
+#: cannot build up the same advance. At `TORSO_LINE_STEP` 0.004 there is no advance to
+#: limit, and every chunk ended in its own settling wait on one held action (the release
+#: climbed 0.081 → 0.386 in five chunks; checklist D6), so a ride is one line again.
+TORSO_CHUNK = float(os.environ.get("MIKASA_DR1_TORSO_CHUNK", "0.5"))
 
 #: Torso heights the RESTORE's lateral cross is tried at, in order.
 #:
@@ -564,15 +566,16 @@ DOCK_ERR_OFFSET = 70_001
 def drive_and_settle(planner, task, distance, **kwargs):
     """`drive_straight` with the speed taper, then wait for the base to stop.
 
-    The wait re-issues the drive's last command with the base channel at zero, so a
-    loaded drive keeps its latched arm targets (`hold_pose`).
+    The wait re-issues the drive's last 10 Hz command (the collection planner's
+    `_source_action`; the robot stack's `_last_abs` is cleared after every step) with the
+    base channel at zero, so a loaded drive keeps its latched arm targets (`hold_pose`).
     """
     res = planner.drive_straight(distance, v=0.10, v_floor=DRIVE_FLOOR, **kwargs)
     if res == -1 or common.stopped_by_horizon(planner):
         return res
     for _ in range(BASE_SETTLE_MAX):
         speed = float(np.linalg.norm(_np(task.agent.robot.get_qvel()).reshape(-1)[:2]))
-        last = getattr(planner, "_last_abs", None)
+        last = getattr(planner, "_source_action", None)
         if speed < BASE_SETTLE_SPEED or last is None:
             break
         action = np.asarray(last, dtype=np.float64).copy()
