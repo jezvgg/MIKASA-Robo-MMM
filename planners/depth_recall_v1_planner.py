@@ -76,6 +76,21 @@ def _ready_by_line(*args, **kwargs):
 #: drives holding the longest runs (checklist D6 allows 5 % and 20 frames).
 DRIVE_FLOOR = 0.03
 
+#: After a straight drive the base coasts on: it stops being commanded at its last
+#: (floor) speed and drifted on by up to 1.1 cm (2026-10-18, seed 7990100). The next
+#: plan starts from where the base was when it was made, the path follower's refinement
+#: waits for base, torso and arm to be within 1 cm of the path's end, and it never
+#: commands the base, so a coasting base held the same action until the follower's
+#: "stuck" exit, 27 policy frames (checklist D6). The drive now waits for the base to
+#: stop: below this speed (m/s), for at most `BASE_SETTLE_MAX` control steps.
+BASE_SETTLE_SPEED = 0.005
+BASE_SETTLE_MAX = 12
+
+#: A torso this close to a rung is already there (m); `plan_qpos_line` returns a
+#: one-knot line for it, which `plan_joints` reports as a refusal, and the ladder then
+#: dropped to the next rung for nothing.
+TORSO_REACHED = 0.002
+
 #: Control steps the binary release is held before the hand moves away. Measured
 #: 2026-10-18 on the collection trial: from the grasp width (0.0235 m) the fingers reach
 #: 0.0487 of 0.050 in 6 steps and 0.0495 in 8. The old 18 (a 12-step ramp plus 6) held
@@ -546,6 +561,28 @@ def entry_chain_rank(env, planner, task, prop, row_xyz, entry, drive: float):
 DOCK_ERR_OFFSET = 70_001
 
 
+def drive_and_settle(planner, task, distance, **kwargs):
+    """`drive_straight` with the speed taper, then wait for the base to stop.
+
+    The wait re-issues the drive's last command with the base channel at zero, so a
+    loaded drive keeps its latched arm targets (`hold_pose`).
+    """
+    res = planner.drive_straight(distance, v=0.10, v_floor=DRIVE_FLOOR, **kwargs)
+    if res == -1 or common.stopped_by_horizon(planner):
+        return res
+    for _ in range(BASE_SETTLE_MAX):
+        speed = float(np.linalg.norm(_np(task.agent.robot.get_qvel()).reshape(-1)[:2]))
+        last = getattr(planner, "_last_abs", None)
+        if speed < BASE_SETTLE_SPEED or last is None:
+            break
+        action = np.asarray(last, dtype=np.float64).copy()
+        action[11:13] = 0.0
+        res = planner._step(action)
+        if common.stopped_by_horizon(planner):
+            break
+    return res
+
+
 def dock_error_rng(seed):
     """(rng, (sx, sy, syaw)) when ``MIKASA_DOCK_ERR`` is set, else None."""
     spec = os.environ.get("MIKASA_DOCK_ERR", "").strip()
@@ -603,6 +640,8 @@ def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
     for torso in rungs:
         here = (float(_np(task.agent.robot.get_qpos()).reshape(-1)[ji])
                 if ji is not None else None)
+        if here is not None and abs(torso - here) <= TORSO_REACHED:
+            return planner._guard.last_step, torso
         if here is None or abs(torso - here) <= TORSO_CHUNK:
             waypoints = [torso]
         else:
@@ -774,7 +813,7 @@ def release_and_clear(env, planner, task, prop, place):
 
     base_y = float(_np(task.agent.base_link.pose.p).reshape(-1)[1])
     to_line = float(retr.READY_DOCK_Y - base_y)
-    back = planner.drive_straight(to_line, v=0.10, v_floor=DRIVE_FLOOR)
+    back = drive_and_settle(planner, task, to_line)
     if back != -1:
         res = back
         if common.stopped_by_horizon(planner):
@@ -830,7 +869,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     planner.planner.update_from_simulation()
 
     say(env, "drive into the cabinet", distance=round(drive, 3))
-    res = planner.drive_straight(drive, v=0.10, v_floor=DRIVE_FLOOR)
+    res = drive_and_settle(planner, task, drive)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
@@ -872,7 +911,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     back = carry_out(float(_np(task.agent.base_link.pose.p).reshape(-1)[1]), prop_y, face_y,
                      float(task.cfg.prop_half_xy))
     say(env, "carry out", distance=round(back, 3))
-    res = planner.drive_straight(-back, v=0.10, hold_pose=True, v_floor=DRIVE_FLOOR)
+    res = drive_and_settle(planner, task, -back, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
@@ -1206,7 +1245,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
             say(env, "entry correction refused; driving in as we are")
 
     say(env, "drive into the cabinet, loaded", distance=round(drive, 3))
-    res = planner.drive_straight(drive, v=0.10, hold_pose=True, v_floor=DRIVE_FLOOR)
+    res = drive_and_settle(planner, task, drive, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
