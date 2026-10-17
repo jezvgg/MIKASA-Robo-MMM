@@ -199,3 +199,23 @@ Canonical rest, the smooth aisle route, open fingers at the initial push,
 confirmed grip for reopening, post-release hand clearance and irreversible
 apple-on-plate retention remain unchanged. The target training quota is still
 250 accepted records per drawer; no mass collection is authorized by this pilot.
+
+## Profile 21: the assisted-grasp environment (2026-10-17)
+
+The owner's decision: SameDrawer is trained and evaluated only in the assisted-grasp environment.
+Profile 21 is profile 20 with `assisted_grasp: true` in `env_kwargs`. Every environment of a
+collection is built from those kwargs: the oracle, the native 20 Hz and held-action 10 Hz replays
+and the RGB render. The rule is OmniGibson's (`utils/mikasa/assisted_grasp.py`):
+- the apple is welded rigidly to the hand;
+- a drawer handle is held by a spherical joint;
+- the hold applies while at least two fingers touch the object with the object between the pads
+  and the gripper closing;
+- it is released when the gripper opens.
+
+Planner, motions, cameras, actions and acceptance rules are unchanged. Validation seeds are
+re-frozen under profile 21, because profile 20's list is selected by the planner's success
+without the weld.
+
+Earlier measurement (10 seeds, the collection-faithful runner `scripts/collection_episode.py`):
+9/10 with assisted grasp against 8/10 without. This is not a qualification. A balanced 40-seed
+pilot with the full gate comes first.

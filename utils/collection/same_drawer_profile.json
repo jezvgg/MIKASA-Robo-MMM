@@ -1,5 +1,5 @@
 {
-  "profile_version": 20,
+  "profile_version": 21,
   "env_id": "MikasaSameDrawer-v0",
   "task_variant": "four_drawers_apple_interlude",
   "robot_reference": {
@@ -18,7 +18,8 @@
     "sim_config": {
       "control_freq": 20,
       "sim_freq": 100
-    }
+    },
+    "assisted_grasp": true
   },
   "task": {
     "horizon": 1600,
@@ -216,5 +217,6 @@
     "training_successes_per_drawer": 250,
     "pilot_attempts_per_drawer": 10,
     "count_all_attempts_for_sr": true
-  }
+  },
+  "assisted_grasp": "Profile 21 = profile 20 with assisted_grasp=True in env_kwargs (owner 2026-10-17: training and evaluation use the assisted-grasp environment only). OmniGibson's rule in utils/mikasa/assisted_grasp.py: the apple is welded rigidly and a drawer handle is held by a spherical joint while >=2 fingers touch it with the object between the pads and the gripper is closing; released when the gripper opens. Every env of the collection (oracle, native and held-action replays, RGB render) is built from these kwargs."
 }
