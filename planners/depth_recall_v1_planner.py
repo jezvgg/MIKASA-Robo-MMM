@@ -76,6 +76,12 @@ def _ready_by_line(*args, **kwargs):
 #: drives holding the longest runs (checklist D6 allows 5 % and 20 frames).
 DRIVE_FLOOR = 0.03
 
+#: Control steps the binary release is held before the hand moves away. Measured
+#: 2026-10-18 on the collection trial: from the grasp width (0.0235 m) the fingers reach
+#: 0.0487 of 0.050 in 6 steps and 0.0495 in 8. The old 18 (a 12-step ramp plus 6) held
+#: the same 13D action for 9 policy frames at each of seven releases (checklist D6).
+RELEASE_OPEN_STEPS = 8
+
 #: Perception mode re-docks when the measured row is further than this from the map's
 #: row: the dock's own waypoint noise is 5 mm, the row shift up to 4 cm.
 REDOCK_MIN_M = 0.01
@@ -706,10 +712,9 @@ def release_and_clear(env, planner, task, prop, place):
     The base always returns to the ONE dock line the episode is run from, so there is no
     per-caller distance to pass.
     """
-    # Collection gripper commands are binary (BIBLE 3, checklist B3): one open command
-    # held as long as the old 12-step ramp plus its 6 steps; the fingers still open at
-    # the unchanged PD controller's speed.
-    res = planner.open_gripper(t=retr.RELEASE_RAMP + 6)
+    # Collection gripper commands are binary (BIBLE 3, checklist B3): one open command,
+    # held `RELEASE_OPEN_STEPS`; the fingers open at the unchanged PD controller's speed.
+    res = planner.open_gripper(t=RELEASE_OPEN_STEPS)
     if _BELIEF is not None:
         _BELIEF.release(_index(task, prop), where="released")
     if res != -1 and common.stopped_by_horizon(planner):
