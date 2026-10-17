@@ -604,6 +604,13 @@ def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
             waypoints = [here + (torso - here) * (k + 1) / n for k in range(n)]
         res = -1
         for w in waypoints:
+            if sync:
+                # Re-read BEFORE planning too: after a base drive the planning world still
+                # holds the old base, the line's last knot then carries it, and the
+                # follower's refinement waits for a base position the robot never returns
+                # to until its "stuck" exit (2026-10-18, seed 7990100: one 27-frame hold
+                # of the same action after "torso up to 0.34", checklist D6).
+                planner.planner.update_from_simulation()
             res = retr.plan_joints(env, planner, task, {"torso_lift_joint": float(w)},
                                    label=f"{label} {round(float(w), 3)}", line_only=True,
                                    qpos_step=TORSO_LINE_STEP)
