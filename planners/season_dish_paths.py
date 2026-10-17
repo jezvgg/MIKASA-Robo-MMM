@@ -160,12 +160,22 @@ def chain_contact_path(planner, task, start, knots):
     2026-10-17 on SeasonDish seed 1005, the contact IK was collision-free and the screw to
     the very same pose put ``wrist_flex_link`` into the counter. Every knot is an IK answer
     2 cm from the next; the dense `path_clear` sweep and the roll window still decide.
+
+    The base stands where `start` has it. The knots carry the base of the grasp-planning
+    step, which the settle and the descent have since moved by a fraction of a millimetre;
+    a path through that stale base made TOPP command a creeping base correction whose sign
+    flipped 4-6 times per contact. Measured 2026-10-17 on the 20-seed collection trial
+    (7790000-7790019): 16 of 18 successes failed D5 (base direction changes <= 2), every
+    change inside the contact leg, every command under 0.0014.
     """
     p = planner.planner
     move = list(p.move_group_joint_indices)
     start = np.asarray(start, dtype=float)
     rows = [start] + [np.asarray(k, dtype=float) for k in reversed(knots)]
     full = np.vstack(rows)
+    root = p._root_cols() or []  # move-group columns of the three root joints
+    base = [move[c] for c in root]  # the same joints in the full qpos
+    full[:, base] = start[base]
     arm = ik_chain.arm_columns(task)
     if ik_chain.joint_jump(start, rows[1], arm) > ik_chain.JUMP_RAD:
         planner._last_path_collision = None
@@ -176,6 +186,7 @@ def chain_contact_path(planner, task, start, knots):
         times, pos, vel, acc, duration = p.TOPP(full[:, move], task.control_timestep)
     except RuntimeError:
         return None
+    pos[:, root], vel[:, root], acc[:, root] = start[base], 0.0, 0.0
     timed = np.broadcast_to(start, (len(pos), len(start))).copy()
     timed[:, move] = pos
     if not p.accepts(timed) or not path_clear(planner, start, pos):
