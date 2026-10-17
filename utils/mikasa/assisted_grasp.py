@@ -410,11 +410,14 @@ class AssistedGrasp:
 
 
 class AssistedGraspTask:
-    """Mixin for a task env: ``gym.make(..., assisted_grasp=True)`` welds by the rule.
+    """Mixin for a task env: welds by the rule unless ``gym.make(..., assisted_grasp=False)``.
 
     Put it before ``BaseEnv`` in the bases and define ``_assisted_grasp_objects()`` (the
-    actors the robot picks up). Off by default, and then it adds nothing: no drives, no
-    info key, no state key — a recorded dataset of the task is unchanged. When on:
+    actors the robot picks up). On by default since 2026-10-18 (the owner: every task is
+    trained and evaluated with assisted grasp). Collection profiles say it explicitly, and a
+    profile without the key is the friction grasp (`utils.collection.profile.make_env`), so a
+    recorded dataset keeps its physics. Off, it adds nothing: no drives, no info key, no
+    state key. When on:
 
     * the rule is built after every reconfigure (the agent and the objects exist);
     * every weld is released at the top of ``reset`` (an enabled drive would pull a
@@ -424,7 +427,7 @@ class AssistedGraspTask:
     * the weld survives ``get_state_dict``/``set_state_dict``.
     """
 
-    def __init__(self, *args, assisted_grasp: bool = False, **kwargs):
+    def __init__(self, *args, assisted_grasp: bool = True, **kwargs):
         self.assisted_grasp = bool(assisted_grasp)
         self._ag = None
         super().__init__(*args, **kwargs)

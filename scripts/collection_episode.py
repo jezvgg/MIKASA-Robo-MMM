@@ -23,7 +23,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("task", choices=("season_dish", "same_drawer", "cabinet_search"))
     ap.add_argument("seed", type=int)
-    ap.add_argument("--assisted-grasp", action="store_true")
+    ap.add_argument("--assisted-grasp", action=argparse.BooleanOptionalAction, default=None,
+                    help="override the profile's assisted_grasp (a profile without the key is the friction grasp)")
     ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None, help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
     ap.add_argument("--ik-chain", action=argparse.BooleanOptionalAction, default=None,
                     help="solve the contact before its standoff (planners/oracle/ik_chain.py); "
@@ -51,9 +52,11 @@ def main():
     from utils.test_planner import load_planner
 
     profile = json.loads((PROFILES / f"{args.task}_profile.json").read_text())
-    kwargs = dict(profile["env_kwargs"], obs_mode="state")
-    if args.assisted_grasp:
-        kwargs["assisted_grasp"] = True
+    from utils.collection.profile import profile_env_kwargs
+
+    kwargs = profile_env_kwargs(profile, obs_mode="state")
+    if args.assisted_grasp is not None:
+        kwargs["assisted_grasp"] = args.assisted_grasp
     if args.video_dir:
         kwargs["render_mode"] = "rgb_array"
     seed = args.seed
@@ -95,7 +98,7 @@ def main():
                 waypoint_noise_m=planner_cfg["waypoint_noise_m"], **execution_kwargs))
         info = base.get_info()
         success = verdict == "success" and bool(info["success"].reshape(-1)[0])
-        print(f"collection_episode task={args.task} seed={seed} assisted_grasp={args.assisted_grasp} "
+        print(f"collection_episode task={args.task} seed={seed} assisted_grasp={kwargs['assisted_grasp']} "
               f"ik_backend={args.ik_backend or 'mplib'} ik_chain={os.environ.get('MIKASA_IK_CHAIN', '0')} stance_scan={args.stance_scan} "
               f"verdict={verdict} success={success} steps={int(base.elapsed_steps.reshape(-1)[0])}", flush=True)
         ag = base._ag
@@ -118,7 +121,7 @@ def main():
             print(f"trajectory {args.trajectory_out} steps={len(trace['qpos'])}", flush=True)
         if args.video_dir:
             arm = "chain" if os.environ.get("MIKASA_IK_CHAIN", "0") == "1" else "base"
-            name = f"{args.task}_seed{seed}_{arm}{'_ag' if args.assisted_grasp else ''}_{verdict}"
+            name = f"{args.task}_seed{seed}_{arm}{'_ag' if kwargs['assisted_grasp'] else ''}_{verdict}"
             env.flush_video(name=name)
             print(f"video {args.video_dir}/{name}.mp4", flush=True)
     finally:

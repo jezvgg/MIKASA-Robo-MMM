@@ -24,7 +24,8 @@ def main():
     ap.add_argument("task", choices=("season_dish", "same_drawer", "cabinet_search"))
     ap.add_argument("actions", type=Path)
     ap.add_argument("seed", type=int)
-    ap.add_argument("--assisted-grasp", action="store_true")
+    ap.add_argument("--assisted-grasp", action=argparse.BooleanOptionalAction, default=None,
+                    help="override the profile's assisted_grasp (a profile without the key is the friction grasp)")
     args = ap.parse_args()
 
     import gymnasium as gym
@@ -35,9 +36,11 @@ def main():
     from utils.mikasa.seeding import seed_everything
 
     profile = json.loads((PROFILES / f"{args.task}_profile.json").read_text())
-    kwargs = dict(profile["env_kwargs"], obs_mode="state")
-    if args.assisted_grasp:
-        kwargs["assisted_grasp"] = True
+    from utils.collection.profile import profile_env_kwargs
+
+    kwargs = profile_env_kwargs(profile, obs_mode="state")
+    if args.assisted_grasp is not None:
+        kwargs["assisted_grasp"] = args.assisted_grasp
     actions = np.load(args.actions).astype(np.float32)
     seed_everything(args.seed)
     env = gym.make(profile["env_id"], **kwargs)
@@ -48,7 +51,7 @@ def main():
         info = result["info"]
         flag = lambda k: bool(np.asarray(info[k].cpu() if hasattr(info[k], "cpu") else info[k]).reshape(-1)[0]) \
             if k in info else None
-        print(f"replay task={args.task} seed={args.seed} assisted_grasp={args.assisted_grasp} "
+        print(f"replay task={args.task} seed={args.seed} assisted_grasp={kwargs['assisted_grasp']} "
               f"status={result['status']} success={flag('success')} success_once={flag('success_once')} "
               f"steps={result['control_steps']} of={len(actions) * ACTION_REPEAT}", flush=True)
         ag = base._ag

@@ -703,7 +703,7 @@ def main():
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--blind", action="store_true")
     parser.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None, help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
-    parser.add_argument("--assisted-grasp", action="store_true", help="weld the picked object to the hand by OmniGibson's rule (utils/mikasa/assisted_grasp.py; changes the physics)")
+    parser.add_argument("--assisted-grasp", action=argparse.BooleanOptionalAction, default=True, help="weld the picked object to the hand by OmniGibson's rule (utils/mikasa/assisted_grasp.py; changes the physics)")
     args = parser.parse_args()
     if args.ik_backend is not None:
         os.environ["MIKASA_IK_BACKEND"] = args.ik_backend

@@ -1612,7 +1612,7 @@ if __name__ == "__main__":
     ap.add_argument("--blind", action="store_true")
     ap.add_argument("--no-video", action="store_true")
     ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None, help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
-    ap.add_argument("--assisted-grasp", action="store_true", help="weld the picked object to the hand by OmniGibson's rule (utils/mikasa/assisted_grasp.py; changes the physics)")
+    ap.add_argument("--assisted-grasp", action=argparse.BooleanOptionalAction, default=True, help="weld the picked object to the hand by OmniGibson's rule (utils/mikasa/assisted_grasp.py; changes the physics)")
     args = ap.parse_args()
     if args.ik_backend is not None:
         os.environ["MIKASA_IK_BACKEND"] = args.ik_backend
