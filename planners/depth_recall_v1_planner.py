@@ -75,6 +75,8 @@ def _ready_by_line(*args, **kwargs):
 #: 2026-10-18 on seed 7990000: 39 % of the 10 Hz frames repeated the previous action, the
 #: drives holding the longest runs (checklist D6 allows 5 % and 20 frames).
 DRIVE_FLOOR = 0.03
+#: ... and end at this speed, so the base has little left to coast (m/s).
+DRIVE_END = 0.01
 
 #: After a straight drive the base coasts on: it stops being commanded at its last
 #: (floor) speed and drifted on by up to 1.1 cm (2026-10-18, seed 7990100). The next
@@ -93,9 +95,20 @@ TORSO_REACHED = 0.002
 
 #: Control steps the binary release is held before the hand moves away. Measured
 #: 2026-10-18 on the collection trial: from the grasp width (0.0235 m) the fingers reach
-#: 0.0487 of 0.050 in 6 steps and 0.0495 in 8. The old 18 (a 12-step ramp plus 6) held
-#: the same 13D action for 9 policy frames at each of seven releases (checklist D6).
-RELEASE_OPEN_STEPS = 8
+#: 0.0487 of 0.050 in 6 steps and 0.0495 in 8, 2.5 cm off the prop's faces at 6. The
+#: old 18 (a 12-step ramp plus 6) held the same 13D action for 9 policy frames at each of
+#: seven releases (checklist D6).
+RELEASE_OPEN_STEPS = 6
+
+#: Control steps the binary close is held. The fingers meet the prop within 2 steps
+#: and the assisted-grasp weld needs 0.3 s (6 steps) of that contact; the close
+#: command stays on through the next motion, so 10 leaves the weld 2 steps to spare
+#: where 12 held one action 6 policy frames at each of seven grasps (D6).
+GRASP_CLOSE_STEPS = 10
+
+#: Upper bound on the closing stillness: the task's success needs `hold_steps` (15)
+#: still steps, and the wait now ends at the success instead of always 30 steps.
+FINAL_SETTLE_MAX = 30
 
 #: Perception mode re-docks when the measured row is further than this from the map's
 #: row: the dock's own waypoint noise is 5 mm, the row shift up to 4 cm.
@@ -570,7 +583,7 @@ def drive_and_settle(planner, task, distance, **kwargs):
     `_source_action`; the robot stack's `_last_abs` is cleared after every step) with the
     base channel at zero, so a loaded drive keeps its latched arm targets (`hold_pose`).
     """
-    res = planner.drive_straight(distance, v=0.10, v_floor=DRIVE_FLOOR, **kwargs)
+    res = planner.drive_straight(distance, v=0.10, v_floor=DRIVE_FLOOR, v_end=DRIVE_END, **kwargs)
     if res == -1 or common.stopped_by_horizon(planner):
         return res
     for _ in range(BASE_SETTLE_MAX):
@@ -723,7 +736,7 @@ def grasp_ladder(env, planner, task, prop, *, where: str, lift: float = None):
             if not chk["ok"]:
                 planner.planner.update_from_simulation()
                 continue
-        res = planner.close_gripper(t=12)
+        res = planner.close_gripper(t=GRASP_CLOSE_STEPS)
         if res != -1 and common.stopped_by_horizon(planner):
             return res, False
         if _grasping(task, prop):
@@ -1505,7 +1518,11 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         if not ok:
             return res
 
-    settled = planner.idle_steps(t=retr.SETTLE_STEPS)
+    settled = -1
+    for _ in range(FINAL_SETTLE_MAX):
+        settled = planner.idle_steps(t=1)
+        if settled == -1 or common.stopped_by_horizon(planner) or _b(settled[-1], "success"):
+            break
     if settled == -1:
         return fail(env, "settle wait")
     res = settled

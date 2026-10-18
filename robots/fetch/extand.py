@@ -2255,7 +2255,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         return out
 
     def drive_straight(self, distance, v: float = 0.10, max_steps=None, stop_when=None,
-                       hold_pose: bool = False, v_floor=None):
+                       hold_pose: bool = False, v_floor=None, v_end=None):
         """Drive the base straight by `distance` metres (negative = reverse), unplanned.
 
         The `follow_arc` template with the arc law replaced by a constant: no
@@ -2295,6 +2295,9 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
                 command that changes every step, where a constant cruise records the
                 same 13D action for the whole drive (checklist D6). None keeps the
                 constant speed.
+            v_end: the taper's floor over the second half of the drive (default
+                `v_floor`). A lower end speed leaves less for the base to coast after
+                the last command.
 
         Returns:
             The last gym 5-tuple (or the guard's last step when already truncated);
@@ -2318,6 +2321,9 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         floor = None if v_floor is None else float(v_floor)
         if floor is not None and not 0.0 < floor <= speed:
             raise ValueError(f"v_floor must lie in (0, v]: {v_floor}")
+        end = floor if v_end is None else float(v_end)
+        if end is not None and (floor is None or not 0.0 < end <= speed):
+            raise ValueError(f"v_end needs v_floor and must lie in (0, v]: {v_end}")
         if max_steps is None:
             dt = float(self.base_env.control_timestep)
             max_steps = int(np.ceil(dist / max((speed if floor is None else floor) * dt, 1e-9))) * 2 + 20
@@ -2333,7 +2339,9 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
             )
             now = speed
             if floor is not None:
-                now = floor + (speed - floor) * np.sin(np.pi * min(travelled / max(dist, 1e-9), 1.0))
+                s = min(travelled / max(dist, 1e-9), 1.0)
+                low = floor if s < 0.5 else end
+                now = low + (speed - low) * np.sin(np.pi * s)
             base_action = np.array([np.clip(sign * now, -1.0, 1.0), 0.0])
             action = self._compose(arm_action, body_action, base_action)
             out = self._step(action)
