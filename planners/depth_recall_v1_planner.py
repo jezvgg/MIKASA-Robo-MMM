@@ -562,12 +562,16 @@ def choose_dock_dx(env, planner, task, row_pts, slot_pts) -> float:
     arm = ik_chain.arm_columns(task)
     front = min(task.props, key=lambda o: float(np.linalg.norm(
         _np(o.pose.p).reshape(-1)[:2] - np.asarray(row_pts[0][:2], dtype=float))))
-    grasp, pre = retr.side_grasp_pose(task, retr.SIDE_GRASP_DEPTHS[0], lift=GRASP_LIFTS[0], obj=front)
+    grasp, pre = retr.side_grasp_pose(task, retr.SIDE_GRASP_DEPTHS[0],
+                                      lift=grasp_lifts(task, front)[0], obj=front)
     deeper = sapien.Pose(p=np.asarray(grasp.p) + np.array([0.0, retr.READY_GRASP_SLACK, 0.0]), q=grasp.q)
     far = min(slot_pts, key=lambda q: float(q[0]))
     z_top = float(_np(task._counter_top_z).reshape(-1)[0])
-    place = sapien.Pose(p=[float(far[0]), float(far[1]),
-                           z_top + task.cfg.prop_half_h + GRASP_LIFTS[0] + 0.005], q=grasp.q)
+    # Any prop may own the far pad (it is not read yet in camera mode), and going UP over
+    # it is what the arm runs out of: check the highest place TCP of the four (the boxes
+    # were one size, 6 cm half-height at their first lift).
+    top = max(spec.height / 2.0 + grasp_lifts(task, o)[0] for spec, o in zip(task.cfg.props, task.props))
+    place = sapien.Pose(p=[float(far[0]), float(far[1]), z_top + top + 0.005], q=grasp.q)
     lifted = sapien.Pose(p=np.asarray(place.p) + np.array([0.0, 0.0, sp.RELEASE_LIFT_RUNGS[0]]), q=grasp.q)
     row_x = float(row_pts[0][0])
     verdicts = []
