@@ -38,6 +38,7 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.robocasa.scene_builder import RoboCasaSceneBuilder
 from mani_skill.utils.structs import Pose
 
+from utils.initial_pose import randomize_initial_joints
 from utils.mikasa.assisted_grasp import AssistedGrasp
 from utils.robocasa_utils import parking_pose, require_get_fixture, restore_task_tensor
 
@@ -268,6 +269,12 @@ class DepthRecallV1Config:
     start_jitter_x: float = 0.02
     start_jitter_y: float = 0.08
     start_jitter_yaw: float = 0.10
+    # Uniform reset offsets around the unchanged DSFetch rest pose (C1), as for the other
+    # collected tasks (`utils.initial_pose.randomize_initial_joints`). Without them every
+    # episode of the 2026-10-18 collection trial started from bit-identical joints.
+    initial_arm_jitter_rad: float = 0.04
+    initial_torso_jitter_m: float = 0.01
+    initial_head_jitter_rad: float = 0.05
 
 
 @register_env(
@@ -519,6 +526,8 @@ class DepthRecallV1Task(BaseEnv):
             self.succeeded[env_idx] = False
             self.arrangement_hold[env_idx] = 0
             self.last_eval_step[env_idx] = -1
+
+            randomize_initial_joints(self, env_idx)
 
     def _yaw_quat(self, b: int) -> torch.Tensor:
         """Yaw only. The upright test compares the body's +Z against world +Z, which is
