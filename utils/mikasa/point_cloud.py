@@ -14,8 +14,11 @@ ManiSkill task:
    The support comes from the static scene, which BIMBO's rules allowed as an offline map.
 4. **Cluster** the band on a voxel grid, and label each cluster by colour. BIMBO prefers
    size over colour; here colour IS the identity of a prop by the task's design, so it
-   only names a cluster — geometry still comes from depth.
-5. **Fit the object's model** (surface samples of its collision mesh) by trimmed planar
+   only names a cluster — geometry still comes from depth. A colour is a `HueSignature`
+   (hue, how far from it, how saturated and bright at least), measured on the task's
+   own renders.
+5. **Fit the object's model** (surface samples of its collision mesh: `mesh_model`, or
+   `box_model` for a box) by trimmed planar
    ICP started from every yaw on a grid, and **accept** a fit only if enough of the
    cloud lies on the model (inliers within 8 mm >= 0.55), the residual is small
    (RMS <= 1.2 cm), the cloud is big enough, and the cameras did not see THROUGH the
@@ -111,10 +114,13 @@ class RobotCutter:
             self.links.append((link, allv.min(axis=0) - self.margin, allv.max(axis=0) + self.margin))
 
     def keep(self, points: np.ndarray, extra_boxes: Sequence = ()) -> np.ndarray:
-        """Mask of points outside every link box and every (pose 4x4, half sizes) box."""
+        """Mask of points outside every link box and every extra box: (pose 4x4, half
+        sizes) about the pose's origin, or (pose 4x4, lo, hi) in the pose's frame."""
         keep = np.ones(len(points), dtype=bool)
         boxes = [(link.pose.sp.to_transformation_matrix(), lo, hi) for link, lo, hi in self.links]
-        boxes += [(T, -np.asarray(h) - self.margin, np.asarray(h) + self.margin) for T, h in extra_boxes]
+        for box in extra_boxes:
+            T, lo, hi = box if len(box) == 3 else (box[0], -np.asarray(box[1]), np.asarray(box[1]))
+            boxes.append((T, np.asarray(lo) - self.margin, np.asarray(hi) + self.margin))
         for T, lo, hi in boxes:
             idx = np.nonzero(keep)[0]
             if len(idx) == 0:
@@ -133,18 +139,54 @@ def band(points: np.ndarray, xy_lo, xy_hi, z_lo: float, z_hi: float) -> np.ndarr
             & (points[:, 2] >= z_lo) & (points[:, 2] <= z_hi))
 
 
+@dataclass(frozen=True)
+class HueSignature:
+    """What one object's colour looks like to a camera: its hue (degrees), how far from it
+    a pixel may be, and how saturated and bright the pixel must at least be. Measured on
+    renders of the object, not read off its material: lighting moves both."""
+
+    hue_deg: float
+    max_gap_deg: float = 25.2
+    "0.07 of a turn, `hue_labels`'s default for a plain palette colour."
+    min_sat: float = 0.35
+    min_val: float = 0.12
+
+
+def rgb_to_hsv(rgb: np.ndarray) -> np.ndarray:
+    """(N, 3) uint8 RGB -> (N, 3) HSV in [0, 1], `colorsys.rgb_to_hsv` vectorised."""
+    c = np.asarray(rgb, dtype=np.float64).reshape(-1, 3) / 255.0
+    mx, mn = c.max(axis=1), c.min(axis=1)
+    d = mx - mn
+    s = np.where(mx > 0, d / np.where(mx > 0, mx, 1), 0.0)
+    safe = np.where(d > 0, d, 1)
+    r, g, b = c[:, 0], c[:, 1], c[:, 2]
+    h = np.where(mx == r, (g - b) / safe, np.where(mx == g, 2.0 + (b - r) / safe, 4.0 + (r - g) / safe))
+    h = np.where(d > 0, (h / 6.0) % 1.0, 0.0)
+    return np.stack([h, s, mx], axis=1)
+
+
 def hue_labels(rgb: np.ndarray, palette: Sequence, min_sat: float = 0.35, min_val: float = 0.12,
                max_hue_gap: float = 0.07) -> np.ndarray:
-    """Index of the palette colour nearest in hue, or -1 (grey, dark, or far from all)."""
-    ref = [colorsys.rgb_to_hsv(*c[:3])[0] for c in palette]
+    """Index of the palette entry nearest in hue, or -1 (grey, dark, or far from all).
+
+    An entry is an RGB(A) colour in [0, 1], judged with this function's thresholds, or a
+    `HueSignature`, judged with its own."""
+    sigs = [p if isinstance(p, HueSignature) else
+            HueSignature(colorsys.rgb_to_hsv(*p[:3])[0] * 360.0, max_hue_gap * 360.0, min_sat, min_val)
+            for p in palette]
     out = np.full(len(rgb), -1, dtype=np.int64)
     if len(rgb) == 0:
         return out
-    hsv = np.array([colorsys.rgb_to_hsv(*(c / 255.0)) for c in rgb])
-    ok = (hsv[:, 1] >= min_sat) & (hsv[:, 2] >= min_val)
-    gaps = np.stack([np.minimum(np.abs(hsv[:, 0] - h), 1 - np.abs(hsv[:, 0] - h)) for h in ref], axis=1)
+    hsv = rgb_to_hsv(rgb)
+    gaps = np.stack([np.minimum(np.abs(hsv[:, 0] - g.hue_deg / 360.0), 1 - np.abs(hsv[:, 0] - g.hue_deg / 360.0))
+                     for g in sigs], axis=1)
+    # A pixel may only be named by an entry whose own saturation, brightness and hue band
+    # it satisfies; among those, the nearest in hue.
+    allowed = np.stack([(hsv[:, 1] >= g.min_sat) & (hsv[:, 2] >= g.min_val)
+                        & (gaps[:, k] <= g.max_gap_deg / 360.0) for k, g in enumerate(sigs)], axis=1)
+    gaps = np.where(allowed, gaps, np.inf)
     best = gaps.argmin(axis=1)
-    ok &= gaps[np.arange(len(rgb)), best] <= max_hue_gap
+    ok = np.isfinite(gaps[np.arange(len(rgb)), best])
     out[ok] = best[ok]
     return out
 
@@ -199,6 +241,44 @@ def box_model(half_sizes, n: int = 1500, seed: int = 0) -> np.ndarray:
             p[:, f] = rng.uniform(-half[f], half[f], size=c)
         out.append(p)
     return np.concatenate(out)
+
+
+def mesh_model(parts, n: int = 1500, seed: int = 0, inside_tol: float = 1e-4) -> np.ndarray:
+    """Area-weighted samples of the OUTER surface of an object made of convex parts, in
+    the object's frame (BIMBO: 1500 points of the object's 3D model).
+
+    ``parts`` are trimesh meshes, one per convex collision shape (a RoboCasa object is a
+    convex decomposition). Their faces where two parts touch are inside the object and no
+    camera can see them, so a sample that lies inside another part, or on its surface
+    (within ``inside_tol``: decompositions often touch exactly), is dropped.
+    """
+    from scipy.spatial import ConvexHull
+
+    rng = np.random.default_rng(seed)
+    tris, owner = [], []
+    for k, m in enumerate(parts):
+        v, f = np.asarray(m.vertices, dtype=np.float64), np.asarray(m.faces)
+        tris.append(v[f])
+        owner.append(np.full(len(f), k))
+    tris, owner = np.concatenate(tris), np.concatenate(owner)
+    area = 0.5 * np.linalg.norm(np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]), axis=1)
+    planes = [ConvexHull(np.asarray(m.vertices, dtype=np.float64)).equations for m in parts]
+    out = np.zeros((0, 3))
+    for _ in range(8):                       # top up until n outer points (interior is rare)
+        k = rng.choice(len(tris), size=4 * n, p=area / area.sum())
+        a, b = rng.random(4 * n), rng.random(4 * n)
+        flip = a + b > 1
+        a[flip], b[flip] = 1 - a[flip], 1 - b[flip]
+        t = tris[k]
+        pts = t[:, 0] + a[:, None] * (t[:, 1] - t[:, 0]) + b[:, None] * (t[:, 2] - t[:, 0])
+        inside = np.zeros(len(pts), dtype=bool)
+        for j, eq in enumerate(planes):
+            other = owner[k] != j
+            inside |= other & np.all(pts @ eq[:, :3].T + eq[:, 3] <= inside_tol, axis=1)
+        out = np.concatenate([out, pts[~inside]])
+        if len(out) >= n:
+            break
+    return out[rng.permutation(len(out))[:n]]
 
 
 def _transform(model: np.ndarray, x: float, y: float, z: float, yaw: float) -> np.ndarray:

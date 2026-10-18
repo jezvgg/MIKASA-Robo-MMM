@@ -4,7 +4,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from my_scenes.depth_recall_v1 import DepthRecallV1Config, DepthRecallV1Task
+import dataclasses
+
+from my_scenes.depth_recall_v1 import PROPS, DepthRecallV1Config, DepthRecallV1Task
 
 
 def world():
@@ -16,13 +18,16 @@ def world():
         pad_slots=torch.tensor([[2, 0, 3, 1]]), wrong_pad=torch.tensor([False]),
         _row_points=row, _slot_points=slots, _counter_top_z=torch.tensor([.92]),
         elapsed_steps=torch.tensor([0]), last_eval_step=torch.tensor([-1]),
-        arrangement_hold=torch.tensor([0], dtype=torch.int32))
+        arrangement_hold=torch.tensor([0], dtype=torch.int32),
+        # Origin over mesh bottom, per prop: the scene reads it off the meshes; these
+        # objects' origins are their centres, so it is half the recorded height.
+        _rest_lift=torch.tensor([p.height / 2 for p in cfg.props]))
     for key in ('left_slot', 'restored', 'was_lifted', 'staged'):
         setattr(task, key, torch.zeros((1, 4), dtype=torch.bool))
     for key in ('wrong_assign', 'target_returned', 'two_in_slot', 'succeeded'):
         setattr(task, key, torch.tensor([False]))
     task.pos = row.clone()
-    task.pos[:, :, 2] += cfg.prop_half_h
+    task.pos[:, :, 2] += task._rest_lift
     task.tilt = torch.zeros((1, 4))
     task.grasped = torch.zeros((1, 4), dtype=torch.bool)
     task.settled = torch.ones((1, 4), dtype=torch.bool)
@@ -44,14 +49,14 @@ def own_pads(task):
 def stage_all(task):
     task.was_lifted[:] = True
     task.pos = own_pads(task)
-    task.pos[:, :, 2] += task.cfg.prop_half_h
+    task.pos[:, :, 2] += task._rest_lift
     result = evaluate(task)
     assert result['staged'].all()
 
 
 def restore_blockers(task):
     task.pos[:, :3] = task._row_points[:, :3]
-    task.pos[:, :3, 2] += task.cfg.prop_half_h
+    task.pos[:, :3, 2] += task._rest_lift[:3]
 
 
 def hold(task):
@@ -74,7 +79,7 @@ def test_target_alone_and_shelf_nudges_do_not_count_as_clearing():
     task = world()
     task.pos[:, :3, 0] += .08
     task.pos[:, 3] = own_pads(task)[:, 3]
-    task.pos[:, 3, 2] += task.cfg.prop_half_h
+    task.pos[:, 3, 2] += task._rest_lift[3]
     task.was_lifted[:] = True
     evaluate(task)
     restore_blockers(task)
@@ -108,7 +113,8 @@ def test_wrong_remembered_assignment_is_an_irreversible_error():
     task = world()
     stage_all(task)
     restore_blockers(task)
-    task.pos[:, [0, 1]] = task.pos[:, [1, 0]].clone()
+    # Swapped in the row, each standing at its OWN height (the props differ in height).
+    task.pos[:, [0, 1], :2] = task.pos[:, [1, 0], :2].clone()
     assert evaluate(task)['wrong_assign'].item()
     restore_blockers(task)
     assert not hold(task)['success'].item()
@@ -118,7 +124,7 @@ def test_returning_deepest_prop_is_not_the_requested_chore():
     task = world()
     stage_all(task)
     task.pos[:, 3] = task._row_points[:, 3]
-    task.pos[:, 3, 2] += task.cfg.prop_half_h
+    task.pos[:, 3, 2] += task._rest_lift[3]
     assert evaluate(task)['target_returned'].item()
 
 
@@ -126,7 +132,7 @@ def test_two_released_props_in_one_row_slot_fail():
     task = world()
     stage_all(task)
     restore_blockers(task)
-    task.pos[:, 1] = task.pos[:, 0]
+    task.pos[:, 1, :2] = task.pos[:, 0, :2]          # prop 1 in prop 0's slot, standing
     assert evaluate(task)['two_in_slot'].item()
     assert not hold(task)['success'].item()
 
@@ -136,7 +142,7 @@ def test_counter_staging_requires_released_settled_upright_props(invalid):
     task = world()
     task.was_lifted[:] = True
     task.pos = own_pads(task)
-    task.pos[:, :, 2] += task.cfg.prop_half_h
+    task.pos[:, :, 2] += task._rest_lift
     if invalid == 'held': task.grasped[:] = True
     if invalid == 'moving': task.settled[:] = False
     if invalid == 'tilted': task.tilt[:] = .6
@@ -148,7 +154,7 @@ def test_a_prop_released_on_another_colours_pad_voids_the_episode():
     task = world()
     task.was_lifted[:] = True
     task.pos = task._slot_points.clone()            # slot k, not each prop's own pad
-    task.pos[:, :, 2] += task.cfg.prop_half_h
+    task.pos[:, :, 2] += task._rest_lift
     result = evaluate(task)
     assert result['wrong_pad'].item()
     assert not result['staged'].any() and not result['on_own_pad'].any()
@@ -164,10 +170,52 @@ def test_target_on_another_pad_is_not_success():
     restore_blockers(task)
     task.wrong_pad[:] = False
     task.pos[:, 3] = task._slot_points[:, 0]         # prop 3's pad is slot 1; slot 0 is prop 1's
-    task.pos[:, 3, 2] += task.cfg.prop_half_h
+    task.pos[:, 3, 2] += task._rest_lift[3]
     result = hold(task)
     assert result['target_on_a_slot'].item() and not result['target_on_its_pad'].item()
     assert not result['success'].item()
+
+
+def test_each_prop_is_judged_standing_at_its_own_height():
+    """The shakers' origins stand 4.7 cm over a surface, the bottles' 7.5-8.3 cm: one
+    height for all would call either the short ones or the tall ones not standing."""
+    task = world()
+    stage_all(task)
+    restore_blockers(task)
+    assert hold(task)['success'].item()
+    lifts = task._rest_lift
+    assert float(lifts.max() - lifts.min()) > 2 * task.cfg.upright_tol
+    task.pos[:, 3, 2] += float(lifts.min() - lifts[3])   # the mustard at a shaker's height
+    result = evaluate(task)
+    assert not result['target_on_its_pad'].item() and not result['success'].item()
+
+
+def test_a_tipped_prop_is_not_standing_at_any_height():
+    """Lying on its side a prop's origin is about its footprint half-width up: the
+    tolerance must not admit that for the shortest prop (validate's rule)."""
+    task = world()
+    stage_all(task)
+    restore_blockers(task)
+    task.pos[:, 1, 2] = task._row_points[:, 1, 2] + task.cfg.props[1].half_xy   # lying
+    task.tilt[:] = 0.0                                                       # even if not tilted
+    assert not hold(task)['success'].item()
+
+
+def test_props_are_spices_and_sauces_that_fit_the_row():
+    cfg = DepthRecallV1Config()
+    cfg.validate()
+    assert [p.label for p in cfg.props] == ['ketchup', 'pepper', 'salt', 'mustard']
+    assert len({(p.category, p.instance) for p in cfg.props}) == len(cfg.props)
+    pitch = min(b - a for a, b in zip(cfg.row_slots_y, cfg.row_slots_y[1:]))
+    assert pitch - cfg.max_half_xy > cfg.finger_reach + 0.005
+
+
+@pytest.mark.parametrize('field,value', [('half_xy', 0.029), ('height', 0.09)])
+def test_validate_refuses_a_prop_that_does_not_fit(field, value):
+    bad = dataclasses.replace(PROPS[1], **{field: value})
+    cfg = DepthRecallV1Config(props=(PROPS[0], bad) + PROPS[2:])
+    with pytest.raises(AssertionError):
+        cfg.validate()
 
 
 def test_pads_are_one_per_prop_and_far_enough_apart():
@@ -218,3 +266,13 @@ def test_loaded_drive_can_hold_targets_without_recentring_head(hold_pose):
         np.testing.assert_array_equal(actions[:,:7],np.tile(actions[0,:7],(len(actions),1)))
     else:
         assert np.ptp(actions[:,1])>.01
+
+
+def test_scene_contact_offset_is_the_tasks():
+    """The scene runs with a 5 mm PhysX contact offset (ManiSkill's default is 2 cm) and
+    otherwise BaseEnv's own sim config."""
+    from my_scenes.depth_recall_v1 import SCENE_CONTACT_OFFSET
+
+    cfg = DepthRecallV1Task._default_sim_config.fget(None)
+    assert cfg.scene_config.contact_offset == SCENE_CONTACT_OFFSET == 0.005
+    assert (cfg.sim_freq, cfg.control_freq) == (100, 20)

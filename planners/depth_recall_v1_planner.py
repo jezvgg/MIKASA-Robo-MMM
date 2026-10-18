@@ -193,6 +193,60 @@ GRASP_LIFTS = tuple(
     float(v) for v in os.environ.get("MIKASA_DR1_GRASP_LIFTS", "0.02,0.035,0.045").split(",")
 )
 
+#: Half the finger pads' height in this grasp, metres: the finger links' collision boxes
+#: span +-1.32 cm about the TCP along gripper_link's x (robots/fetch/fetch.urdf meshes),
+#: which the side grasp turns vertical.
+FINGER_HALF_H = 0.0132
+
+#: How far `wrist_flex_link` hangs under the hand's axis in the side grasp, metres, and
+#: the clearance over the support the box's first rung left it (TCP 8.0 cm up, 1.3 cm).
+WRIST_HANG = 0.067
+WRIST_CLEAR = float(os.environ.get("MIKASA_DR1_WRIST_CLEAR", "0.012"))
+
+
+def grasp_lifts(task, prop) -> tuple:
+    """`GRASP_LIFTS` for this prop, each rung clipped into the band where the grasp is
+    sound, duplicates dropped. -> (lift over mid-height, ...), metres.
+
+    The band, as TCP height over the support the prop stands on: at least
+    `WRIST_HANG` + `WRIST_CLEAR` (7.9 cm), or the wrist meets the support; at most the
+    prop's height less `FINGER_HALF_H`, or the finger pads' top edge stands above the
+    prop. The ladder was measured on the 12 cm box, which it fits unchanged (8.0 -
+    10.5 cm in a band of 7.9 - 10.7), and so do the 15 - 16.5 cm bottles. The 9.45 cm
+    shakers do not: their band is 7.9 - 8.1 cm. Their 2 cm rung puts the TCP 6.7 cm up,
+    with no room for the wrist's 6.7 cm hang; on seed 1000 (2026-10-16, before the scene
+    had its 5 mm contact offset) a shaker grasped there stopped 1.1 cm short of its row
+    placement and, released, fell and knocked over the two props restored before it.
+
+    Example:
+        >>> grasp_lifts(task, task.props[1])        # a shaker  # doctest: +SKIP
+        (0.0318, 0.034)
+    """
+    spec = task.cfg.props[_index(task, prop)]
+    mid = spec.height / 2.0
+    lo = WRIST_HANG + WRIST_CLEAR - mid
+    hi = spec.height - FINGER_HALF_H - mid
+    out = []
+    for lift in GRASP_LIFTS:
+        lift = round(min(max(float(lift), lo), hi), 4)
+        if lift not in out:
+            out.append(lift)
+    return tuple(out)
+
+
+#: How much further than asked the base goes on a 0.3 m drive into the cabinet at
+#: 0.10 m/s, metres: the drive's own stop (+1-3 mm) and the coast after it (1.1-1.2 cm).
+#: Measured 2026-10-16 (seeds 1000, 1001): 1.15, 1.44 cm. The LOADED drive asks this much
+#: less: the held prop rides over its row slot with the fingertips 0.4-0.9 cm past its
+#: back face, 1.8-2.3 cm short of the next prop in the row, and on seed 1001 the
+#: overshoot put a finger into that prop (11 N) and knocked it and the one behind it
+#: over. The coast was measured with the untapered drive and no wait; the drive now
+#: tapers and `drive_and_settle` waits for the base to stop, so asking this much less
+#: errs short, which the descent that follows corrects (it is planned from where the
+#: base stopped); erring long pushes the next prop.
+LOADED_DRIVE_COAST = float(os.environ.get("MIKASA_DR1_LOADED_COAST", "0.013"))
+
+
 #: Torso heights the lateral cross is tried at, in order. `None` means "wherever the
 #: carry-out left it" — the first rung is free, the rest cost a joint line.
 #:
@@ -643,6 +697,12 @@ def dock_at(env, planner, task, x: float, *, stage: str, noise=None):
     return res
 
 
+def _torso_now(task) -> float:
+    """The torso lift joint's position now, metres."""
+    j = task.agent.robot.active_joints_map["torso_lift_joint"]
+    return float(_np(task.agent.robot.get_qpos()).reshape(-1)[int(np.asarray(j.active_index).reshape(-1)[0])])
+
+
 def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
     """First rung that plans, reached in `TORSO_CHUNK` steps. Returns (res, rung).
 
@@ -818,9 +878,19 @@ def release_and_clear(env, planner, task, prop, place):
     # 2026-10-16, 13 of 100 perception episodes had this raise refused at knot 0
     # (`gripper_link <-> prop`), and once the base no longer backs away from a pad after a
     # counter placement, nothing else separated the two before the next transfer.
-    with common.touchable(planner, prop.name):
-        up, torso = torso_to(env, planner, task, SHELF_TORSO_RUNGS, label="torso up to",
-                             sync=False)
+    #
+    # UP only. After a row placement the torso is already at its 0.386 stop, and the
+    # first rung's line is then empty, which `plan_joints` books as a refusal: the ladder
+    # went on to 0.34 and LOWERED the open hand 4.6 cm back onto the prop just released.
+    # Measured 2026-10-16 (seed 1001, both modes): a finger or the palm caught a 15.8 g
+    # shaker's top (0.15-0.22 N) and slid it 4 cm, out of its slot or into the next one.
+    # The 243 g box never moved for it.
+    here = _torso_now(task)
+    rungs = tuple(t for t in SHELF_TORSO_RUNGS if t > here + 0.002)
+    up, torso = -1, round(here, 3)
+    if rungs:
+        with common.touchable(planner, prop.name):
+            up, torso = torso_to(env, planner, task, rungs, label="torso up to", sync=False)
     if up != -1:
         res = up
         if common.stopped_by_horizon(planner):
@@ -862,7 +932,8 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     base_p = _np(task.agent.base_link.pose.p).reshape(-1)
     drive = float(retr.WORK_DOCK_Y - base_p[1])
     chosen_lift = None
-    for lift in GRASP_LIFTS:
+    lifts = grasp_lifts(task, prop)
+    for lift in lifts:
         grasp, pre = retr.side_grasp_pose(task, retr.SIDE_GRASP_DEPTHS[0],
                                           lift=lift, obj=_seen(prop))
         if grasp is None:
@@ -881,7 +952,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
             break
         planner.planner.update_from_simulation()
     if chosen_lift is None:
-        return fail(env, f"ready posture for {prop.name}", lifts=list(GRASP_LIFTS)), False
+        return fail(env, f"ready posture for {prop.name}", lifts=list(lifts)), False
     planner.planner.update_from_simulation()
 
     say(env, "drive into the cabinet", distance=round(drive, 3))
@@ -925,7 +996,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     cab = task.cabinets[0]
     face_y = float(np.asarray(cab.pos)[1] - np.asarray(cab.size)[1] / 2.0)
     back = carry_out(float(_np(task.agent.base_link.pose.p).reshape(-1)[1]), prop_y, face_y,
-                     float(task.cfg.prop_half_xy))
+                     float(task.cfg.props[_index(task, prop)].half_xy))
     say(env, "carry out", distance=round(back, 3))
     res = drive_and_settle(planner, task, -back, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
@@ -1124,7 +1195,8 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
                 return chains_at[key]
 
             for torso in COUNTER_GRASP_TORSO_RUNGS:
-                if chained and not any(chains_for(torso, lift, depth) for lift in GRASP_LIFTS
+                if chained and not any(chains_for(torso, lift, depth)
+                                       for lift in grasp_lifts(task, prop)
                                        for depth in retr.SIDE_GRASP_DEPTHS):
                     say(env, "ik chain: no counter grasp at this torso; not lowering to it",
                         prop=prop.name, torso=torso)
@@ -1138,7 +1210,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
                 if common.stopped_by_horizon(planner):
                     return res, False
                 planner.planner.update_from_simulation()
-                for lift in GRASP_LIFTS:
+                for lift in grasp_lifts(task, prop):
                     for depth in retr.SIDE_GRASP_DEPTHS:
                         rank = roll_rank(task)
                         if chained:
@@ -1184,7 +1256,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     if not ok:
         return fail(env, f"take {prop.name} off the counter",
                     torsos=list(COUNTER_GRASP_TORSO_RUNGS),
-                    lifts=list(GRASP_LIFTS)), False
+                    lifts=list(grasp_lifts(task, prop))), False
     _hold(env, planner, task, prop, held=True)
 
     tcp = task.agent.tcp.pose.sp
@@ -1260,16 +1332,17 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         else:
             say(env, "entry correction refused; driving in as we are")
 
-    say(env, "drive into the cabinet, loaded", distance=round(drive, 3))
-    res = drive_and_settle(planner, task, drive, hold_pose=True)
+    say(env, "drive into the cabinet, loaded", distance=round(drive, 3),
+        asked=round(drive - LOADED_DRIVE_COAST, 3))
+    res = drive_and_settle(planner, task, drive - LOADED_DRIVE_COAST, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
         return fail(env, "drive into the cabinet, loaded"), False
+    planner.planner.update_from_simulation()
     if not _grasping(task, prop):
         say(env, f"MISSED: {prop.name} left the gripper on the way in")
         return res, False
-    planner.planner.update_from_simulation()
 
     place = sp.place_pose_for(task, obj=_seen(prop), target=row_xyz, compensate_xy=True)
     others = row_neighbours(task, prop)
