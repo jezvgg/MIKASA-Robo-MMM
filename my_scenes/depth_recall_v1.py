@@ -1,13 +1,15 @@
 """MikasaDepthRecall-v1: retrieve the deepest prop and restore its three blockers.
 
 Four props occupy a seeded front-to-back permutation on a cabinet shelf. They are
-RoboCasa kitchen objects, spices and sauces (`PROPS`: ketchup, pepper and salt shakers,
-mustard), each with its own body colour; three of them are recoloured (see `PROPS`).
-The counter carries four pads, one in each prop's colour, and the episode shuffles
-which counter slot each colour's pad lies on. The props are cleared onto their own
-pads, the one from the deepest position stays there, and the others go back to their
-original places. Every restored prop must previously have stood on its own pad, and a
-prop released on another colour's pad voids the episode (`wrong_pad`).
+RoboCasa kitchen objects, spices and sauces in their own looks (`PROPS`: ketchup, pepper
+and salt shakers, hot sauce). The counter carries four coloured pads, one per prop, and
+the episode shuffles which counter slot each pad lies on; the instruction says which
+prop goes on which pad (`PAD_MAP`, the owner's call 2026-10-16: «просто зададим словарь
+в промпте что куда класть», instead of recolouring the props to match). The props are
+cleared onto their own pads, the one from the deepest position stays there, and the
+others go back to their original places. Every restored prop must previously have stood
+on its own pad, and a prop released on another prop's pad voids the episode
+(`wrong_pad`).
 
 The answer is the association between prop identity and original depth. It is
 available while the shelf is being emptied and excluded from policy observations
@@ -55,15 +57,23 @@ TASK_STATE_KEYS = (
     "arrangement_hold", "last_eval_step", "pad_slots", "wrong_pad",
 )
 
+#: Colour names of the pads, in `PROP_COLORS` order.
+PAD_COLOR_NAMES = ("red", "green", "blue", "yellow")
+
+#: Which pad each prop goes on, in identity order: prop i -> pad i. Fixed for every
+#: episode (the pads' SLOTS are what the episode shuffles), so the map is the same words
+#: in every instruction.
+PAD_MAP = ("ketchup on the red pad, pepper on the green pad, salt on the blue pad, "
+           "hot sauce on the yellow pad")
+
 INSTRUCTIONS = (
-    "Take the props out of the cabinet onto the counter pads of their own colour, "
+    "Take the props out of the cabinet onto the counter pads (" + PAD_MAP + "), "
     "keep the one from the back, and put the others back where they stood.",
-    "Clear the row of props onto the matching coloured pads on the counter, keep the "
+    "Clear the row of props onto the counter pads (" + PAD_MAP + "), keep the "
     "one that stood at the back, and return every other prop to the shelf spot it "
     "came from.",
-    "Empty the shelf row onto the counter, each prop on the pad of its colour, hold on "
-    "to the prop from the deepest spot, and put the rest back exactly where each of "
-    "them was.",
+    "Empty the shelf row onto the counter (" + PAD_MAP + "), hold on to the prop "
+    "from the deepest spot, and put the rest back exactly where each of them was.",
 )
 
 #: The staging pads' plate size. One pad per prop, in that prop's colour; the episode
@@ -76,10 +86,10 @@ INSTRUCTIONS = (
 #: standing prop from the head cameras.
 PAD_HALF = (0.045, 0.045, 0.002)
 
-#: Fixed identity palette — a prop cannot be recoloured per episode, so colour IS
-#: identity and the episode's ticket permutes which SLOT each colour occupies. The pads
-#: use the same colours: pad c belongs to prop c. These four hues are the ones the
-#: coloured-box version of this task measured its pads and its perception on.
+#: The pads' fixed palette: pad c belongs to prop c (`PAD_MAP` names the pairs in the
+#: instruction), and the episode's ticket permutes which SLOT each pad occupies. These
+#: four hues are the ones the coloured-box version of this task measured its pads and its
+#: perception on. The props are no longer drawn in them (`PROPS`).
 PROP_COLORS = (
     (1.0, 0.1, 0.1, 1.0),   # red
     (0.1, 0.8, 0.1, 1.0),   # green
@@ -91,7 +101,7 @@ PROP_COLORS = (
 #: PhysX's contact offset for every shape in this scene, metres (ManiSkill's default is
 #: 0.02). PhysX makes contacts between two shapes as soon as they are within the SUM of
 #: their offsets, 4 cm at the default, and the solver may act on such a contact before the
-#: shapes touch. Measured 2026-10-16 with the 15-19 g RoboCasa props, it did: a mustard
+#: shapes touch. Measured 2026-10-16 with the 15-19 g RoboCasa props, it did: the second
 #: bottle standing in the row was launched 52 cm out of the cabinet while a shaker was
 #: lowered beside it, with the nearest finger and the shaker 1.6-2.1 cm from it at every
 #: control step and no contact of either with it reported (seed 1004, traced step by
@@ -123,26 +133,21 @@ class PropSpec:
     "(visual mesh file name, rgba) pairs: those visual parts are drawn in a flat colour."
 
 
-#: The four props, in identity (colour) order: prop i has colour `PROP_COLORS[i]` and
-#: pad i. Spices and sauces, the owner's choice (2026-10-16).
+#: The four props, in identity order: prop i goes on pad i (`PAD_MAP`). Spices and
+#: sauces, the owner's choice (2026-10-16), each in its own look.
 #:
-#: Why three of them are recoloured. Identity is by colour, and the planner's camera mode
-#: names a prop by hue, so the four need four hues. Measured 2026-10-16 (every RoboCasa
-#: objaverse shaker, condiment, ketchup, jam, spray, liquor and bottled-drink instance,
-#: rendered on this kitchen's counter and segmented): the objects that fit the row
-#: (footprint half-width <= 2.8 cm) are red sauces (ketchup_2/7/8/9/10/11, condiment_0,
-#: hues 0-8 deg) and achromatic shakers (black, white, cream glass, clear glass,
-#: saturation <= 0.13 except the cream one at 0.27). No spice or sauce with another hue
-#: fits: the peach dressing (condiment_3) is 7.4 cm across, the BBQ sauce 7.9, the
-#: orange and purple jam jars 5.6-6.6 cm across and only 5.5-6.8 cm tall, the
-#: yellow-green cooking spray 10.8 cm deep. So the ketchup keeps its own red, and the
-#: other three keep their geometry and get a flat body colour:
-#:
-#: - the pepper shaker's black body is drawn green and the salt shaker's white body blue;
-#:   their tops (black and white, a separate visual part) are untouched, so the pair
-#:   still reads as pepper and salt;
-#: - a second squeeze bottle (ketchup_8, flat orange-red, a different shape from the
-#:   ketchup's) is drawn mustard yellow.
+#: Until the owner's 2026-10-16 call («просто зададим словарь в промпте что куда класть»)
+#: three of them were recoloured so that identity could be read by hue: measured
+#: 2026-10-16 (every RoboCasa objaverse shaker, condiment, ketchup, jam, spray, liquor and
+#: bottled-drink instance, rendered on this kitchen's counter and segmented), the objects
+#: that fit the row (footprint half-width <= 2.8 cm) are red sauces (ketchup_2/7/8/9/10/11,
+#: condiment_0, hues 0-8 deg) and achromatic shakers (black, white, cream glass, clear
+#: glass). Now the instruction names the pad for each prop, and the props keep their own
+#: colours: the ketchup red, the pepper shaker black, the salt shaker white, and the
+#: second squeeze bottle (ketchup_8, flat orange-red, a different shape from the
+#: ketchup's) is the hot sauce. Telling them apart is by object, not by hue: the planner's
+#: state mode reads the simulator; the camera mode (`planners/depth_recall_v1_perception`)
+#: still names props by the old hues and does not support this look yet.
 #:
 #: Measured sizes (collision mesh, RoboCasa scale), all 2026-10-16:
 #: ketchup_7 4.20 x 4.33 x 16.50 cm 19.3 g; shaker_0 / shaker_1 5.17 x 5.09 x 9.45 cm
@@ -150,12 +155,9 @@ class PropSpec:
 #: (xy within 0.6 mm, z exactly half the height).
 PROPS = (
     PropSpec("ketchup", "ketchup", "ketchup_7", half_xy=0.0217, height=0.1650),
-    PropSpec("pepper", "shaker", "shaker_0", half_xy=0.0262, height=0.0945,
-             recolor=(("model_normalized_0.obj", PROP_COLORS[1]),)),
-    PropSpec("salt", "shaker", "shaker_1", half_xy=0.0262, height=0.0945,
-             recolor=(("model_normalized_1.obj", PROP_COLORS[2]),)),
-    PropSpec("mustard", "ketchup", "ketchup_8", half_xy=0.0215, height=0.1500,
-             recolor=(("model_normalized_0.obj", PROP_COLORS[3]),)),
+    PropSpec("pepper", "shaker", "shaker_0", half_xy=0.0262, height=0.0945),
+    PropSpec("salt", "shaker", "shaker_1", half_xy=0.0262, height=0.0945),
+    PropSpec("hot sauce", "ketchup", "ketchup_8", half_xy=0.0215, height=0.1500),
 )
 
 
