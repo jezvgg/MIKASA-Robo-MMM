@@ -69,14 +69,21 @@ def _ready_by_line(*args, **kwargs):
     return retr.ready_by_line(*args, **kwargs)
 
 
-#: The straight drives into the cabinet and back out peak at the old constant 0.10 m/s and
-#: taper to this floor at both ends (`drive_straight(v_floor=)`). At a constant speed the
-#: arm and head are held, so the whole drive records one repeated 13D action. Measured
-#: 2026-10-18 on seed 7990000: 39 % of the 10 Hz frames repeated the previous action, the
-#: drives holding the longest runs (checklist D6 allows 5 % and 20 frames).
-DRIVE_FLOOR = 0.03
+#: The straight drives into the cabinet and back out follow a sine speed profile
+#: (`drive_straight(v_floor=, v_end=)`): from `DRIVE_FLOOR` up to `DRIVE_PEAK` and down to
+#: `DRIVE_END`, m/s. At a constant speed the arm and head are held, so the whole drive
+#: records one repeated 13D action. Measured 2026-10-18 on seed 7990000: 39 % of the 10 Hz
+#: frames repeated the previous action, the drives holding the longest runs (checklist D6
+#: allows 5 % and 20 frames).
+#:
+#: The first profile (0.03 / 0.10 / 0.01) made a 0.29 m drive take 5.1 s against the old
+#: constant 0.10 m/s's 3.1 s; 20 drives an episode, 75 s of driving instead of 48 (seeds
+#: 7990600-601). The owner asked for the old pace back (2026-10-19): 0.05 / 0.15 / 0.02
+#: takes 3.2 s for the same drive (sine model, which gives 5.16 s for the first profile).
+DRIVE_FLOOR = 0.05
+DRIVE_PEAK = 0.15
 #: ... and end at this speed, so the base has little left to coast (m/s).
-DRIVE_END = 0.01
+DRIVE_END = 0.02
 
 #: After a straight drive the base coasts on: it stops being commanded at its last
 #: (floor) speed and drifted on by up to 1.1 cm (2026-10-18, seed 7990100). The next
@@ -641,7 +648,7 @@ def drive_and_settle(planner, task, distance, **kwargs):
     `_source_action`; the robot stack's `_last_abs` is cleared after every step) with the
     base channel at zero, so a loaded drive keeps its latched arm targets (`hold_pose`).
     """
-    res = planner.drive_straight(distance, v=0.10, v_floor=DRIVE_FLOOR, v_end=DRIVE_END, **kwargs)
+    res = planner.drive_straight(distance, v=DRIVE_PEAK, v_floor=DRIVE_FLOOR, v_end=DRIVE_END, **kwargs)
     if res == -1 or common.stopped_by_horizon(planner):
         return res
     for _ in range(BASE_SETTLE_MAX):

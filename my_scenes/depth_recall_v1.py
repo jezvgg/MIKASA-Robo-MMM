@@ -369,7 +369,10 @@ class DepthRecallV1Config:
     # -- the robot start -------------------------------------------------------
     start_y: float = -1.90
     start_yaw_deg: float = 90.0
-    start_jitter_x: float = 0.02
+    # Uniform start offsets about (row x, start_y, start_yaw_deg), as CabinetSearch's
+    # (start_jitter_xy 0.08 m, start_jitter_yaw 0.10 rad); x was 0.02 m until 2026-10-19,
+    # when the owner asked for the robot to appear at a random place as in the other tasks.
+    start_jitter_x: float = 0.08
     start_jitter_y: float = 0.08
     start_jitter_yaw: float = 0.10
     # Uniform reset offsets around the unchanged DSFetch rest pose (C1), as for the other
