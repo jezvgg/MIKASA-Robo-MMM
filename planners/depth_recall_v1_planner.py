@@ -85,6 +85,11 @@ def _ready_by_line(*args, **kwargs):
 #: which gives 5.16 s for the first profile and 3.24 s for the second).
 DRIVE_FLOOR = 0.05
 DRIVE_PEAK = 0.17
+#: The peak scales with the drive's length, reaching `DRIVE_PEAK` at a full 0.29 m drive:
+#: the 1-2 cm drives that clear a released prop peaked at 0.12 m/s, the base was still at
+#: 6-8 cm/s when the distance was reached, and the wait for it to stop took 7 steps of one
+#: held action, two or three times an episode (seed 7990680, D6).
+DRIVE_FULL_M = 0.29
 #: ... and end at this speed, so the base has little left to coast (m/s).
 DRIVE_END = 0.01
 
@@ -112,9 +117,10 @@ RELEASE_OPEN_STEPS = 6
 
 #: Control steps the binary close is held. The fingers meet the prop within 2 steps
 #: and the assisted-grasp weld needs 0.3 s (6 steps) of that contact; the close
-#: command stays on through the next motion, so 10 leaves the weld 2 steps to spare
-#: where 12 held one action 6 policy frames at each of seven grasps (D6).
-GRASP_CLOSE_STEPS = 10
+#: command stays on through the next motion, so the weld still forms if it needs a
+#: step more. 12 held one action 6 policy frames at each of seven grasps; 10 still
+#: left D6 at 5.5-6.0 % once the drives were back to the old pace (seeds 7990680-699).
+GRASP_CLOSE_STEPS = 8
 
 #: Upper bound on the closing stillness: the task's success needs `hold_steps` (15)
 #: still steps, and the wait now ends at the success instead of always 30 steps.
@@ -651,7 +657,8 @@ def drive_and_settle(planner, task, distance, **kwargs):
     `_source_action`; the robot stack's `_last_abs` is cleared after every step) with the
     base channel at zero, so a loaded drive keeps its latched arm targets (`hold_pose`).
     """
-    res = planner.drive_straight(distance, v=DRIVE_PEAK, v_floor=DRIVE_FLOOR, v_end=DRIVE_END, **kwargs)
+    peak = min(DRIVE_PEAK, DRIVE_FLOOR + (DRIVE_PEAK - DRIVE_FLOOR) * abs(float(distance)) / DRIVE_FULL_M)
+    res = planner.drive_straight(distance, v=peak, v_floor=DRIVE_FLOOR, v_end=DRIVE_END, **kwargs)
     if res == -1 or common.stopped_by_horizon(planner):
         return res
     for _ in range(BASE_SETTLE_MAX):
