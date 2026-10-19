@@ -100,7 +100,10 @@ DRIVE_END = 0.01
 #: commands the base, so a coasting base held the same action until the follower's
 #: "stuck" exit, 27 policy frames (checklist D6). The drive now waits for the base to
 #: stop: below this speed (m/s), for at most `BASE_SETTLE_MAX` control steps.
-BASE_SETTLE_SPEED = 0.005
+BASE_SETTLE_SPEED = 0.015
+#: 0.005 until 2026-10-19: with the drives ending at 0.01 m/s the base coasts 3-5 mm
+#: from 0.015, inside the refinement's 1 cm, and waiting on down to 0.005 held one action
+#: for about 23 policy frames an episode at the old pace (D6 at 4.7-5.2 %, seeds 7990720-739).
 BASE_SETTLE_MAX = 12
 
 #: A torso this close to a rung is already there (m); `plan_qpos_line` returns a
@@ -113,7 +116,9 @@ TORSO_REACHED = 0.002
 #: 0.0487 of 0.050 in 6 steps and 0.0495 in 8, 2.5 cm off the prop's faces at 6. The
 #: old 18 (a 12-step ramp plus 6) held the same 13D action for 9 policy frames at each of
 #: seven releases (checklist D6).
-RELEASE_OPEN_STEPS = 6
+RELEASE_OPEN_STEPS = 4
+#: 6 until 2026-10-19: at 4 steps the fingers stand at 0.046 of 0.050, 2 cm and more off
+#: every prop's faces, and the hand only rises after the release.
 
 #: Control steps the binary close is held. The fingers meet the prop within 2 steps
 #: and the assisted-grasp weld needs 0.3 s (6 steps) of that contact; the close
