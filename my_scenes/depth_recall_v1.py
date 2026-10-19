@@ -1,8 +1,8 @@
 """MikasaDepthRecall-v1: retrieve the deepest prop and restore its three blockers.
 
 Four props occupy a seeded front-to-back permutation on a cabinet shelf. They are
-RoboCasa kitchen objects, spices and sauces in their own looks (`PROPS`: ketchup, pepper
-and salt shakers, hot sauce). The counter carries four coloured pads, one per prop, and
+RoboCasa kitchen objects, spices and sauces (`PROPS`: ketchup, pepper and salt shakers,
+mustard). The counter carries four coloured pads, one per prop, and
 the episode shuffles which counter slot each pad lies on; the instruction says which
 prop goes on which pad (`PAD_MAP`, the owner's call 2026-10-16: «просто зададим словарь
 в промпте что куда класть», instead of recolouring the props to match). The props are
@@ -64,7 +64,7 @@ PAD_COLOR_NAMES = ("red", "green", "blue", "yellow")
 #: episode (the pads' SLOTS are what the episode shuffles), so the map is the same words
 #: in every instruction.
 PAD_MAP = ("ketchup on the red pad, pepper on the green pad, salt on the blue pad, "
-           "hot sauce on the yellow pad")
+           "mustard on the yellow pad")
 
 INSTRUCTIONS = (
     "Take the props out of the cabinet onto the counter pads (" + PAD_MAP + "), "
@@ -142,10 +142,12 @@ class PropSpec:
 #: bottled-drink instance, rendered on this kitchen's counter and segmented), the objects
 #: that fit the row (footprint half-width <= 2.8 cm) are red sauces (ketchup_2/7/8/9/10/11,
 #: condiment_0, hues 0-8 deg) and achromatic shakers (black, white, cream glass, clear
-#: glass). Now the instruction names the pad for each prop, and the props keep their own
-#: colours: the ketchup red, the pepper shaker black, the salt shaker white, and the
-#: second squeeze bottle (ketchup_8, flat orange-red, a different shape from the
-#: ketchup's) is the hot sauce. Telling them apart is by object, not by hue: the planner's
+#: glass). Now the instruction names the pad for each prop. Three props keep their own
+#: colours: the ketchup red, the pepper shaker black, the salt shaker white. The second
+#: squeeze bottle (ketchup_8, a different shape from the ketchup's) is drawn in the
+#: yellow pad's colour and called mustard: as its own flat orange-red «hot sauce» it was a
+#: second red bottle beside the ketchup (the owner's call 2026-10-19; mayonnaise was
+#: passed over, it would be white like the salt). Telling them apart is by object: the planner's
 #: state mode reads the simulator; the camera mode (`planners/depth_recall_v1_perception`)
 #: still names props by the old hues and does not support this look yet.
 #:
@@ -157,7 +159,8 @@ PROPS = (
     PropSpec("ketchup", "ketchup", "ketchup_7", half_xy=0.0217, height=0.1650),
     PropSpec("pepper", "shaker", "shaker_0", half_xy=0.0262, height=0.0945),
     PropSpec("salt", "shaker", "shaker_1", half_xy=0.0262, height=0.0945),
-    PropSpec("hot sauce", "ketchup", "ketchup_8", half_xy=0.0215, height=0.1500),
+    PropSpec("mustard", "ketchup", "ketchup_8", half_xy=0.0215, height=0.1500,
+             recolor=(("model_normalized_0.obj", PROP_COLORS[3]),)),
 )
 
 

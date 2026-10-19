@@ -185,7 +185,7 @@ def test_each_prop_is_judged_standing_at_its_own_height():
     assert hold(task)['success'].item()
     lifts = task._rest_lift
     assert float(lifts.max() - lifts.min()) > 2 * task.cfg.upright_tol
-    task.pos[:, 3, 2] += float(lifts.min() - lifts[3])   # the hot sauce at a shaker's height
+    task.pos[:, 3, 2] += float(lifts.min() - lifts[3])   # the mustard at a shaker's height
     result = evaluate(task)
     assert not result['target_on_its_pad'].item() and not result['success'].item()
 
@@ -204,7 +204,7 @@ def test_a_tipped_prop_is_not_standing_at_any_height():
 def test_props_are_spices_and_sauces_that_fit_the_row():
     cfg = DepthRecallV1Config()
     cfg.validate()
-    assert [p.label for p in cfg.props] == ['ketchup', 'pepper', 'salt', 'hot sauce']
+    assert [p.label for p in cfg.props] == ['ketchup', 'pepper', 'salt', 'mustard']
     assert len({(p.category, p.instance) for p in cfg.props}) == len(cfg.props)
     pitch = min(b - a for a, b in zip(cfg.row_slots_y, cfg.row_slots_y[1:]))
     assert pitch - cfg.max_half_xy > cfg.finger_reach + 0.005
@@ -279,8 +279,11 @@ def test_scene_contact_offset_is_the_tasks():
 
 
 def test_the_instruction_names_each_props_pad():
-    from my_scenes.depth_recall_v1 import INSTRUCTIONS, PAD_COLOR_NAMES, PAD_MAP
+    from my_scenes.depth_recall_v1 import INSTRUCTIONS, PAD_COLOR_NAMES, PAD_MAP, PROP_COLORS
     pairs = [f"{spec.label} on the {color} pad" for spec, color in zip(PROPS, PAD_COLOR_NAMES)]
     assert PAD_MAP == ", ".join(pairs)
     assert all(PAD_MAP in text for text in INSTRUCTIONS)
-    assert all(not spec.recolor for spec in PROPS), "props keep their own look; the map names the pads"
+    # Profile 6: a prop is recoloured only into its own pad's colour (the mustard).
+    for spec, color in zip(PROPS, PROP_COLORS):
+        assert all(tuple(rgba) == tuple(color) for _, rgba in spec.recolor), spec.label
+    assert [spec.label for spec in PROPS if spec.recolor] == ["mustard"]
