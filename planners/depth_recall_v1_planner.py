@@ -45,6 +45,7 @@ from planners import depth_recall_v1_perception as perc
 from planners.oracle import cabinet_place as sp
 from planners.oracle import ik_chain, stance_scan
 from planners.oracle import oracle_common as common
+from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
 
@@ -67,6 +68,68 @@ def _ready_by_line(*args, **kwargs):
     kwargs.setdefault("line_step", READY_LINE_STEP)
     return retr.ready_by_line(*args, **kwargs)
 
+
+#: The straight drives into the cabinet and back out follow a sine speed profile
+#: (`drive_straight(v_floor=, v_end=)`): from `DRIVE_FLOOR` up to `DRIVE_PEAK` and down to
+#: `DRIVE_END`, m/s. At a constant speed the arm and head are held, so the whole drive
+#: records one repeated 13D action. Measured 2026-10-18 on seed 7990000: 39 % of the 10 Hz
+#: frames repeated the previous action, the drives holding the longest runs (checklist D6
+#: allows 5 % and 20 frames).
+#:
+#: The first profile (0.03 / 0.10 / 0.01) made a 0.29 m drive take 5.1 s against the old
+#: constant 0.10 m/s's 3.1 s; 20 drives an episode, 75 s of driving instead of 48 (seeds
+#: 7990600-601). The owner asked for the old pace back (2026-10-19). 0.05 / 0.15 / 0.02
+#: gave 3.2 s drives (48.7 s of driving, seeds 7990640-659), but the base coasted on from
+#: 0.02 and the wait for it to stop held one action long enough to put D6 at 5.8-6.5 %.
+#: 0.05 / 0.17 / 0.01 ends as slowly as the first profile and takes 3.3 s (sine model,
+#: which gives 5.16 s for the first profile and 3.24 s for the second).
+DRIVE_FLOOR = 0.05
+DRIVE_PEAK = 0.17
+#: The peak scales with the drive's length, reaching `DRIVE_PEAK` at a full 0.29 m drive:
+#: the 1-2 cm drives that clear a released prop peaked at 0.12 m/s, the base was still at
+#: 6-8 cm/s when the distance was reached, and the wait for it to stop took 7 steps of one
+#: held action, two or three times an episode (seed 7990680, D6).
+DRIVE_FULL_M = 0.29
+#: ... and end at this speed, so the base has little left to coast (m/s).
+DRIVE_END = 0.01
+
+#: After a straight drive the base coasts on: it stops being commanded at its last
+#: (floor) speed and drifted on by up to 1.1 cm (2026-10-18, seed 7990100). The next
+#: plan starts from where the base was when it was made, the path follower's refinement
+#: waits for base, torso and arm to be within 1 cm of the path's end, and it never
+#: commands the base, so a coasting base held the same action until the follower's
+#: "stuck" exit, 27 policy frames (checklist D6). The drive now waits for the base to
+#: stop: below this speed (m/s), for at most `BASE_SETTLE_MAX` control steps.
+BASE_SETTLE_SPEED = 0.015
+#: 0.005 until 2026-10-19: with the drives ending at 0.01 m/s the base coasts 3-5 mm
+#: from 0.015, inside the refinement's 1 cm, and waiting on down to 0.005 held one action
+#: for about 23 policy frames an episode at the old pace (D6 at 4.7-5.2 %, seeds 7990720-739).
+BASE_SETTLE_MAX = 12
+
+#: A torso this close to a rung is already there (m); `plan_qpos_line` returns a
+#: one-knot line for it, which `plan_joints` reports as a refusal, and the ladder then
+#: dropped to the next rung for nothing.
+TORSO_REACHED = 0.002
+
+#: Control steps the binary release is held before the hand moves away. Measured
+#: 2026-10-18 on the collection trial: from the grasp width (0.0235 m) the fingers reach
+#: 0.0487 of 0.050 in 6 steps and 0.0495 in 8, 2.5 cm off the prop's faces at 6. The
+#: old 18 (a 12-step ramp plus 6) held the same 13D action for 9 policy frames at each of
+#: seven releases (checklist D6).
+RELEASE_OPEN_STEPS = 4
+#: 6 until 2026-10-19: at 4 steps the fingers stand at 0.046 of 0.050, 2 cm and more off
+#: every prop's faces, and the hand only rises after the release.
+
+#: Control steps the binary close is held. The fingers meet the prop within 2 steps
+#: and the assisted-grasp weld needs 0.3 s (6 steps) of that contact; the close
+#: command stays on through the next motion, so the weld still forms if it needs a
+#: step more. 12 held one action 6 policy frames at each of seven grasps; 10 still
+#: left D6 at 5.5-6.0 % once the drives were back to the old pace (seeds 7990680-699).
+GRASP_CLOSE_STEPS = 8
+
+#: Upper bound on the closing stillness: the task's success needs `hold_steps` (15)
+#: still steps, and the wait now ends at the success instead of always 30 steps.
+FINAL_SETTLE_MAX = 30
 
 #: Perception mode re-docks when the measured row is further than this from the map's
 #: row: the dock's own waypoint noise is 5 mm, the row shift up to 4 cm.
@@ -151,6 +214,60 @@ GRASP_LIFTS = tuple(
     float(v) for v in os.environ.get("MIKASA_DR1_GRASP_LIFTS", "0.02,0.035,0.045").split(",")
 )
 
+#: Half the finger pads' height in this grasp, metres: the finger links' collision boxes
+#: span +-1.32 cm about the TCP along gripper_link's x (robots/fetch/fetch.urdf meshes),
+#: which the side grasp turns vertical.
+FINGER_HALF_H = 0.0132
+
+#: How far `wrist_flex_link` hangs under the hand's axis in the side grasp, metres, and
+#: the clearance over the support the box's first rung left it (TCP 8.0 cm up, 1.3 cm).
+WRIST_HANG = 0.067
+WRIST_CLEAR = float(os.environ.get("MIKASA_DR1_WRIST_CLEAR", "0.012"))
+
+
+def grasp_lifts(task, prop) -> tuple:
+    """`GRASP_LIFTS` for this prop, each rung clipped into the band where the grasp is
+    sound, duplicates dropped. -> (lift over mid-height, ...), metres.
+
+    The band, as TCP height over the support the prop stands on: at least
+    `WRIST_HANG` + `WRIST_CLEAR` (7.9 cm), or the wrist meets the support; at most the
+    prop's height less `FINGER_HALF_H`, or the finger pads' top edge stands above the
+    prop. The ladder was measured on the 12 cm box, which it fits unchanged (8.0 -
+    10.5 cm in a band of 7.9 - 10.7), and so do the 15 - 16.5 cm bottles. The 9.45 cm
+    shakers do not: their band is 7.9 - 8.1 cm. Their 2 cm rung puts the TCP 6.7 cm up,
+    with no room for the wrist's 6.7 cm hang; on seed 1000 (2026-10-16, before the scene
+    had its 5 mm contact offset) a shaker grasped there stopped 1.1 cm short of its row
+    placement and, released, fell and knocked over the two props restored before it.
+
+    Example:
+        >>> grasp_lifts(task, task.props[1])        # a shaker  # doctest: +SKIP
+        (0.0318, 0.034)
+    """
+    spec = task.cfg.props[_index(task, prop)]
+    mid = spec.height / 2.0
+    lo = WRIST_HANG + WRIST_CLEAR - mid
+    hi = spec.height - FINGER_HALF_H - mid
+    out = []
+    for lift in GRASP_LIFTS:
+        lift = round(min(max(float(lift), lo), hi), 4)
+        if lift not in out:
+            out.append(lift)
+    return tuple(out)
+
+
+#: How much further than asked the base goes on a 0.3 m drive into the cabinet at
+#: 0.10 m/s, metres: the drive's own stop (+1-3 mm) and the coast after it (1.1-1.2 cm).
+#: Measured 2026-10-16 (seeds 1000, 1001): 1.15, 1.44 cm. The LOADED drive asks this much
+#: less: the held prop rides over its row slot with the fingertips 0.4-0.9 cm past its
+#: back face, 1.8-2.3 cm short of the next prop in the row, and on seed 1001 the
+#: overshoot put a finger into that prop (11 N) and knocked it and the one behind it
+#: over. The coast was measured with the untapered drive and no wait; the drive now
+#: tapers and `drive_and_settle` waits for the base to stop, so asking this much less
+#: errs short, which the descent that follows corrects (it is planned from where the
+#: base stopped); erring long pushes the next prop.
+LOADED_DRIVE_COAST = float(os.environ.get("MIKASA_DR1_LOADED_COAST", "0.013"))
+
+
 #: Torso heights the lateral cross is tried at, in order. `None` means "wherever the
 #: carry-out left it" — the first rung is free, the rest cost a joint line.
 #:
@@ -209,15 +326,23 @@ def restore_cross_rungs(offset: float, z0: float) -> list:
 #: better. 0.02 asks ~2 cm a step, a fifth of the channel.
 #:
 #: The arm never clips at either step size (0.000 % on all seven channels, same run).
-TORSO_LINE_STEP = float(os.environ.get("MIKASA_DR1_TORSO_STEP", "0.02"))
+#:
+#: Under `pd_joint_pos` 0.02 a step asks 0.4 m/s, and the torso does not follow it: on
+#: the 2026-10-18 collection trial the command led the joint by up to 14 cm, and the
+#: path follower then held the final target until the torso arrived, the same 13D action
+#: for up to 27 policy frames (checklist D6). 0.004 asks 0.08 m/s, inside the torso's
+#: measured upward speed (p95 0.14 m/s), so the command moves on every step.
+TORSO_LINE_STEP = float(os.environ.get("MIKASA_DR1_TORSO_STEP", "0.004"))
 
 #: Largest torso move issued as ONE joint line, metres; longer rides are chunked.
 #:
 #: The line's own knots are already fine (22-26 for a 0.386 m ride, ~1.5 cm each), so
 #: the per-step speed is set by the follower, not the plan — and the follower is shared
-#: with every other task here. Chunking is the part this oracle owns: a short line
-#: cannot build up the same advance.
-TORSO_CHUNK = float(os.environ.get("MIKASA_DR1_TORSO_CHUNK", "0.08"))
+#: with every other task here. Chunking was the part this oracle owned: a short line
+#: cannot build up the same advance. At `TORSO_LINE_STEP` 0.004 there is no advance to
+#: limit, and every chunk ended in its own settling wait on one held action (the release
+#: climbed 0.081 → 0.386 in five chunks; checklist D6), so a ride is one line again.
+TORSO_CHUNK = float(os.environ.get("MIKASA_DR1_TORSO_CHUNK", "0.5"))
 
 #: Torso heights the RESTORE's lateral cross is tried at, in order.
 #:
@@ -458,12 +583,16 @@ def choose_dock_dx(env, planner, task, row_pts, slot_pts) -> float:
     arm = ik_chain.arm_columns(task)
     front = min(task.props, key=lambda o: float(np.linalg.norm(
         _np(o.pose.p).reshape(-1)[:2] - np.asarray(row_pts[0][:2], dtype=float))))
-    grasp, pre = retr.side_grasp_pose(task, retr.SIDE_GRASP_DEPTHS[0], lift=GRASP_LIFTS[0], obj=front)
+    grasp, pre = retr.side_grasp_pose(task, retr.SIDE_GRASP_DEPTHS[0],
+                                      lift=grasp_lifts(task, front)[0], obj=front)
     deeper = sapien.Pose(p=np.asarray(grasp.p) + np.array([0.0, retr.READY_GRASP_SLACK, 0.0]), q=grasp.q)
     far = min(slot_pts, key=lambda q: float(q[0]))
     z_top = float(_np(task._counter_top_z).reshape(-1)[0])
-    place = sapien.Pose(p=[float(far[0]), float(far[1]),
-                           z_top + task.cfg.prop_half_h + GRASP_LIFTS[0] + 0.005], q=grasp.q)
+    # Any prop may own the far pad (it is not read yet in camera mode), and going UP over
+    # it is what the arm runs out of: check the highest place TCP of the four (the boxes
+    # were one size, 6 cm half-height at their first lift).
+    top = max(spec.height / 2.0 + grasp_lifts(task, o)[0] for spec, o in zip(task.cfg.props, task.props))
+    place = sapien.Pose(p=[float(far[0]), float(far[1]), z_top + top + 0.005], q=grasp.q)
     lifted = sapien.Pose(p=np.asarray(place.p) + np.array([0.0, 0.0, sp.RELEASE_LIFT_RUNGS[0]]), q=grasp.q)
     row_x = float(row_pts[0][0])
     verdicts = []
@@ -526,6 +655,30 @@ def entry_chain_rank(env, planner, task, prop, row_xyz, entry, drive: float):
 DOCK_ERR_OFFSET = 70_001
 
 
+def drive_and_settle(planner, task, distance, **kwargs):
+    """`drive_straight` with the speed taper, then wait for the base to stop.
+
+    The wait re-issues the drive's last 10 Hz command (the collection planner's
+    `_source_action`; the robot stack's `_last_abs` is cleared after every step) with the
+    base channel at zero, so a loaded drive keeps its latched arm targets (`hold_pose`).
+    """
+    peak = min(DRIVE_PEAK, DRIVE_FLOOR + (DRIVE_PEAK - DRIVE_FLOOR) * abs(float(distance)) / DRIVE_FULL_M)
+    res = planner.drive_straight(distance, v=peak, v_floor=DRIVE_FLOOR, v_end=DRIVE_END, **kwargs)
+    if res == -1 or common.stopped_by_horizon(planner):
+        return res
+    for _ in range(BASE_SETTLE_MAX):
+        speed = float(np.linalg.norm(_np(task.agent.robot.get_qvel()).reshape(-1)[:2]))
+        last = getattr(planner, "_source_action", None)
+        if speed < BASE_SETTLE_SPEED or last is None:
+            break
+        action = np.asarray(last, dtype=np.float64).copy()
+        action[11:13] = 0.0
+        res = planner._step(action)
+        if common.stopped_by_horizon(planner):
+            break
+    return res
+
+
 def dock_error_rng(seed):
     """(rng, (sx, sy, syaw)) when ``MIKASA_DOCK_ERR`` is set, else None."""
     spec = os.environ.get("MIKASA_DOCK_ERR", "").strip()
@@ -570,6 +723,12 @@ def dock_at(env, planner, task, x: float, *, stage: str, noise=None):
     return res
 
 
+def _torso_now(task) -> float:
+    """The torso lift joint's position now, metres."""
+    j = task.agent.robot.active_joints_map["torso_lift_joint"]
+    return float(_np(task.agent.robot.get_qpos()).reshape(-1)[int(np.asarray(j.active_index).reshape(-1)[0])])
+
+
 def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
     """First rung that plans, reached in `TORSO_CHUNK` steps. Returns (res, rung).
 
@@ -583,6 +742,8 @@ def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
     for torso in rungs:
         here = (float(_np(task.agent.robot.get_qpos()).reshape(-1)[ji])
                 if ji is not None else None)
+        if here is not None and abs(torso - here) <= TORSO_REACHED:
+            return planner._guard.last_step, torso
         if here is None or abs(torso - here) <= TORSO_CHUNK:
             waypoints = [torso]
         else:
@@ -590,6 +751,13 @@ def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
             waypoints = [here + (torso - here) * (k + 1) / n for k in range(n)]
         res = -1
         for w in waypoints:
+            if sync:
+                # Re-read BEFORE planning too: after a base drive the planning world still
+                # holds the old base, the line's last knot then carries it, and the
+                # follower's refinement waits for a base position the robot never returns
+                # to until its "stuck" exit (2026-10-18, seed 7990100: one 27-frame hold
+                # of the same action after "torso up to 0.34", checklist D6).
+                planner.planner.update_from_simulation()
             res = retr.plan_joints(env, planner, task, {"torso_lift_joint": float(w)},
                                    label=f"{label} {round(float(w), 3)}", line_only=True,
                                    qpos_step=TORSO_LINE_STEP)
@@ -654,7 +822,7 @@ def grasp_ladder(env, planner, task, prop, *, where: str, lift: float = None):
             if not chk["ok"]:
                 planner.planner.update_from_simulation()
                 continue
-        res = planner.close_gripper(t=12)
+        res = planner.close_gripper(t=GRASP_CLOSE_STEPS)
         if res != -1 and common.stopped_by_horizon(planner):
             return res, False
         if _grasping(task, prop):
@@ -685,7 +853,9 @@ def release_and_clear(env, planner, task, prop, place):
     The base always returns to the ONE dock line the episode is run from, so there is no
     per-caller distance to pass.
     """
-    res = planner.open_gripper(t=retr.RELEASE_RAMP + 6, ramp=retr.RELEASE_RAMP)
+    # Collection gripper commands are binary (BIBLE 3, checklist B3): one open command,
+    # held `RELEASE_OPEN_STEPS`; the fingers open at the unchanged PD controller's speed.
+    res = planner.open_gripper(t=RELEASE_OPEN_STEPS)
     if _BELIEF is not None:
         _BELIEF.release(_index(task, prop), where="released")
     if res != -1 and common.stopped_by_horizon(planner):
@@ -734,9 +904,19 @@ def release_and_clear(env, planner, task, prop, place):
     # 2026-10-16, 13 of 100 perception episodes had this raise refused at knot 0
     # (`gripper_link <-> prop`), and once the base no longer backs away from a pad after a
     # counter placement, nothing else separated the two before the next transfer.
-    with common.touchable(planner, prop.name):
-        up, torso = torso_to(env, planner, task, SHELF_TORSO_RUNGS, label="torso up to",
-                             sync=False)
+    #
+    # UP only. After a row placement the torso is already at its 0.386 stop, and the
+    # first rung's line is then empty, which `plan_joints` books as a refusal: the ladder
+    # went on to 0.34 and LOWERED the open hand 4.6 cm back onto the prop just released.
+    # Measured 2026-10-16 (seed 1001, both modes): a finger or the palm caught a 15.8 g
+    # shaker's top (0.15-0.22 N) and slid it 4 cm, out of its slot or into the next one.
+    # The 243 g box never moved for it.
+    here = _torso_now(task)
+    rungs = tuple(t for t in SHELF_TORSO_RUNGS if t > here + 0.002)
+    up, torso = -1, round(here, 3)
+    if rungs:
+        with common.touchable(planner, prop.name):
+            up, torso = torso_to(env, planner, task, rungs, label="torso up to", sync=False)
     if up != -1:
         res = up
         if common.stopped_by_horizon(planner):
@@ -745,7 +925,7 @@ def release_and_clear(env, planner, task, prop, place):
 
     base_y = float(_np(task.agent.base_link.pose.p).reshape(-1)[1])
     to_line = float(retr.READY_DOCK_Y - base_y)
-    back = planner.drive_straight(to_line, v=0.10)
+    back = drive_and_settle(planner, task, to_line)
     if back != -1:
         res = back
         if common.stopped_by_horizon(planner):
@@ -778,7 +958,8 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     base_p = _np(task.agent.base_link.pose.p).reshape(-1)
     drive = float(retr.WORK_DOCK_Y - base_p[1])
     chosen_lift = None
-    for lift in GRASP_LIFTS:
+    lifts = grasp_lifts(task, prop)
+    for lift in lifts:
         grasp, pre = retr.side_grasp_pose(task, retr.SIDE_GRASP_DEPTHS[0],
                                           lift=lift, obj=_seen(prop))
         if grasp is None:
@@ -797,11 +978,11 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
             break
         planner.planner.update_from_simulation()
     if chosen_lift is None:
-        return fail(env, f"ready posture for {prop.name}", lifts=list(GRASP_LIFTS)), False
+        return fail(env, f"ready posture for {prop.name}", lifts=list(lifts)), False
     planner.planner.update_from_simulation()
 
     say(env, "drive into the cabinet", distance=round(drive, 3))
-    res = planner.drive_straight(drive, v=0.10)
+    res = drive_and_settle(planner, task, drive)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
@@ -841,9 +1022,9 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
     cab = task.cabinets[0]
     face_y = float(np.asarray(cab.pos)[1] - np.asarray(cab.size)[1] / 2.0)
     back = carry_out(float(_np(task.agent.base_link.pose.p).reshape(-1)[1]), prop_y, face_y,
-                     float(task.cfg.prop_half_xy))
+                     float(task.cfg.props[_index(task, prop)].half_xy))
     say(env, "carry out", distance=round(back, 3))
-    res = planner.drive_straight(-back, v=0.10, hold_pose=True)
+    res = drive_and_settle(planner, task, -back, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
@@ -890,12 +1071,15 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         # A joint LINE to the nearest IK branch, not a screw: this is the longest
         # Cartesian stroke of the episode and `plan_screw` is a least-norm Jacobian walk
         # that spreads it over every joint, which is the arm rotation the owner saw.
-        res = _ready_by_line(env, planner, task, across, drive=0.0, grasp=across,
+        # C3 execution noise rides this carry only: the prop is held 21 cm over the
+        # counter's tallest object, with no contact, grasp or release inside it.
+        with transfer_phase(planner, "carry prop across to the counter column"):
+            res = _ready_by_line(env, planner, task, across, drive=0.0, grasp=across,
                                  label=f"across to the slot ({prop.name}, torso {torso}, drop {drop})",
                                  slack=(0.0, 0.0, -0.005), touch_needle=None,
                                  rank=roll_rank(task))
-        if res == -1:
-            res = _straight(env, planner, across, stage="across to the slot", tries=2)
+            if res == -1:
+                res = _straight(env, planner, across, stage="across to the slot", tries=2)
         if res != -1 and common.stopped_by_horizon(planner):
             return res, False
         if res != -1:
@@ -1037,7 +1221,8 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
                 return chains_at[key]
 
             for torso in COUNTER_GRASP_TORSO_RUNGS:
-                if chained and not any(chains_for(torso, lift, depth) for lift in GRASP_LIFTS
+                if chained and not any(chains_for(torso, lift, depth)
+                                       for lift in grasp_lifts(task, prop)
                                        for depth in retr.SIDE_GRASP_DEPTHS):
                     say(env, "ik chain: no counter grasp at this torso; not lowering to it",
                         prop=prop.name, torso=torso)
@@ -1051,7 +1236,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
                 if common.stopped_by_horizon(planner):
                     return res, False
                 planner.planner.update_from_simulation()
-                for lift in GRASP_LIFTS:
+                for lift in grasp_lifts(task, prop):
                     for depth in retr.SIDE_GRASP_DEPTHS:
                         rank = roll_rank(task)
                         if chained:
@@ -1097,7 +1282,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     if not ok:
         return fail(env, f"take {prop.name} off the counter",
                     torsos=list(COUNTER_GRASP_TORSO_RUNGS),
-                    lifts=list(GRASP_LIFTS)), False
+                    lifts=list(grasp_lifts(task, prop))), False
     _hold(env, planner, task, prop, held=True)
 
     tcp = task.agent.tcp.pose.sp
@@ -1173,16 +1358,17 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         else:
             say(env, "entry correction refused; driving in as we are")
 
-    say(env, "drive into the cabinet, loaded", distance=round(drive, 3))
-    res = planner.drive_straight(drive, v=0.10, hold_pose=True)
+    say(env, "drive into the cabinet, loaded", distance=round(drive, 3),
+        asked=round(drive - LOADED_DRIVE_COAST, 3))
+    res = drive_and_settle(planner, task, drive - LOADED_DRIVE_COAST, hold_pose=True)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
         return fail(env, "drive into the cabinet, loaded"), False
+    planner.planner.update_from_simulation()
     if not _grasping(task, prop):
         say(env, f"MISSED: {prop.name} left the gripper on the way in")
         return res, False
-    planner.planner.update_from_simulation()
 
     place = sp.place_pose_for(task, obj=_seen(prop), target=row_xyz, compensate_xy=True)
     others = row_neighbours(task, prop)
@@ -1241,17 +1427,23 @@ def choose_assignment(task, blind: bool, rng):
 
 def solve(env, seed=None, debug=False, vis=False, blind=False, *,
           waypoint_noise_seed=None, waypoint_noise_m=0.005,
-          planner_factory=common.default_planner_factory, perception: str = "state"):
+          planner_factory=common.collection_planner_factory, perception: str = "state",
+          execution_noise_seed=None, action_noise=0.003, noise_hold=10):
     """``perception="pointcloud"`` makes every prop pose the planner acts on an estimate
-    from its own cameras (`depth_recall_v1_perception`); ``"state"`` reads the simulator."""
+    from its own cameras (`depth_recall_v1_perception`); ``"state"`` reads the simulator.
+
+    The collection planner (`oracle_common.collection_planner_factory`) is the default, as
+    for the other collected tasks: binary gripper commands switching on even 20 Hz steps,
+    10 Hz action pairs, and C3 execution noise on the extraction carry."""
     assert perception in ("state", "pointcloud"), perception
     with common.planning_budget(4.0):
         return _solve(env, seed, debug, vis, blind, waypoint_noise_seed,
-                      waypoint_noise_m, planner_factory, perception)
+                      waypoint_noise_m, planner_factory, perception,
+                      execution_noise_seed, action_noise, noise_hold)
 
 
 def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
-           perception="state"):
+           perception="state", execution_noise_seed=None, action_noise=0.003, noise_hold=10):
     """Clear the row onto the counter, keep the deepest prop, put the rest back.
 
     Example:
@@ -1267,6 +1459,18 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                if perception == "pointcloud" else None)
     planner = planner_factory(env, debug, vis)
     planner._dock_err = dock_error_rng(seed)
+    if hasattr(planner, "prefer_low_roll_ik"):
+        # D2 on the collection planner: IK goals and paths stay inside the episode's
+        # running roll window (span < pi, every roll within +-pi). Without it 6 of the
+        # 2026-10-18 trial's 19 successes wound a roll joint past pi re-entering the
+        # cabinet. An episode-wide grasp branch (elbow down, wrist up) was tried with it
+        # and refused the very first dock on 20 of 20 seeds: the start posture is off it.
+        planner.prefer_low_roll_ik()
+    if getattr(planner, "supports_execution_noise", False):
+        configure_execution_noise(
+            planner, env, (0 if seed is None else int(seed)) + 300007
+            if execution_noise_seed is None else execution_noise_seed,
+            action_noise=action_noise, noise_hold=noise_hold)
     if _BELIEF is not None:
         _BELIEF.bind_world(planner)
     noise = WaypointNoise((0 if seed is None else int(seed)) + 200003
@@ -1413,7 +1617,11 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         if not ok:
             return res
 
-    settled = planner.idle_steps(t=retr.SETTLE_STEPS)
+    settled = -1
+    for _ in range(FINAL_SETTLE_MAX):
+        settled = planner.idle_steps(t=1)
+        if settled == -1 or common.stopped_by_horizon(planner) or _b(settled[-1], "success"):
+            break
     if settled == -1:
         return fail(env, "settle wait")
     res = settled
@@ -1448,7 +1656,7 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--blind", action="store_true")
     ap.add_argument("--no-video", action="store_true")
-    ap.add_argument("--assisted-grasp", action="store_true",
+    ap.add_argument("--assisted-grasp", action=argparse.BooleanOptionalAction, default=True,
                     help="weld props to the hand by OmniGibson's rule (changes the physics)")
     ap.add_argument("--perception", choices=("state", "pointcloud"), default="state",
                     help="where prop poses come from: the simulator, or the robot's cameras")

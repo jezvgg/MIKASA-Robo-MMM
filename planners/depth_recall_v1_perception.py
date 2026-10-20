@@ -33,8 +33,13 @@ observation-only planners work:
   rule (rays cast between the pads must hit the object) made from the cameras.
 
 What is still read from the simulator: the static scene map above (fixtures, their
-footprints and heights, the props' known size). Truth also goes into the LOGS
-(`pc.audit`, the row shift's error) and nowhere else.
+footprints and heights) and the props' 3D models — their collision meshes in their own
+frames, which is what BEHAVIOR's rules gave BIMBO_EvoX ("3D models of the objects").
+Truth also goes into the LOGS (`pc.audit`, the row shift's error) and nowhere else.
+
+The props are RoboCasa objects (`my_scenes.depth_recall_v1.PROPS`), so the model a fit
+uses is each prop's own mesh (`pc.mesh_model`), fitted at its own rest height, over a
+full turn of yaw; a prop is named by its measured `PROP_HUES` signature.
 """
 
 from __future__ import annotations
@@ -51,6 +56,31 @@ FINGERS = ("l_gripper_finger_link", "r_gripper_finger_link")
 #: Points of the prop's colour that must lie between the open finger pads before a
 #: close. Seen by three cameras a 4.5 cm prop face between the pads gives hundreds.
 PAD_MIN_POINTS = 15
+
+#: How each prop's colour looks to the robot's three cameras, in identity order:
+#: ketchup, pepper shaker body, salt shaker body, mustard. MEASURED 2026-10-16 on the
+#: task's own renders (`left/right_base_camera_link`, `fetch_hand`; seeds 1000-1004, the
+#: props standing in the row and on their pads; only pixels the segmentation gives to
+#: the prop): circular-mean hue 0.0 / 120.0 / 224.5 / 55.3 deg, 99th percentile of the
+#: deviation from it 0.0 / 0.0 / 1.4 / 1.3 deg, colourful pixels' saturation >= 0.57 and
+#: value >= 0.54 (5th percentiles). The materials' own hues are 0 / 120 / 229 / 51: the
+#: renderer moves blue and yellow by 4-5 deg, which is why these are measured. The pads
+#: measured the same hues (0.0 / 120.0 / 224.5 / 55.5), so one palette reads both.
+#: The band is 10 deg, seven times the widest measured spread and well short of the
+#: nearest pair (red and yellow, 55 deg apart); the saturation and value floors are the
+#: ones every colour test in this package used (0.35, 0.12). The shakers' tops (black,
+#: white) are grey to it and belong to no prop, which costs a fit 15-40 % of a shaker's
+#: points and nothing else.
+PROP_HUES = (
+    pc.HueSignature(0.0, 10.0),
+    pc.HueSignature(120.0, 10.0),
+    pc.HueSignature(224.5, 10.0),
+    pc.HueSignature(55.3, 10.0),
+)
+
+#: A fit's yaw search for a general mesh: a full turn (a box needed only a quarter).
+MESH_YAW_SPAN_DEG = 360.0
+MESH_YAW_STEP_DEG = 30.0
 
 
 class _BeliefPose:
@@ -72,28 +102,42 @@ class PerceivedProp:
         return _BeliefPose(self._belief.pose(self.index))
 
     def get_first_collision_mesh(self, to_world_frame: bool = True):
-        import trimesh
-
-        half = self._belief.half
-        T = self._belief.pose(self.index).to_transformation_matrix() if to_world_frame else np.eye(4)
-        return trimesh.creation.box(extents=2 * np.asarray(half), transform=T)
+        """The prop's own collision mesh (its 3D model), at the believed pose."""
+        mesh = self._belief.meshes[self.index].copy()
+        if to_world_frame:
+            mesh.apply_transform(self._belief.pose(self.index).to_transformation_matrix())
+        return mesh
 
 
 class PropBelief:
     """Estimated prop poses, the wrist-camera re-fits, the carry transform and the memory."""
 
-    def __init__(self, task, say=None, fit_cfg: pc.FitConfig = pc.FitConfig()):
-        from my_scenes.depth_recall_v1 import PROP_COLORS
+    def __init__(self, task, say=None, fit_cfg: pc.FitConfig = pc.FitConfig(
+            yaw_span_deg=MESH_YAW_SPAN_DEG, yaw_step_deg=MESH_YAW_STEP_DEG)):
+        from mani_skill.utils.geometry.trimesh_utils import get_component_meshes
 
         self.task, self.cfg, self.fit_cfg = task, task.cfg, fit_cfg
         self.say = say or (lambda message, **data: None)
-        self.colors = PROP_COLORS
+        assert len(PROP_HUES) >= task.cfg.n_props, "one measured colour signature per prop"
+        self.colors = PROP_HUES[: task.cfg.n_props]
         missing = [uid for uid in BASE_CAMS + (HAND_CAM,) if uid not in task._sensors]
         if missing:
             raise RuntimeError(f"pointcloud perception needs the cameras {missing}; the env "
                                "was built without them (a render backend is required)")
-        self.half = (task.cfg.prop_half_xy, task.cfg.prop_half_xy, task.cfg.prop_half_h)
-        self.model = pc.box_model(self.half, n=fit_cfg.model_points)
+        # Each prop's 3D model, in its own frame: the merged collision mesh (grasp and
+        # place poses read its bounds), its convex parts (the fit's surface samples), the
+        # origin's height over the mesh bottom, and the mesh's bounds (the carried prop's
+        # box for the robot cut).
+        self.meshes, self.models, self.rest_lift, self.bounds, self.height = [], [], [], [], []
+        for prop in task.props:
+            mesh = prop.get_first_collision_mesh(to_world_frame=False)
+            parts = get_component_meshes(prop._bodies[0])
+            b = np.asarray(mesh.bounds, dtype=np.float64)
+            self.meshes.append(mesh)
+            self.models.append(pc.mesh_model(parts, n=fit_cfg.model_points))
+            self.rest_lift.append(-float(b[0, 2]))
+            self.bounds.append(b)
+            self.height.append(float(b[1, 2] - b[0, 2]))
         self.cutter = pc.RobotCutter(task.agent.robot)
         self.est: dict = {}          # prop index -> dict(x, y, z, yaw, where, fit metrics)
         self.row_slot: dict = {}     # prop index -> row slot it was SEEN in before it moved
@@ -179,10 +223,10 @@ class PropBelief:
         extra = []
         if self.held is not None:
             T = self.pose(self.held[0]).to_transformation_matrix()
-            extra.append((T, self.half))
+            extra.append((T, self.bounds[self.held[0]][0], self.bounds[self.held[0]][1]))
         keep = self.cutter.keep(cloud.points, extra)
         lo, hi, z0 = self._region(where)
-        h = 2 * self.cfg.prop_half_h
+        h = max(self.height)
         in_band = keep & pc.band(cloud.points, lo, hi, z0 + 0.01, z0 + h + 0.02)
         pts, rgb = cloud.points[in_band], cloud.rgb[in_band]
         labels = pc.hue_labels(rgb, self.colors)
@@ -210,7 +254,7 @@ class PropBelief:
                 fits[i] = dict(accepted=False, reasons=["not seen"], n=len(groups[0]) if groups else 0)
                 continue
             seen = mine[groups[0]]
-            z = z0 + self.cfg.prop_half_h
+            z = z0 + self.rest_lift[i]          # the origin's height on this support
             init = None
             anchor = None
             if anchors is not None:
@@ -223,7 +267,7 @@ class PropBelief:
                 init = anchor
             elif i in self.est:
                 init = (self.est[i]["x"], self.est[i]["y"])
-            fit = pc.fit_planar(seen, self.model, z, cloud.views, self.fit_cfg, init_xy=init)
+            fit = pc.fit_planar(seen, self.models[i], z, cloud.views, self.fit_cfg, init_xy=init)
             fits[i] = fit
             if fit["accepted"]:
                 self.est[i] = dict(fit, where=where, coarse=False)
@@ -241,8 +285,11 @@ class PropBelief:
             if "rms" in fit:
                 entry.update(rms_mm=round(fit["rms"] * 1000, 1), inlier=round(fit["inlier"], 2),
                              through=round(fit["see_through"], 2))
-                # Truth, for the LOG only: how far the estimate is from the prop.
-                entry.update(pc.audit(fit, self.task.props[i].pose.sp))
+                # Truth, for the LOG only: how far the estimate is from the prop. The
+                # four props are round, so their yaw is not observable and its error
+                # is logged over a full turn, meaning nothing.
+                entry.update(pc.audit(fit, self.task.props[i].pose.sp,
+                                      yaw_period_deg=self.fit_cfg.yaw_span_deg))
             if not fit.get("accepted"):
                 entry["why"] = "; ".join(fit.get("reasons", []))
             if "coarse_xy" in fit:
@@ -412,7 +459,7 @@ class PropBelief:
         BIMBO_EvoX casts rays from one pad to the other and needs the object to cut them.
         No camera sees that band: the hand stands in front of it (measured 2026-10-16,
         seed 1000: 600 prop points within 20 cm of the hand, none in the pads' own
-        band). The prop is a rigid upright prism, so the test is the one the rays make,
+        band). The prop is a rigid upright body, so the test is the one the rays make,
         taken over its whole height: points of its colour between the pads' inner faces
         (closing axis) and within the pads' length (approach axis), at any height the
         prop has (the remaining axis, extended by the prop's height both ways). A close
@@ -423,7 +470,7 @@ class PropBelief:
         # that is not the closing axis runs along the prop's height.
         up = next((k for k in range(3) if k not in (axis, 2)), None)
         lo, hi = lo.copy(), hi.copy()
-        H = 2 * self.cfg.prop_half_h
+        H = self.height[i]
         if up is not None:
             lo[up], hi[up] = lo[up] - H, hi[up] + H
         cloud = pc.capture(self.task, cams)

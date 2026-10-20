@@ -1,9 +1,15 @@
 # Depth Recall v1 collection
 
-`MikasaDepthRecall-v1` uses four coloured props in a cabinet row. The expert
-removes each onto the counter pad of its own colour (the episode shuffles which
+`MikasaDepthRecall-v1` uses four props in a cabinet row — RoboCasa spices and sauces
+since 2026-10-16 (ketchup, pepper and salt shakers, mustard), each its own colour. The
+expert removes each onto the counter pad of its own colour (the episode shuffles which
 counter slot each colour's pad lies on), keeps the deepest prop, and returns the
 three blockers to their original shelf positions.
+
+> **Props changed 2026-10-16 (branch `feat/depth-recall-v1-realistic-props`).** The four
+> coloured 4.5 × 4.5 × 12 cm boxes are RoboCasa objects; see
+> [RoboCasa props](#robocasa-props-spices-and-sauces-2026-10-16) (the last section). Every
+> measurement in the other sections was made with the boxes.
 
 > **Task changed 2026-10-16 (branch `feat/depth-recall-v1-colored-pads`).** The pads are
 > coloured per prop and 18 cm apart (were all yellow, 12 cm, any free slot). Everything
@@ -50,7 +56,9 @@ URDF/SRDF, controllers, cameras and meshes are unchanged.
 
 ## Geometry and motion
 
-The four props measure 4.5 × 4.5 × 12 cm. The shelf row has 7 cm pitch; the counter
+The four props measured 4.5 × 4.5 × 12 cm until 2026-10-16; they are now RoboCasa
+objects 4.2-5.2 cm across and 9.45-16.5 cm tall
+([RoboCasa props](#robocasa-props-spices-and-sauces-2026-10-16)). The shelf row has 7 cm pitch; the counter
 slots have 18 cm pitch across a 54 cm span west of the row, at y = -0.56 (see
 [Coloured pads](#coloured-pads-2026-10-16)). Their 9 cm pads, one per prop colour, are
 collision-free markings on the existing physical countertop, not separate platforms. Increasing a marker would not add support surface or grasp
@@ -412,3 +420,101 @@ finger through the counter prop it was reaching for; the prop fell over and the 
 camera then refused, rightly, to fit an upright prop to a lying one (traced by replaying
 both seeds with every accepted line re-checked at 0.01 rad). With the dense check all
 four modes pass 100/100.
+
+## RoboCasa props: spices and sauces (2026-10-16)
+
+The owner's change: the four coloured boxes become RoboCasa kitchen objects, spices and
+sauces. Identity is still the colour, so each prop needs its own hue, and its pad has it.
+
+| prop | pad | RoboCasa object (category / instance) | collision mesh at RoboCasa's scale | mass | drawn |
+|---|---|---|---|---|---|
+| `prop_0` ketchup | red | `ketchup` / `ketchup_7`, squeeze bottle | 4.20 × 4.33 × 16.50 cm | 19.3 g | its own red |
+| `prop_1` pepper | green | `shaker` / `shaker_0` | 5.17 × 5.09 × 9.45 cm | 15.8 g | black body green; black top kept |
+| `prop_2` salt | blue | `shaker` / `shaker_1` | 5.17 × 5.09 × 9.45 cm | 15.8 g | white body blue; white top kept |
+| `prop_3` mustard | yellow | `ketchup` / `ketchup_8`, squeeze bottle | 4.28 × 4.30 × 15.00 cm | 17.4 g | flat orange-red drawn yellow |
+
+**Why three are recoloured.** Every objaverse shaker, condiment, ketchup, jam, spray,
+liquor and bottled-drink instance was loaded at its registry scale, rendered on this
+kitchen's counter and segmented (`probe_props`, 2026-10-16). The ones that fit the row
+(footprint half-width <= 2.8 cm) are red sauces (`ketchup_2/7/8/9/10/11`,
+`condiment_0`, hues 0-8°) and achromatic shakers (black, white, cream glass, clear glass;
+saturation <= 0.27). The spices and sauces with other hues are too wide (peach dressing
+7.4 cm, BBQ sauce 7.9 cm, cooking spray 10.8 cm deep) or are short jam jars. So the
+ketchup keeps its red and the other three keep their geometry and get a flat body colour
+(`load_objaverse_actor(recolor=...)`; SAPIEN takes the albedo from a texture when there is
+one, so the recoloured part's texture is dropped). The pads keep the four hues the
+box version measured. **This is the owner's call:** recolouring is the only way found to
+keep salt and pepper shakers with hue identity; the alternatives are other objects or an
+identity that is not hue.
+
+**Scene.** `PROPS` records each object and its measured footprint and height;
+`DepthRecallV1Config.props` replaces `prop_half_xy` / `prop_half_h`, `validate()` checks
+the row against the widest prop (7 cm pitch − 2.62 cm > finger reach + 5 mm) and every
+prop's height against the side grasp's band (>= 9.2 cm, below), and `_load_scene`
+re-measures the loaded meshes and refuses to build if an asset has drifted by more than
+a millimetre. A RoboCasa object's origin is its mesh centre, not its base, so the spawn
+and the "standing on the shelf / counter" checks use each prop's own rest lift (origin
+over mesh bottom: 8.25 / 4.75 / 4.75 / 7.5 cm). The task logic (row memory, own-colour
+pads, latches, success) is unchanged.
+
+**PhysX contact offset 5 mm** (`SCENE_CONTACT_OFFSET`, ManiSkill's default 2 cm). PhysX
+makes contacts between two shapes within the sum of their offsets and its solver acted on
+them before anything touched: traced step by step on seed 1004, a 17 g mustard bottle
+was launched out of the row while a finger and the shaker being lowered were 1.6-2.1 cm
+from it and no contact of either with it was reported. The 243 g boxes never showed it.
+
+**Planner** (`depth_recall_v1_planner.py`), each change from a traced failure:
+
+- `grasp_lifts`: the grasp-lift ladder is clipped into the band where a side grasp is
+  sound, TCP 7.9 cm or more over the support (the wrist hangs 6.7 cm under the hand) and
+  the finger pads (+-1.32 cm) not above the prop's top. The 12 cm box and the bottles keep
+  the ladder unchanged; the 9.45 cm shakers get 3.18 and 3.4 cm (their 2 cm rung left the
+  wrist no room over the support).
+- `settle_base` after both drives into the cabinet: the base coasts 1.1-1.2 cm after
+  `drive_straight`, so a stroke planned at the drive's end overshot by that much (grasp
+  stroke 1.7 cm past its goal; row placements 1.2-1.4 cm deep).
+- `LOADED_DRIVE_COAST`: the loaded drive-in asks 1.3 cm less (measured overshoot
+  1.15-1.44 cm); a finger otherwise reached the next prop in the row.
+- After a release the torso only ever rises: after a row placement it is already at its
+  0.386 stop, the empty line to it was booked as a refusal and the ladder LOWERED the open
+  hand 4.6 cm onto the prop just released (a 15.8 g shaker slid 4 cm out of its slot).
+- The carry-out uses the prop's own half-width.
+
+**Perception** (`depth_recall_v1_perception.py`, `utils/mikasa/point_cloud.py`):
+
+- the fit model is each prop's own collision mesh: `mesh_model` samples the outer surface
+  of its convex parts (faces inside or on another part dropped), fitted at the prop's own
+  rest height over a full turn of yaw (30° grid); the perceived mesh the planner reads
+  bounds from is the prop's own mesh at the believed pose; the carried prop's cut box is
+  its mesh bounds;
+- colour signatures (`PROP_HUES`) measured on the task's own renders from the three robot
+  cameras (seeds 1000-1004, segmented pixels, props in the row and on their pads): hues
+  0.0 / 120.0 / 224.5 / 55.3°, 99th-percentile spread <= 1.4°; the materials' own hues
+  are 0 / 120 / 229 / 51 — the renderer moves blue and yellow by 4-5°. Bands are 10°;
+  saturation >= 0.35, value >= 0.12 as before. The pads measured the same hues, so
+  `identify_pads` reads them with the same palette. BIMBO's acceptance thresholds
+  (inliers 0.55 at 8 mm, RMS 1.2 cm, see-through 0.3) are unchanged: first-look fits of
+  the row read RMS 1.5-2.6 mm, inliers 1.0, see-through 0.03-0.21, errors 0.2-1.9 mm.
+
+**Tests** (H100, `run_tests.sh`): 68 passed — the evaluation tests with per-prop
+heights (and two new: a prop judged at another prop's height, a lying shaker), validate
+refusing a prop too wide or too short, the measured hue bands, the mesh models against the
+meshes, the lift ladder, the contact offset.
+
+**Measured** (H100, GPU rendering, CPU physics, tree `9c5ab71`, `sweep100.sh` with
+`MODES="state pointcloud"`, seeds 1000-1009, mplib's random IK restarts as in every
+sweep above):
+
+| mode | success | steps min / median / max | notes |
+|---|---|---|---|
+| state | **10/10** | 3595 / 3629 / 3700 | final tilt <= 0.2° in every episode |
+| pointcloud | **10/10** | 3530 / 3725 / 3859 | pads read right 10/10; between-pads checks 70/70 (31-457 points); wrist fits 70/70, error median 0.75 mm, p95 1.6 mm, worst 1.8 mm; row shift error <= 0.2 mm |
+
+A prop leans in the fingers right after the grasp, median 0.7°, worst 6.1° (state) /
+7.8° (camera): flat pads hold a round prop on a line (a tapered shaker on a point), not on
+a face as they held the boxes. Ten seeds are a small sample, and with random IK restarts
+a seed is not a repeatable outcome: before the contact offset was fixed, the same code
+and seed failed in one run and passed in the next. During development (seeds 1000-1009,
+40 episodes per configuration, same planner): contact offset 2 cm 36/40, 5 mm 39/40.
+Not yet measured with the RoboCasa props: the 100-seed and validation sweeps, assisted
+grasp, cuRobo IK, the blind restore.

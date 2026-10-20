@@ -80,8 +80,11 @@ def main(out):
     pads = np.asarray(task._slot_points.cpu()).reshape(-1, 3)
     row_x = float(row[0][0])
     z_top = float(np.asarray(task._counter_top_z.cpu()).reshape(-1)[0])
-    counter_mid = z_top + cfg.prop_half_h
-    shelf_mid = cfg.shelf_top_z + cfg.prop_half_h
+    # The tallest prop's mid-height: the hardest reach (the 2026-10-17 scan ran on the
+    # 12 cm boxes, 6 cm half-height).
+    half_h = max(spec.height for spec in cfg.props) / 2.0
+    counter_mid = z_top + half_h
+    shelf_mid = cfg.shelf_top_z + half_h
     cab = task.cabinets[0]
     face_y = float(np.asarray(cab.pos)[1] - np.asarray(cab.size)[1] / 2)
 
@@ -115,7 +118,7 @@ def main(out):
             alts.append((t, [bank.add(t, place), bank.add(t, entry)]))
         bank.require(f"restore entry row{i}", alts)
         base_y = retr.WORK_DOCK_Y - dr.carry_out(retr.WORK_DOCK_Y, ry - dr.UNSHELVE_BACK, face_y,
-                                                 cfg.prop_half_xy)
+                                                 cfg.max_half_xy)
         for j, (px, py, _) in enumerate(pads):
             alts = [(dr.SHELF_TORSO_RUNGS[0], [bank.add(dr.SHELF_TORSO_RUNGS[0],
                                                         pose([px, py, carry_z - drop], base_y))])
