@@ -19,7 +19,7 @@ import sentencepiece as spm
 
 # pi0.5's own steps up to the prompt; the prompt is then counted with the local
 # PaliGemma sentencepiece model (TokenizerProcessorStep needs transformers + a gated download).
-SP = spm.SentencePieceProcessor(model_file='/home/jovyan/shares/SR008.nfs2/users/echerepanov/interns/dnurtaev/mikasa-pi05/openpi-cache/big_vision/paligemma_tokenizer.model')
+SP = spm.SentencePieceProcessor(model_file=str(Path.home() / 'mikasa-pi05/openpi-cache/big_vision/paligemma_tokenizer.model'))
 
 report = {}
 for root in map(Path, sys.argv[2:]):
