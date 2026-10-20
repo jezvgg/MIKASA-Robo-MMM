@@ -1,0 +1,493 @@
+{
+  "schema_version": 1,
+  "final_fresh_index_tests": {
+    "baseline_passed": 103,
+    "policy_and_contract_passed": 44,
+    "log": "logs/final_index_4c5aee2ec9ee_tests.log",
+    "tested_index_tree": "4c5aee2ec9ee245edac91e4196f9f79d08950269",
+    "untracked_user_dependencies_excluded": true
+  },
+  "python": "3.11.11",
+  "runtime_versions": {
+    "jax": "0.5.3",
+    "jaxlib": "0.5.3",
+    "flax": "0.10.2",
+    "optax": "0.2.4",
+    "torch": "2.7.1",
+    "numpy": "1.26.4",
+    "ml-dtypes": "0.4.1",
+    "pyarrow": "25.0.1",
+    "torchcodec": "0.4.0",
+    "omegaconf": "2.3.0",
+    "orbax-checkpoint": "0.11.13",
+    "openpi-client": "0.1.0",
+    "mme-vla-suite": "not_distributed_under_this_name"
+  },
+  "backend_sha": "ecf086c3be7c2223167d9bb2f6ef1f0a6e24353b",
+  "source_sha256": {
+    "utils/policies/data.py": "c9e60d7b7ea2213101a7a238f86ac7e9541f21c12ca1a70fc1bed37491ec3a53",
+    "utils/policies/sampling.py": "2e29b5b603002f424d8d2d9a49b88bd0c78f306222af418717093cc77227e9bd",
+    "utils/policies/workspace.py": "96adc33cda9b956fb51d9af814bdc7472fd4d1ab71dc6bf66f9f5b86d142e94e",
+    "utils/policies/memory.py": "24907be0cf825aa6e0749ce2e8a3c7863604a19fb1a9d87259ebdefd99583192",
+    "utils/policies/robomme.py": "c3a2872d9531a781ff9666a2e1a94a667534c4aed8e68e3eb730eb45288df84f",
+    "utils/policies/robomme_paper_model.py": "7b6e2547e07238bb8e3fa540880ded962eb11549ace21473f5aa6816f7b7f8d6",
+    "utils/policies/robomme_paper_memory.py": "f84e80d297b0d1f5b2515f6182b0ce47069daef70e416e09b977c776b469c3b1",
+    "utils/policies/parameter_audit.py": "60e4f70e8bb5f10dabf473b381fd74613141915581b3d1f6b451280ac8d5497f",
+    "utils/policies/evaluate.py": "b2c95d236f9f4f7a75ec32a8467dc1318317af39e11fbd05dca1a5f7a1ff27d1",
+    "utils/policies/probe_policy.py": "de90405316cf4eabca81decb37d71b10dccac84c456117d2a6a39cfb3765387f",
+    "utils/policies/verify_robomme_paper.py": "4d1536157b5ff418c63b7b4b3fbdfc0430ef19242880e0e0944e1077c9598232"
+  },
+  "runs": {
+    "pi05": {
+      "optimizer_steps": 3,
+      "trained_anchors": 3,
+      "last_loss": 0.5220641493797302,
+      "last_grad_norm": 4.200243949890137,
+      "diagnostic_only": true,
+      "checkpoint_dir": "/home/jovyan/shares/SR008.nfs2/users/echerepanov/interns/gvolovikov/policy-integration-20261019/logs/robomme_paper/checkpoints/fetch_pi05_paper/author_smoke_001",
+      "device_memory_stats": {
+        "num_allocs": 7111,
+        "bytes_in_use": 0,
+        "peak_bytes_in_use": 69819500288,
+        "largest_alloc_size": 21139701504,
+        "bytes_limit": 80777450915,
+        "bytes_reserved": 0,
+        "peak_bytes_reserved": 0,
+        "largest_free_block_bytes": 0,
+        "pool_bytes": 80777450752,
+        "peak_pool_bytes": 80777450752
+      },
+      "parameter_groups": {
+        "vision": {
+          "leaves": 23,
+          "changed": 0,
+          "preserved": 23
+        },
+        "vlm": {
+          "leaves": 9,
+          "changed": 8,
+          "preserved": 1
+        },
+        "action_expert": {
+          "leaves": 11,
+          "changed": 11,
+          "preserved": 0
+        },
+        "action_adapters": {
+          "leaves": 8,
+          "changed": 8,
+          "preserved": 0
+        }
+      },
+      "frozen_unchanged": true,
+      "trainable_groups_updated": true,
+      "queries": {
+        "backend": "robomme",
+        "real_dataset_probe": [
+          {
+            "task": "takeitback",
+            "episode": 0,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          },
+          {
+            "task": "takeitback",
+            "episode": 1,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          },
+          {
+            "task": "veggie",
+            "episode": 0,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          },
+          {
+            "task": "veggie",
+            "episode": 1,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          }
+        ],
+        "is_simulator_rollout": false
+      },
+      "evidence": "logs/robomme_paper/pi05-author_smoke_001-verification.json",
+      "evidence_sha256": "bd6e8c4e054b2e6911ca2ade5f5f3594e0a1c481bd7143b916599d38fd85cb5b",
+      "diagnostic_sample_ids_derived_from_sampler": [
+        0,
+        1,
+        553533
+      ],
+      "diagnostic_sample_id_note": "Derived from deterministic sampler plus recorded anchor count, not an independent per-step sample log"
+    },
+    "framesamp": {
+      "optimizer_steps": 3,
+      "trained_anchors": 3,
+      "last_loss": 0.5227011442184448,
+      "last_grad_norm": 7.122117519378662,
+      "diagnostic_only": true,
+      "checkpoint_dir": "/home/jovyan/shares/SR008.nfs2/users/echerepanov/interns/gvolovikov/policy-integration-20261019/logs/robomme_paper/checkpoints/fetch_framesamp_paper/author_smoke_001",
+      "device_memory_stats": {
+        "num_allocs": 5676,
+        "bytes_in_use": 1659824896,
+        "peak_bytes_in_use": 73681393408,
+        "largest_alloc_size": 21799819520,
+        "bytes_limit": 80777450915,
+        "bytes_reserved": 0,
+        "peak_bytes_reserved": 0,
+        "largest_free_block_bytes": 0,
+        "pool_bytes": 80777450752,
+        "peak_pool_bytes": 80777450752
+      },
+      "parameter_groups": {
+        "vision": {
+          "leaves": 23,
+          "changed": 0,
+          "preserved": 23
+        },
+        "vlm": {
+          "leaves": 9,
+          "changed": 8,
+          "preserved": 1
+        },
+        "action_expert": {
+          "leaves": 11,
+          "changed": 11,
+          "preserved": 0
+        },
+        "memory_attention": {
+          "leaves": 3,
+          "changed": 3,
+          "preserved": 0
+        },
+        "memory_modulation": {
+          "leaves": 3,
+          "changed": 3,
+          "preserved": 0
+        },
+        "action_adapters": {
+          "leaves": 8,
+          "changed": 8,
+          "preserved": 0
+        },
+        "memory_bridge": {
+          "leaves": 4,
+          "changed": 4,
+          "preserved": 0
+        }
+      },
+      "frozen_unchanged": true,
+      "trainable_groups_updated": true,
+      "queries": {
+        "backend": "robomme",
+        "real_dataset_probe": [
+          {
+            "task": "takeitback",
+            "episode": 0,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          },
+          {
+            "task": "takeitback",
+            "episode": 1,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          },
+          {
+            "task": "veggie",
+            "episode": 0,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          },
+          {
+            "task": "veggie",
+            "episode": 1,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          }
+        ],
+        "is_simulator_rollout": false
+      },
+      "evidence": "logs/robomme_paper/framesamp-author_smoke_001-verification.json",
+      "evidence_sha256": "75727bbc3051351c9c434018708695f25c2b27254030cbb8e692b9f61dc82e9e",
+      "diagnostic_sample_ids_derived_from_sampler": [
+        0,
+        1,
+        553533
+      ],
+      "diagnostic_sample_id_note": "Derived from deterministic sampler plus recorded anchor count, not an independent per-step sample log"
+    },
+    "tokendrop": {
+      "optimizer_steps": 3,
+      "trained_anchors": 3,
+      "last_loss": 0.5220770239830017,
+      "last_grad_norm": 7.050239562988281,
+      "diagnostic_only": true,
+      "checkpoint_dir": "/home/jovyan/shares/SR008.nfs2/users/echerepanov/interns/gvolovikov/policy-integration-20261019/logs/robomme_paper/checkpoints/fetch_tokendrop_paper/author_smoke_001",
+      "device_memory_stats": {
+        "num_allocs": 1473,
+        "bytes_in_use": 1659824896,
+        "peak_bytes_in_use": 73681393408,
+        "largest_alloc_size": 21799819520,
+        "bytes_limit": 80777450915,
+        "bytes_reserved": 0,
+        "peak_bytes_reserved": 0,
+        "largest_free_block_bytes": 0,
+        "pool_bytes": 80777450752,
+        "peak_pool_bytes": 80777450752
+      },
+      "parameter_groups": {
+        "vision": {
+          "leaves": 23,
+          "changed": 0,
+          "preserved": 23
+        },
+        "vlm": {
+          "leaves": 9,
+          "changed": 8,
+          "preserved": 1
+        },
+        "action_expert": {
+          "leaves": 11,
+          "changed": 11,
+          "preserved": 0
+        },
+        "memory_attention": {
+          "leaves": 3,
+          "changed": 3,
+          "preserved": 0
+        },
+        "memory_modulation": {
+          "leaves": 3,
+          "changed": 3,
+          "preserved": 0
+        },
+        "action_adapters": {
+          "leaves": 8,
+          "changed": 8,
+          "preserved": 0
+        },
+        "memory_bridge": {
+          "leaves": 4,
+          "changed": 4,
+          "preserved": 0
+        }
+      },
+      "frozen_unchanged": true,
+      "trainable_groups_updated": true,
+      "queries": {
+        "backend": "robomme",
+        "real_dataset_probe": [
+          {
+            "task": "takeitback",
+            "episode": 0,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          },
+          {
+            "task": "takeitback",
+            "episode": 1,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          },
+          {
+            "task": "veggie",
+            "episode": 0,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          },
+          {
+            "task": "veggie",
+            "episode": 1,
+            "real_query_frames": [
+              0,
+              16
+            ],
+            "action_shapes": [
+              [
+                20,
+                13
+              ],
+              [
+                20,
+                13
+              ]
+            ],
+            "history_observations": 17,
+            "reset_confirmed": true
+          }
+        ],
+        "is_simulator_rollout": false
+      },
+      "evidence": "logs/robomme_paper/tokendrop-author_smoke_001-verification.json",
+      "evidence_sha256": "4938fcc1891b624a97d0ed34a1985b50f5680f3f19d0b5c5a956575f5a6f2bc0",
+      "diagnostic_sample_ids_derived_from_sampler": [
+        0,
+        1,
+        553533
+      ],
+      "diagnostic_sample_id_note": "Derived from deterministic sampler plus recorded anchor count, not an independent per-step sample log"
+    }
+  },
+  "smoke_not_convergence": true,
+  "simulator_rollouts_claimed": false,
+  "other_methods": {
+    "hamlet_cogact": "cancelled_by_user_license_gate",
+    "memoryvla": "deferred_by_user_license_gate",
+    "ponderpounce": "deferred_by_user_missing_grounding_labels"
+  }
+}

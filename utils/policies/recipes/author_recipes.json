@@ -1,7 +1,26 @@
 {
   "schema_version": 1,
-  "status": "author_contract_before_implementation_and_smoke",
+  "status": "robomme_paper_verified_remaining_execution_resolved_by_user_scope",
   "reference_report": "research/memory_policy_finetuning_report.md",
+  "execution_deferrals": {
+    "hamlet_cogact": {
+      "status": "implementation_cancelled_by_user",
+      "reason": "Official CogACT/Prismatic dependency meta-llama/Llama-2-7b-hf denied access to the existing authorized token",
+      "training_allowed": false,
+      "legacy_hamlet_gr00t_n16_is_preserved_not_relabelled_as_cogact": true
+    },
+    "memoryvla": {
+      "status": "deferred_by_user_until_licensed_access",
+      "reason": "Original prism-dinosiglip-224px+7b registry and loader require gated meta-llama/Llama-2-7b-hf",
+      "training_allowed": false
+    },
+    "ponderpounce": {
+      "status": "deferred_by_user_until_grounding_annotations_exist",
+      "reason": "Fetch dataset lacks timed transition/subgoal targets required by the original RoboMME grounding loss",
+      "training_allowed": false,
+      "author_recipe_below_is_not_replaced_by_action_only_ablation": true
+    }
+  },
   "rules": {
     "author_recipe_is_not_smoke": true,
     "smoke_optimizer_steps_per_mandatory_stage": 3,
@@ -126,8 +145,8 @@
         }
       },
       "optimizer_details": "inherit verified pinned original CogACT recipe; HAMLET appendix does not supply a separate complete optimizer table",
-      "history_stride": null,
-      "history_stride_status": "Do not automatically import GR00T N1.6 RoboMME stride16 into CogACT paper recipe; resolve original cadence."
+      "history_stride": 16,
+      "history_stride_status": "Paper section3.2 Eq5 defines stride k as action chunk length; original CogACT H16 gives16. This is not inferred from the GR00T N1.6 RoboMME launcher."
     },
     "memoryvla": {
       "source": "memoryvla",
@@ -179,12 +198,20 @@
   },
   "unresolved_decisions": [
     "Record base checkpoint content manifests and licenses before model execution.",
-    "Resolve CogACT optimizer/module defaults and paper history cadence from pinned official base implementation.",
+    "CogACT implementation was cancelled by user; complete unversioned external CogACT optimizer dependency details remain explicitly unverified. Paper history cadence is Eq5 chunk length16.",
     "Resolve PonderPounce RoboMME Ponder freeze-map and actual grounding supervision before starting its smoke.",
-    "Resolve RoboMME identity initialization and pooling implementation discrepancies for the selected paper path."
+    "RoboMME paper identity modulation and actual max pooling are implemented and covered by dedicated numerical tests; legacy-lora preserves released initialization/pooling."
   ],
   "verification": {
-    "entrypoint_commands_status": "Add exact commands as adapters are implemented; no nonexistent trainer is advertised as runnable.",
+    "entrypoint_commands_status": "RoboMME executable commands below and research/paper_fetch_implementation.md; deferred/cancelled model descriptors are references, not runnable trainers.",
+    "robomme_commands": {
+      "smoke_template": ".venv-robomme/bin/python -m utils.policies.robomme train --recipe paper --variant {pi05|framesamp|tokendrop} --root dataset --features logs/features_bounded --output logs/robomme_paper --base-params $BASE_PARAMS --batch-size 1 --fsdp-devices 1 --diagnostic-steps 3 --exp-name {fresh_name}",
+      "author_template": ".venv-robomme/bin/python -m utils.policies.robomme train --recipe paper --variant {pi05|framesamp|tokendrop} --root dataset --features logs/features_bounded --output logs/robomme_paper --base-params $BASE_PARAMS --batch-size $PAPER_BATCH --fsdp-devices 4 --exp-name {fresh_name}",
+      "author_batch_note": "Perceptual64; baseline128 follows released baseline launcher because the paper does not separately identify its batch. Full author reference requests4 GPUs, not the one-GPU smoke reduction.",
+      "containment_required": "Run inside utils.policies.workspace with cwd/HOME/caches inside the designated gangway workspace; never use the unguarded template outside that containment.",
+      "reload_probe": ".venv-eval/bin/python -m utils.policies.verify_robomme_paper --base-params $BASE_PARAMS --output logs/robomme_paper --exp-name {trained_name}",
+      "legacy_lora_is_explicit": "--recipe legacy-lora"
+    },
     "record_for_each_stage": ["source/config hashes", "trainable and frozen parameter groups/count", "optimizer_steps==3", "actual task/sample IDs", "finite losses and gradients", "nonzero updates in each required group", "frozen checksums unchanged", "checkpoint save/reload", "finite valid output/action13", "stage transfer and reset/causality checks"],
     "prior_lora_smokes_are_author_reproduction": false
   }
