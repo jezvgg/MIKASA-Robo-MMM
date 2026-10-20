@@ -1,0 +1,3 @@
+# mani-skill 3.0.0b22 declares mplib==0.1.1, but the venv that recorded the dataset ran
+# mplib 0.2.1, and the pinned profile (runtime_packages) requires exactly that.
+mplib==0.2.1
