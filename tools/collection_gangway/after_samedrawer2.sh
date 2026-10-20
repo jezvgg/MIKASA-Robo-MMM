@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Replaces after_samedrawer.sh (10-18 07:1x UTC): the driver now runs with TARGET=1100 and ends when every drawer
+# reached its quota of 262 ("seed range exhausted"), so wait for that or "target reached" after log line 193.
+A=$HOME/sd-collect/driver
+until tail -n +194 $A/driver-same_drawer.out | grep -q "target reached\|seed range exhausted"; do sleep 60; done
+while P=$(cat $A/pids/same_drawer.pid 2>/dev/null) && [ -n "$P" ] && tr "\0" " " < /proc/$P/cmdline 2>/dev/null | grep -q collection_driver.py; do sleep 60; done
+while ps -eo args | grep "[p]ostbatch.py same_drawer" | grep -q sd-collect; do sleep 60; done
+echo "finalize start $(date -u +%FT%TZ)"
+bash $HOME/sd-collect/finalize_samedrawer_ag.sh > $A/final/finalize.log 2>&1
+echo "finalize exit $? $(date -u +%FT%TZ)"
