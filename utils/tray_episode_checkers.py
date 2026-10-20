@@ -1,4 +1,4 @@
-"""Per-episode wrist, torso-yaw, and hand-impact checks for tray demos."""
+"""Per-episode wrist, torso-yaw, and hand-impact checks for Fetch demos."""
 
 import numpy as np
 
@@ -31,7 +31,7 @@ def _labels(body):
 class TrayEpisodeCheckers:
     """Track wrist roll and physical hand/object impacts on executed steps."""
 
-    def __init__(self, task):
+    def __init__(self, task, *, grasp_contact_objects=None):
         self.task = task
         self.callback = self.observe_step
         joints = task.agent.robot.active_joints
@@ -54,7 +54,13 @@ class TrayEpisodeCheckers:
         for link in task.agent.robot.get_links():
             for label in _labels(link._objs[0]) | {link.name}:
                 self.robot_links[label] = link.name
-        self.cup_labels = {"cup"}
+        # Default preserves the existing TakeIt/TakeItBack grasp exemption.
+        # Other tasks must name their actual payload, not exempt every prop.
+        self.grasp_contact_labels = {"cup"} if grasp_contact_objects is None else set()
+        for actor in grasp_contact_objects or ():
+            self.grasp_contact_labels.update(_labels(actor))
+            for obj in actor._objs:
+                self.grasp_contact_labels.update(_labels(obj))
         self.impacts = {}
 
     def _torso_yaw(self):
@@ -112,7 +118,7 @@ class TrayEpisodeCheckers:
             if (
                 not hand_aliases
                 or not other
-                or other & self.cup_labels
+                or other & self.grasp_contact_labels
                 or any("ground" in n or "floor" in n for n in other)
             ):
                 continue
@@ -152,6 +158,7 @@ class TrayEpisodeCheckers:
                 for (link, obj), details in sorted(self.impacts.items())
             ],
             "checker_steps": self.steps,
+            "grasp_contact_labels": sorted(self.grasp_contact_labels),
         }
 
 

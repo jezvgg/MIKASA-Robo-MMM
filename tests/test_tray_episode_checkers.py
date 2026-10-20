@@ -205,3 +205,28 @@ def test_pipeline_rejects_either_trigger_and_fails_closed(tmp_path):
     base["torso_180_triggered"] = True
     write_log()
     assert checker_rejection(tmp_path, 12) == "filtered_wrist_180_collision_torso_180"
+
+
+def test_veggie_grasp_is_exempt_but_other_props_and_furniture_are_not():
+    task = _Task()
+    vegetable = SimpleNamespace(name="target_carrot", _objs=[_Body("target_carrot", "scene-0_target_carrot")])
+    checks = TrayEpisodeCheckers(task, grasp_contact_objects=(vegetable,))
+    finger = _Body("scene-0-ds_fetch_l_gripper_finger_link", "l_gripper_finger_link")
+    task.scene.contacts = [_Contact(finger, vegetable._objs[0], impulse=[0.2, 0, 0])]
+    checks.observe_step()
+    assert not checks.summary()["collision_triggered"]
+    assert "target_carrot" in checks.summary()["grasp_contact_labels"]
+    # Even cup contacts are not blanket-exempt in the veggie task.
+    task.scene.contacts = [_Contact(finger, task.cup._objs[0], impulse=[0.2, 0, 0])]
+    checks.observe_step()
+    assert checks.summary()["collision_triggered"]
+    assert checks.summary()["collision_pairs"][0]["object"] == "cup"
+
+
+def test_explicit_empty_payload_exemptions_do_not_default_to_cup():
+    task = _Task()
+    checks = TrayEpisodeCheckers(task, grasp_contact_objects=())
+    finger = _Body("scene-0-ds_fetch_l_gripper_finger_link", "l_gripper_finger_link")
+    task.scene.contacts = [_Contact(finger, task.cup._objs[0], impulse=[0.2, 0, 0])]
+    checks.observe_step()
+    assert checks.summary()["collision_triggered"]

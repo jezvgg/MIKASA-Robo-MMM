@@ -150,6 +150,7 @@ import my_scenes  # noqa: F401  (registers benchmark environments)
 from utils.episode_replay import EpisodeSpec
 from utils.logging_utils import PlannerLogger
 from utils.mikasa.seeding import seed_everything
+from utils.trajectory_metadata import patch_trajectory_metadata, resolve_sim_backend
 
 
 def planner_module_name(name: str) -> str:
@@ -384,6 +385,8 @@ def accepts_scene_idx(env_id: str) -> bool:
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--scene", "-s", default="MyRoboCasa-v1")
+    p.add_argument("--assisted-grasp", action="store_true",
+                   help="Enable CPU-only contact-gated PhysX grasp assistance")
     p.add_argument(
         "--planner",
         "-p",
@@ -579,6 +582,8 @@ def run_sweep(args, *, make_env=gym.make, recorder_cls=RecordEpisode) -> SweepRe
         robot_uids="ds_fetch",
         control_mode=args.control_mode,
     )
+    if getattr(args, "assisted_grasp", False):
+        make_kwargs["assisted_grasp"] = True
     # Only when asked: passing sim_backend=None is not the same as not passing it,
     # and the defaults here have to stay exactly what they were.
     for flag, value in (("sim_backend", args.sim_backend), ("render_backend", args.render_backend)):
@@ -595,6 +600,12 @@ def run_sweep(args, *, make_env=gym.make, recorder_cls=RecordEpisode) -> SweepRe
         )
 
     env = make_env(args.scene, **make_kwargs)
+    resolved_sim_backend = None
+    if args.traj_dir is not None or args.log_dir:
+        resolved_sim_backend = resolve_sim_backend(env)
+        # EpisodeSpec should describe the backend actually used, not an omitted
+        # argument or the machine-dependent "auto" alias.
+        make_kwargs["sim_backend"] = resolved_sim_backend
     recorder = None
     if args.video_dir is not None or args.traj_dir is not None:
         # save_on_reset=False on purpose: the planner owns its reset (it happens
@@ -772,6 +783,24 @@ def run_sweep(args, *, make_env=gym.make, recorder_cls=RecordEpisode) -> SweepRe
         )
 
     env.close()
+    if recorder is not None and args.traj_dir is not None:
+        try:
+            if resolved_sim_backend is None:
+                raise RuntimeError("trajectory recording has no resolved sim_backend")
+            # RecordEpisode rewrites its JSON during close/clean_on_close. Patch only
+            # after close so actual per-reset seeds and backend survive that cleanup.
+            patch_trajectory_metadata(
+                recorder._json_path,
+                resolved_sim_backend,
+                requested_sim_backend=args.sim_backend or "auto",
+            )
+        except Exception as exc:
+            traj_failures += 1
+            print(
+                f"trajectory metadata: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
     hits = verdicts.count("success")
     total = len(verdicts)
     misses = verdicts.count("missed")
@@ -786,7 +815,7 @@ def run_sweep(args, *, make_env=gym.make, recorder_cls=RecordEpisode) -> SweepRe
     if video_failures:
         print(f"video: {video_failures} clip(s) failed to encode — see the EP lines above")
     if traj_failures:
-        print(f"traj: {traj_failures} episode(s) failed to write — see the EP lines above")
+        print(f"traj: {traj_failures} trajectory write/metadata operation(s) failed")
     if args.traj_dir is not None:
         print(
             f"trajectories in {args.traj_dir}/ — replay and render them somewhere that "

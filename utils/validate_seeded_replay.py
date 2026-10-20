@@ -33,6 +33,7 @@ from utils.test_planner import (
     load_planner,
     planner_module_name,
 )
+from utils.trajectory_metadata import patch_trajectory_metadata, resolve_sim_backend
 
 
 @dataclass(frozen=True)
@@ -185,7 +186,13 @@ def _primary_row(rows, source_verdict: str):
     return max(rows, key=lambda row: row["steps"])
 
 
-def _patch_metadata(run_dir: Path, spec: EpisodeSpec, source_verdict: str, validation: dict):
+def _patch_metadata(
+    run_dir: Path,
+    spec: EpisodeSpec,
+    source_verdict: str,
+    validation: dict,
+    requested_sim_backend: str,
+):
     path = run_dir / "trajectory.json"
     if not path.exists():
         return
@@ -203,6 +210,14 @@ def _patch_metadata(run_dir: Path, spec: EpisodeSpec, source_verdict: str, valid
         json.dumps(_jsonable(data), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    sim_backend = spec.env_kwargs.get("sim_backend")
+    if sim_backend is not None:
+        patch_trajectory_metadata(
+            path,
+            sim_backend,
+            episode_seed=spec.seed,
+            requested_sim_backend=requested_sim_backend,
+        )
 
 
 def run_one(case: PlannerCase, seed: int, episode_id: int, args) -> dict[str, Any]:
@@ -222,6 +237,7 @@ def run_one(case: PlannerCase, seed: int, episode_id: int, args) -> dict[str, An
 
     base_env = None
     recorder = None
+    resolved_sim_backend = None
     logger = None
     source_verdict = "errored"
     error = None
@@ -229,6 +245,9 @@ def run_one(case: PlannerCase, seed: int, episode_id: int, args) -> dict[str, An
         import gymnasium as gym
 
         base_env = gym.make(case.env_id, **env_kwargs)
+        resolved_sim_backend = resolve_sim_backend(base_env)
+        env_kwargs["sim_backend"] = resolved_sim_backend
+        spec = spec.with_updates(env_kwargs=copy.deepcopy(env_kwargs))
         recorder = RecordEpisode(
             base_env,
             output_dir=str(run_dir),
@@ -299,13 +318,20 @@ def run_one(case: PlannerCase, seed: int, episode_id: int, args) -> dict[str, An
             if replay.error:
                 validation["error"] = replay.error
 
-    _patch_metadata(run_dir, spec, source_verdict, validation)
+    _patch_metadata(
+        run_dir,
+        spec,
+        source_verdict,
+        validation,
+        requested_sim_backend=args.sim_backend,
+    )
     return {
         "episode_id": episode_id,
         "seed": seed,
         "planner": case.planner,
         "env_id": case.env_id,
         "source_verdict": source_verdict,
+        "sim_backend": resolved_sim_backend,
         "replay": validation,
         "recorded_trajectories": len(rows),
         "error": error,

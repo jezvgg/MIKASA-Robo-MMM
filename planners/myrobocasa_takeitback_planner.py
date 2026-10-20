@@ -1,5 +1,4 @@
 import argparse
-import json
 import random
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +20,7 @@ from utils.planners_utils import (
     _velocity_segment,
     _base_cmd,
 )
+from utils.trajectory_metadata import patch_trajectory_metadata, resolve_sim_backend
 
 # max horizontal base->cup distance at which the fallback arm re-grasp drives
 # the base so the cup is inside the arm's reachable workspace. The straight-arms
@@ -30,25 +30,11 @@ from utils.planners_utils import (
 GRASP_STANDOFF = 1.00
 
 
-def _repair_trajectory_metadata(run_dir):
-    """Make RoboCasa reconfigure seeds replayable by ManiSkill's checker."""
+def _repair_trajectory_metadata(run_dir, sim_backend, episode_seed):
+    """Repair actual reset seeds and persist the resolved physics backend."""
     path = Path(run_dir) / "trajectory.json"
-    if not path.exists():
-        return
-    data = json.loads(path.read_text(encoding="utf-8"))
-    changed = False
-    for episode in data.get("episodes", []):
-        seed = episode.get("reset_kwargs", {}).get("seed")
-        if isinstance(seed, list) and len(seed) == 1:
-            seed = seed[0]
-        if seed is not None and episode.get("episode_seed") != seed:
-            episode["episode_seed"] = int(seed)
-            changed = True
-    if changed:
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+    if path.exists():
+        patch_trajectory_metadata(path, sim_backend, episode_seed=episode_seed)
 
 
 def parse_args():
@@ -930,6 +916,7 @@ if __name__ == "__main__":
         # pins the pair processing order so the same seed reproduces exactly.
         sim_config=dict(scene_config=dict(cpu_workers=1, enable_enhanced_determinism=True)),
     )
+    resolved_sim_backend = resolve_sim_backend(env)
     # Video-only recording: frames stream straight into ffmpeg, so RAM stays at
     # a single frame instead of RecordEpisode's whole-episode frame buffer
     # (~12 GB at the 2048x2048 render resolution).
@@ -952,6 +939,6 @@ if __name__ == "__main__":
     with capture_stdout(env.dir / "console.log"):
         planning(env, SEED, debug=args.debug, info=args.info)
     env.close()
-    _repair_trajectory_metadata(run_dir)
+    _repair_trajectory_metadata(run_dir, resolved_sim_backend, SEED)
     if not args.no_video:
         print(f"[INFO] Video recording saved in '{run_dir}/'")

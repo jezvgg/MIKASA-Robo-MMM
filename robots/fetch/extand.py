@@ -668,6 +668,9 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         )
         self.action_noise = 0.0
         self.noise_hold = 0
+        # Keep the legacy global-noise behavior unless a planner explicitly
+        # scopes execution noise to selected motion primitives.
+        self.execution_noise_enabled = True
         self._execution_noise_rng = np.random.default_rng()
         self._execution_noise = None
         self._execution_noise_steps = 0
@@ -681,7 +684,11 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         self._execution_noise_steps = 0
 
     def _apply_execution_noise(self, arm_action):
-        if self.action_noise <= 0.0 or self.noise_hold <= 0:
+        if (
+            not getattr(self, "execution_noise_enabled", True)
+            or self.action_noise <= 0.0
+            or self.noise_hold <= 0
+        ):
             return arm_action
         if self._execution_noise is None or self._execution_noise_steps <= 0:
             self._execution_noise = self._execution_noise_rng.normal(

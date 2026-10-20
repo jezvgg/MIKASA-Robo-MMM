@@ -12,14 +12,18 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.structs import Actor, Pose
 from .base_robocasa import BaseRoboCasaSimple
 from utils.scene_utils import get_actor_size
+from utils.mikasa.assisted_grasp import AssistedGraspTask
 
 
 @register_env("MyRoboCasa_TakeItBack-v1", asset_download_ids=["RoboCasa"])
-class MyRoboCasaSceneTakeItBack(BaseRoboCasaSimple):
+class MyRoboCasaSceneTakeItBack(AssistedGraspTask, BaseRoboCasaSimple):
     """Cup and baking tray freely placed in separate zones of the usable counter
     area every episode; the robot spawns at a random free floor spot. The task:
     carry the cup from its spot to the baking tray and back to its initial
     spot."""
+
+    def _assisted_grasp_objects(self):
+        return [self.cup]
 
     # baking tray asset (repo assets/), recentered + scaled at load time
     TRAY_PATH = os.path.normpath(

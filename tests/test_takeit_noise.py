@@ -204,3 +204,16 @@ def test_execution_noise_is_seeded_and_held_for_configured_steps():
     assert np.array_equal(draw_1, draw_2)
     assert not np.array_equal(draw_2, draw_3)
     assert np.array_equal(draw_1, replay_draw)
+
+
+def test_execution_noise_can_be_disabled_for_selected_motion_phases():
+    action = np.zeros(7)
+    state = _noise_state(7)
+    state.execution_noise_enabled = False
+
+    disabled = FetchMotionPlanningSapienSolver._apply_execution_noise(state, action)
+    np.testing.assert_array_equal(disabled, action)
+
+    state.execution_noise_enabled = True
+    enabled = FetchMotionPlanningSapienSolver._apply_execution_noise(state, action)
+    assert not np.array_equal(enabled, action)

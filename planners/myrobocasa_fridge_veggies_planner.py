@@ -1,6 +1,8 @@
 """Canonical staged vegetable planner: sequential waypoints 2–17, fail-fast."""
 
 import argparse
+import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -14,13 +16,55 @@ from robots.fetch.actions import base_cmd as _base_cmd
 from robots.fetch.extand import FetchMotionPlanningSapienSolver
 from utils.logging_utils import PlannerLogger, StreamingVideoRecorder, capture_stdout
 from utils.planners_utils import lower_torso_smooth
+from utils.tray_episode_checkers import TrayEpisodeCheckers
 
 
 CAMERA_NAMES = ("counter_side", "overhead_rear", "fridge_robot_start")
-ROBOT_FRONT_DISTANCE_M = 1.15
 WP4_TORSO_DROP_M = 0.22
 WP13_TORSO_RAISE_M = 0.04
 WP14_HOVER_CLEARANCE_M = 0.05
+VEGETABLE_APPROACH_STANDOFF_M = 0.50
+POT_APPROACH_RADIUS_M = 0.50
+WAYPOINT_NOISE = 0.05
+EXECUTION_ACTION_NOISE = float(os.environ.get("MIKASA_ACTION_NOISE", "0.001"))
+EXECUTION_NOISE_HOLD = int(os.environ.get("MIKASA_NOISE_HOLD", "10"))
+
+
+def _waypoint_jitter(scale, rng):
+    """Return the TakeIt-style seeded, relative waypoint perturbation."""
+    return float(rng.uniform(-WAYPOINT_NOISE, WAYPOINT_NOISE) * scale)
+
+
+def _sample_waypoint_offsets(seed):
+    rng = np.random.default_rng(int(seed))
+    return {
+        "wp3_standoff_m": _waypoint_jitter(VEGETABLE_APPROACH_STANDOFF_M, rng),
+        "wp12_pot_radius_m": _waypoint_jitter(POT_APPROACH_RADIUS_M, rng),
+        "wp14_hover_clearance_m": _waypoint_jitter(WP14_HOVER_CLEARANCE_M, rng),
+    }
+
+
+def _waypoint_offset(planner, name):
+    offsets = getattr(planner, "waypoint_offsets", None)
+    if not isinstance(offsets, dict):
+        return 0.0
+    return float(offsets.get(name, 0.0))
+
+
+@contextmanager
+def _execution_noise_phase(planner, enabled):
+    """Temporarily gate execution noise around one motion primitive."""
+    previous = bool(getattr(planner, "execution_noise_enabled", False))
+    planner.execution_noise_enabled = bool(enabled)
+    reset_noise = getattr(planner, "_reset_execution_noise", None)
+    if callable(reset_noise):
+        reset_noise()
+    try:
+        yield
+    finally:
+        planner.execution_noise_enabled = previous
+        if callable(reset_noise):
+            reset_noise()
 
 
 def _fit_rim_circle(xy):
@@ -555,11 +599,16 @@ def _approach_pot(env, planner, target_veg):
         )
         return False
     # Southeast dock keeps the west-facing hand clear of the left kitchen wall.
-    approach_point = np.array([
-        pot_center[0] + 0.25,
-        pot_center[1] - np.sqrt(0.50**2 - 0.25**2),
-        0.0,
+    # Jitter only the radial standoff; preserve the safe approach direction.
+    approach_radius = POT_APPROACH_RADIUS_M + _waypoint_offset(
+        planner, "wp12_pot_radius_m"
+    )
+    approach_direction = np.array([
+        0.25,
+        -np.sqrt(POT_APPROACH_RADIUS_M**2 - 0.25**2),
     ])
+    approach_direction /= np.linalg.norm(approach_direction)
+    approach_point = np.r_[pot_center[:2] + approach_direction * approach_radius, 0.0]
     # Include the real payload in collision sweeps; attachment is planning-only.
     _attach_object(planner, target_veg)
     planner.planner.update_from_simulation()
@@ -600,7 +649,7 @@ def _approach_pot(env, planner, target_veg):
     env.log_event(
         "waypoint_start", "Waypoint 12: straight drive to pot approach point",
         target_position_m=np.round(approach_point, 4).tolist(),
-        target_standoff_m=0.50, yaw_command=0.0,
+        target_standoff_m=round(approach_radius, 4), yaw_command=0.0,
     )
     drive = env.log_motion(
         "Waypoint 12: approach pot while holding vegetable",
@@ -759,30 +808,70 @@ def _hand_over_pot(env, planner, target_veg):
               for obj in link._objs),
         )
 
-    height = float(tcp_before[2]) + max(0.0, rim_z + WP14_HOVER_CLEARANCE_M - lowest_point())
-    hover = sapien.Pose(
-        p=[pot_center[0] - relative[0], pot_center[1] - relative[1], height],
-        q=agent.tcp.pose.sp.q,
-    )
+    hover_noise_m = _waypoint_offset(planner, "wp14_hover_clearance_m")
+
+    def hover_pose(clearance_m):
+        tcp_now = agent.tcp.pose.p[0].cpu().numpy().copy()
+        vegetable_now = target_veg.pose.p[0].cpu().numpy().copy()
+        relative_now = vegetable_now - tcp_now
+        target_height = float(tcp_now[2]) + rim_z + clearance_m - lowest_point()
+        return sapien.Pose(
+            p=[
+                pot_center[0] - relative_now[0],
+                pot_center[1] - relative_now[1],
+                target_height,
+            ],
+            q=agent.tcp.pose.sp.q,
+        )
+
+    noisy_clearance = WP14_HOVER_CLEARANCE_M + hover_noise_m
+    noisy_hover = hover_pose(noisy_clearance)
     # Refresh the planning-only attachment after any small slip during transport.
     _detach_object(planner)
     planner.planner.update_from_simulation()
     _attach_object(planner, target_veg)
     planner.planner.update_from_simulation()
     env.log_event(
-        "waypoint_start", "Waypoint 14: held vegetable above pot bowl centre",
+        "waypoint_start", "Waypoint 14a: noisy carried transfer to hover waypoint",
         pot_bowl_center_m=np.round(pot_center, 4).tolist(),
-        target_tcp_position_m=np.round(hover.p, 4).tolist(),
-        required_rim_clearance_m=WP14_HOVER_CLEARANCE_M,
+        target_tcp_position_m=np.round(noisy_hover.p, 4).tolist(),
+        waypoint_noise_offset_m=round(hover_noise_m, 6),
+        required_rim_clearance_m=round(noisy_clearance, 4),
+        action_noise=EXECUTION_ACTION_NOISE,
+        noise_hold=EXECUTION_NOISE_HOLD,
     )
     old_tolerance = planner.ARM_SCREW_GOAL_TOLERANCE
     planner.ARM_SCREW_GOAL_TOLERANCE = (0.005, old_tolerance[1])
     try:
-        motion = env.log_motion(
-            "Waypoint 14: fixed-base and fixed-torso pot hover",
-            planner.static_manipulation, hover,
-            disable_lift_joint=True, n_init_qpos=100,
-        )
+        with _execution_noise_phase(planner, enabled=True):
+            noisy_motion = env.log_motion(
+                "Waypoint 14a: execution-noisy carried transfer",
+                planner.static_manipulation, noisy_hover,
+                disable_lift_joint=True, n_init_qpos=100,
+            )
+        # Replan from the measured post-noise state to the nominal hover with
+        # noise disabled. This both recovers the target and keeps placement precise.
+        if bool(agent.is_grasping(target_veg)):
+            _detach_object(planner)
+            planner.planner.update_from_simulation()
+            _attach_object(planner, target_veg)
+            planner.planner.update_from_simulation()
+            nominal_hover = hover_pose(WP14_HOVER_CLEARANCE_M)
+            env.log_event(
+                "waypoint_start",
+                "Waypoint 14b: replan from measured state to nominal hover",
+                target_tcp_position_m=np.round(nominal_hover.p, 4).tolist(),
+                required_rim_clearance_m=WP14_HOVER_CLEARANCE_M,
+                previous_motion_success=noisy_motion != -1,
+            )
+            with _execution_noise_phase(planner, enabled=False):
+                motion = env.log_motion(
+                    "Waypoint 14b: noise-free recovery to nominal hover",
+                    planner.static_manipulation, nominal_hover,
+                    disable_lift_joint=True, n_init_qpos=100,
+                )
+        else:
+            motion = -1
     finally:
         planner.ARM_SCREW_GOAL_TOLERANCE = old_tolerance
     planner.idle_steps(t=20)
@@ -807,6 +896,9 @@ def _hand_over_pot(env, planner, target_veg):
         grasped=held, vegetable_pot_xy_error_m=round(xy_error, 4),
         rim_clearance_m=round(clearance, 4), grasp_relative_error_m=round(slip, 4),
         base_drift_m=round(drift, 4), torso_drift_m=round(torso_drift, 4),
+        noisy_motion_success=noisy_motion != -1,
+        recovery_motion_success=motion != -1,
+        waypoint_noise_offset_m=round(hover_noise_m, 6),
     )
     print(
         f"Waypoint 14: success={success}, xy_error={xy_error:.4f} m, "
@@ -939,22 +1031,69 @@ def _finish_placement(env, planner, target_veg):
 
 
 def planning(env, seed, debug=False):
+    """Always finalize episode diagnostics, including fail-fast/exception exits."""
+    result = False
+    error = None
+    try:
+        result = bool(_planning_episode(env, seed, debug=debug))
+        return result
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        # Several planner gates return early (e.g. a verified failed grasp), so
+        # `_planning_episode` cannot own the one canonical episode verdict.
+        env.log_event(
+            "result", "Veggie planner final result",
+            success=bool(result), seed=int(seed), error=error,
+        )
+        task = env.unwrapped
+        checkers = getattr(task, "_veggie_episode_checkers", None)
+        if checkers is not None:
+            try:
+                env.remove_step_observer(checkers.callback)
+                env.log_event(
+                    "safety_checkers", "Episode safety-checker results",
+                    **checkers.summary(),
+                )
+            finally:
+                del task._veggie_episode_checkers
+
+
+def _planning_episode(env, seed, debug=False):
     _install_render_cameras(env)
-    env.unwrapped.ROBOT_FRONT_DISTANCE = ROBOT_FRONT_DISTANCE_M
     env.reset(seed=seed, options={"reconfigure": True})
     scene = env.unwrapped
     agent = scene.agent
     _pose_render_cameras(env)
-    # Preserve the approved ready pose before first physics step; reset starts
-    # with the extended arm intersecting the fridge and can shove the base.
-    _, ready_qpos = _ready_qpos(agent)
-    agent.robot.set_qpos(ready_qpos)
+    # The scene reset already supplies the ready arm/torso pose.
+    target_veg = scene.veggies[scene._picture_target]
+    checkers = TrayEpisodeCheckers(scene, grasp_contact_objects=(target_veg,))
+    scene._veggie_episode_checkers = checkers
+    env.add_step_observer(checkers.callback)
     planner = FetchMotionPlanningSapienSolver(
         env, base_pose=agent.robot.pose, vis=False, debug=debug
     )
     planner.MAX_REFINE_STEPS = 100
+    planner.action_noise = EXECUTION_ACTION_NOISE
+    planner.noise_hold = EXECUTION_NOISE_HOLD
+    planner.set_execution_noise_seed(seed)
+    # This task opts into target noise only for the carried transfer at WP14.
+    planner.execution_noise_enabled = False
+    waypoint_offsets = _sample_waypoint_offsets(seed)
+    planner.waypoint_offsets = waypoint_offsets
+    env.log_event(
+        "execution_noise", "Seeded arm-target noise configured",
+        seed=int(seed), action_noise=planner.action_noise,
+        noise_hold=planner.noise_hold,
+        enabled_phases=["WP14 carried transfer; WP14b recovery is noise-free"],
+    )
+    env.log_event(
+        "waypoint_noise", "Seeded waypoint offsets configured",
+        seed=int(seed), relative_scale=WAYPOINT_NOISE,
+        offsets_m=waypoint_offsets,
+    )
 
-    target_veg = scene.veggies[scene._picture_target]
     for index, veggie in enumerate(scene.veggies):
         env.track_object(veggie, f"veg_{index}")
     env.track_object(agent.tcp, "robot_tcp")
@@ -965,7 +1104,10 @@ def planning(env, seed, debug=False):
     planner.open_gripper()
     planner.planner.update_from_simulation()
 
-    requested_standoff = 0.5
+    requested_standoff = (
+        VEGETABLE_APPROACH_STANDOFF_M
+        + waypoint_offsets["wp3_standoff_m"]
+    )
     veg_center = target_veg.pose.p[0].cpu().numpy().copy()
     # This scene's counter front faces -Y, not toward the robot's spawn.
     approach_point = np.array([veg_center[0], veg_center[1] - requested_standoff, 0.0])
@@ -1309,6 +1451,8 @@ def main():
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--log-dir", type=Path, default=Path("logs"))
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--assisted-grasp", action="store_true",
+                        help="Enable CPU-only contact-gated PhysX grasp assistance")
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -1325,6 +1469,7 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     env = gym.make(
         "MyRoboCasa_FridgeVeggies-v1",
+        assisted_grasp=args.assisted_grasp,
         num_envs=1,
         render_mode="rgb_array",
         obs_mode="rgb",

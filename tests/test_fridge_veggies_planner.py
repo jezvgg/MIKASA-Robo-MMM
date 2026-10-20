@@ -4,11 +4,44 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
+import pytest
 import sapien
 import torch
 
 from planners import myrobocasa_fridge_veggies_planner as staged
 from robots.fetch.ds_fetch import DSFetch
+
+
+def test_scene_ready_pose_preserves_other_joints_and_unreset_rows():
+    """Scene reset contract without depending on the optional collector CLI."""
+    from my_scenes.my_robocasa_fridge_veggies import MyRoboCasaFridgeVeggies
+
+    original = torch.arange(30, dtype=torch.float32).reshape(2, 15)
+    arm_names = [f"arm_{i}" for i in range(7)]
+    mapping = dict(zip(arm_names, [5, 7, 8, 9, 10, 11, 12]))
+    mapping["torso_lift_joint"] = 3
+    robot = SimpleNamespace(
+        get_qpos=lambda: original,
+        active_joints_map={
+            name: SimpleNamespace(active_index=torch.tensor([index]))
+            for name, index in mapping.items()
+        },
+        set_qpos=Mock(),
+    )
+    rest = np.arange(15, dtype=np.float32) + 100
+    agent = SimpleNamespace(
+        robot=robot,
+        controller=SimpleNamespace(controllers={
+            "arm": SimpleNamespace(config=SimpleNamespace(joint_names=arm_names))}),
+        keyframes={"rest": SimpleNamespace(qpos=rest)},
+    )
+    MyRoboCasaFridgeVeggies._initialize_ready_pose(
+        SimpleNamespace(agent=agent), torch.tensor([1]))
+    expected = original.clone()
+    for index in mapping.values():
+        expected[1, index] = float(rest[index])
+    torch.testing.assert_close(robot.set_qpos.call_args.args[0], expected)
+    torch.testing.assert_close(original, torch.arange(30, dtype=torch.float32).reshape(2, 15))
 
 
 def _box_vertices(extents):
@@ -64,10 +97,20 @@ def _navigation_env(position, yaw=np.pi / 2):
 def _check_route(
     position, stalled=False, failed_final_turn=False, failed_hover=False,
     failed_axis=False, failed_grasp=False, failed_retreat=False,
+    waypoint_offsets=None,
 ):
     env, planner, place = _navigation_env(position)
+    if waypoint_offsets is None:
+        waypoint_offsets = {
+            "wp3_standoff_m": 0.0,
+            "wp12_pot_radius_m": 0.0,
+            "wp14_hover_clearance_m": 0.0,
+        }
     veggie = env.unwrapped.veggies[0].pose.p[0].numpy()
-    expected = np.array([veggie[0], veggie[1] - 0.5, 0.0])
+    standoff = staged.VEGETABLE_APPROACH_STANDOFF_M + waypoint_offsets[
+        "wp3_standoff_m"
+    ]
+    expected = np.array([veggie[0], veggie[1] - standoff, 0.0])
     turns = []
     drives = []
     lowering_actions = []
@@ -159,6 +202,13 @@ def _check_route(
         patch.object(staged, "_pose_render_cameras"),
         patch.object(staged, "_ready_qpos", return_value=(None, np.zeros(15))),
         patch.object(staged, "FetchMotionPlanningSapienSolver", return_value=planner),
+        patch.object(
+            staged, "TrayEpisodeCheckers",
+            return_value=Mock(summary=Mock(return_value={"checker_steps": 0})),
+        ) as checker_factory,
+        patch.object(
+            staged, "_sample_waypoint_offsets", return_value=waypoint_offsets
+        ),
         patch.object(staged, "_yaw_base_to", side_effect=turn),
         patch.object(staged, "_drive_straight_to_point", side_effect=drive),
         patch.object(staged, "_grasp_and_lift", side_effect=grasp_gate) as grasp,
@@ -169,6 +219,17 @@ def _check_route(
         patch.object(staged, "_finish_placement", side_effect=pot_stage) as finish,
     ):
         result = staged.planning(env, seed=3)
+    checker_factory.assert_called_once_with(
+        env.unwrapped, grasp_contact_objects=(env.unwrapped.veggies[0],)
+    )
+    checker = checker_factory.return_value
+    env.add_step_observer.assert_called_once_with(checker.callback)
+    env.remove_step_observer.assert_called_once_with(checker.callback)
+    assert not hasattr(env.unwrapped, "_veggie_episode_checkers")
+    assert planner.action_noise == staged.EXECUTION_ACTION_NOISE
+    assert planner.noise_hold == staged.EXECUTION_NOISE_HOLD
+    planner.set_execution_noise_seed.assert_called_once_with(3)
+    assert planner.execution_noise_enabled is False
     assert len(drives) == 1
     assert len(turns) == (1 if stalled else 2)
     if not stalled:
@@ -192,7 +253,10 @@ def _check_route(
     assert face.call_count == int(expected_success)
     assert hand.call_count == int(expected_success)
     assert finish.call_count == int(expected_success)
-    assert env.log_event.call_args.kwargs["success"] == expected_success
+    result_events = [call for call in env.log_event.call_args_list if call.args[0] == "result"]
+    assert result_events[-1].kwargs["success"] == expected_success
+    assert env.log_event.call_args.args[0] == "safety_checkers"
+    assert env.log_event.call_args.kwargs["checker_steps"] == 0
     if expected_success:
         final = env.unwrapped.agent.base_link.pose.sp
         np.testing.assert_allclose(final.p, expected, atol=1e-6)
@@ -204,6 +268,17 @@ def _check_route(
 def test_turn_and_drive_target_counter_front_not_robot_ray():
     for position in ((4.672, -1.869, 0.0), (3.8, -2.4, 0.0)):
         _check_route(position)
+
+
+def test_wp3_uses_seeded_waypoint_standoff_offset():
+    _check_route(
+        (4.672, -1.869, 0.0),
+        waypoint_offsets={
+            "wp3_standoff_m": 0.02,
+            "wp12_pot_radius_m": -0.01,
+            "wp14_hover_clearance_m": 0.001,
+        },
+    )
 
 
 def test_stall_cannot_be_reported_as_success():
@@ -464,7 +539,21 @@ def _pot_fixture(failed_turn=False, lose_on_turn=False, lose_on_drive=False):
     commands = []
 
     def turn(direction):
-        expected = np.array([-0.8 + 0.25, 0.2 - np.sqrt(0.50**2 - 0.25**2), 0.0])
+        offsets = getattr(planner, "waypoint_offsets", None)
+        if not isinstance(offsets, dict):
+            offsets = {}
+        approach_radius = staged.POT_APPROACH_RADIUS_M + offsets.get(
+            "wp12_pot_radius_m", 0.0
+        )
+        approach_direction = np.array([
+            0.25,
+            -np.sqrt(staged.POT_APPROACH_RADIUS_M**2 - 0.25**2),
+        ])
+        approach_direction /= np.linalg.norm(approach_direction)
+        expected = np.r_[
+            np.array([-0.8, 0.2]) + approach_direction * approach_radius,
+            0.0,
+        ]
         expected /= np.linalg.norm(expected)
         np.testing.assert_allclose(direction, expected, atol=1e-6)
         if failed_turn:
@@ -518,6 +607,19 @@ def test_pot_approach_one_turn_then_straight_drive_with_payload():
     np.testing.assert_array_equal(actions[:, -1], 0.0)
     np.testing.assert_array_equal(actions[:, 7], -1.0)
     assert env.log_event.call_args.kwargs["approach_point_error_m"] <= 0.004
+
+
+def test_pot_approach_uses_seeded_radial_waypoint_offset():
+    env, planner, veggie, _ = _pot_fixture()
+    planner.waypoint_offsets = {"wp12_pot_radius_m": 0.02}
+    with patch.object(staged, "_attach_object"):
+        assert staged._approach_pot(env, planner, veggie)
+
+    start_event = next(
+        call for call in env.log_event.call_args_list
+        if call.args[1] == "Waypoint 12: straight drive to pot approach point"
+    )
+    assert start_event.kwargs["target_standoff_m"] == 0.52
 
 
 def test_pot_approach_never_drives_after_refused_turn():
@@ -593,8 +695,12 @@ def test_face_pot_rejects_lost_grasp():
     assert not env.log_event.call_args.kwargs["grasped"]
 
 
-def _payload_hover_fixture(failed_move=False, lost_grasp=False):
+def _payload_hover_fixture(failed_move=False, lost_grasp=False, hover_offset_m=0.0):
     env, planner, veggie, commands = _pot_fixture()
+    planner.execution_noise_enabled = False
+    planner.waypoint_offsets = {"wp14_hover_clearance_m": hover_offset_m}
+    env.execution_noise_states = []
+    env.hover_targets = []
     agent = env.unwrapped.agent
     initial = veggie.pose.p[0].numpy().copy()
     bounds_before = np.array([[2.4, -0.53, 0.92], [2.43, -0.48, 0.98]])
@@ -612,6 +718,8 @@ def _payload_hover_fixture(failed_move=False, lost_grasp=False):
         ]))
 
     def hover(pose, **kwargs):
+        env.execution_noise_states.append(planner.execution_noise_enabled)
+        env.hover_targets.append(np.array(pose.p, copy=True))
         assert kwargs["disable_lift_joint"] is True
         np.testing.assert_array_equal(pose.q, agent.tcp.pose.sp.q)
         if failed_move:
@@ -629,16 +737,33 @@ def _payload_hover_fixture(failed_move=False, lost_grasp=False):
 
 
 def test_payload_hover_centres_vegetable_with_rim_clearance():
-    env, planner, veggie, commands = _payload_hover_fixture()
+    env, planner, veggie, commands = _payload_hover_fixture(hover_offset_m=0.002)
     with patch.object(staged, "_detach_object") as detach, \
          patch.object(staged, "_attach_object") as attach:
         assert staged._hand_over_pot(env, planner, veggie)
-    detach.assert_called_once_with(planner)
-    attach.assert_called_once_with(planner, veggie)
+    assert detach.call_count == 2
+    assert attach.call_count == 2
+    detach.assert_called_with(planner)
+    attach.assert_called_with(planner, veggie)
     np.testing.assert_allclose(veggie.pose.p[0, :2], [-0.8, 0.2], atol=1e-6)
     assert not commands
     planner.open_gripper.assert_not_called()
+    assert planner.static_manipulation.call_count == 2
+    assert env.execution_noise_states == [True, False]
+    assert planner.execution_noise_enabled is False
+    np.testing.assert_allclose(
+        env.hover_targets[0][:2], env.hover_targets[1][:2], atol=1e-6
+    )
+    np.testing.assert_allclose(
+        env.hover_targets[0][2] - env.hover_targets[1][2], 0.002, atol=1e-6
+    )
     assert env.log_event.call_args.kwargs["rim_clearance_m"] >= 0.05
+    recovery_event = next(
+        call for call in env.log_event.call_args_list
+        if call.args[1] == "Waypoint 14b: replan from measured state to nominal hover"
+    )
+    assert recovery_event.kwargs["previous_motion_success"] is True
+    assert "previous_motion_result" not in recovery_event.kwargs
 
 
 def test_payload_hover_failed_motion_cannot_succeed():
@@ -661,6 +786,22 @@ def test_payload_hover_never_starts_without_grasp():
     env.unwrapped.agent.is_grasping.return_value = False
     assert not staged._hand_over_pot(env, planner, veggie)
     planner.static_manipulation.assert_not_called()
+
+
+def test_veggie_waypoint_offsets_are_seeded_and_bounded():
+    first = staged._sample_waypoint_offsets(23)
+    replay = staged._sample_waypoint_offsets(23)
+    other_seed = staged._sample_waypoint_offsets(24)
+    scales = {
+        "wp3_standoff_m": staged.VEGETABLE_APPROACH_STANDOFF_M,
+        "wp12_pot_radius_m": staged.POT_APPROACH_RADIUS_M,
+        "wp14_hover_clearance_m": staged.WP14_HOVER_CLEARANCE_M,
+    }
+
+    assert first == replay
+    assert first != other_seed
+    for name, scale in scales.items():
+        assert abs(first[name]) <= staged.WAYPOINT_NOISE * scale
 
 
 def _placement_fixture(failed_release=False, failed_evaluation=False):
@@ -837,3 +978,52 @@ def test_canonical_entrypoint_replaces_legacy_algorithm():
     assert staged.__name__ == "planners.myrobocasa_fridge_veggies_planner"
     assert not hasattr(staged, "_reach_and_grasp")
     assert not hasattr(staged, "_transport_veg")
+
+
+@pytest.mark.parametrize("outcome", [True, False, RuntimeError("episode failed")])
+def test_safety_diagnostics_finalize_on_every_planner_exit(outcome):
+    task = SimpleNamespace()
+    env = Mock(unwrapped=task)
+    checks = Mock(summary=Mock(return_value={"checker_steps": 17}))
+
+    def episode(*args, **kwargs):
+        task._veggie_episode_checkers = checks
+        env.add_step_observer(checks.callback)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    with patch.object(staged, "_planning_episode", side_effect=episode):
+        if isinstance(outcome, Exception):
+            with pytest.raises(RuntimeError, match="episode failed"):
+                staged.planning(env, 201)
+        else:
+            assert staged.planning(env, 201) is outcome
+    env.remove_step_observer.assert_called_once_with(checks.callback)
+    assert env.log_event.call_count == 2
+    result_call, safety_call = env.log_event.call_args_list
+    assert result_call.args == ("result", "Veggie planner final result")
+    assert result_call.kwargs["success"] is (outcome if isinstance(outcome, bool) else False)
+    assert result_call.kwargs["seed"] == 201
+    expected_error = "RuntimeError: episode failed" if isinstance(outcome, Exception) else None
+    assert result_call.kwargs["error"] == expected_error
+    assert safety_call.args == ("safety_checkers", "Episode safety-checker results")
+    assert safety_call.kwargs == {"checker_steps": 17}
+    assert not hasattr(task, "_veggie_episode_checkers")
+
+
+def test_episode_checkers_are_finalized_after_exception():
+    env = Mock(unwrapped=SimpleNamespace())
+    checker = Mock(summary=Mock(return_value={"checker_steps": 12}))
+
+    def failing_episode(env, seed, debug=False):
+        env.unwrapped._veggie_episode_checkers = checker
+        raise RuntimeError("planning failed")
+
+    with patch.object(staged, "_planning_episode", side_effect=failing_episode):
+        with pytest.raises(RuntimeError, match="planning failed"):
+            staged.planning(env, seed=201)
+    env.remove_step_observer.assert_called_once_with(checker.callback)
+    assert env.log_event.call_args.args[0] == "safety_checkers"
+    assert env.log_event.call_args.kwargs["checker_steps"] == 12
+    assert not hasattr(env.unwrapped, "_veggie_episode_checkers")

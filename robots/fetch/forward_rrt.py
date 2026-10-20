@@ -45,6 +45,22 @@ def _decode(rows, q0, direction, indices, rates=False):
     return out
 
 
+def _valid_ik_goals(goals, start, limits):
+    """IK's tolerance can admit out-of-bounds goals that RRT cannot reach.
+
+    Reject them rather than clipping joint values (which would change the TCP
+    goal). Keep all admissible IK branches, nearest arm configuration first.
+    """
+    valid = []
+    for candidate in np.atleast_2d(goals):
+        if not np.all(np.isfinite(candidate)):
+            continue
+        goal = unwrap_toward(candidate.copy(), start, limits)
+        if np.all(goal >= limits[:, 0]) and np.all(goal <= limits[:, 1]):
+            valid.append(goal)
+    return sorted(valid, key=lambda goal: np.linalg.norm((goal - start)[ARM]))
+
+
 def plan_forward_rrt(solver, target_pose, max_advance, speed=0.08):
     """One RRT over advance+arm; return a decoded simulator-space trajectory."""
     original = solver.planner
@@ -123,10 +139,10 @@ def plan_forward_rrt(solver, target_pose, max_advance, speed=0.08):
         return {"status": "forward RRT: surrogate FK differs from simulator"}
     status, goals = planner.IK(target_pose, start, mask=mask, n_init_qpos=100)
     if status != 'Success': return {"status": status}
-    goals = [unwrap_toward(g, start, planner.joint_limits) for g in np.atleast_2d(goals)]
-    # ponytail: one nearest IK goal; more RRT goals only if measured refusals need it.
-    nearest = min(goals, key=lambda goal: np.linalg.norm((goal - start)[ARM]))
-    result = planner.plan_qpos([nearest], start, time_step=solver.base_env.control_timestep,
+    goals = _valid_ik_goals(goals, start, planner.joint_limits)
+    if not goals:
+        return {"status": "forward RRT: no IK goals within joint limits"}
+    result = planner.plan_qpos(goals, start, time_step=solver.base_env.control_timestep,
                               fixed_joint_indices=[1, 2, 3], planning_time=2.0,
                               rrt_range=0.1, simplify=True)
     if result.get('status') != 'Success': return result

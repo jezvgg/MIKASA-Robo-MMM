@@ -1,11 +1,11 @@
-"""Incremental planner for ``MyRoboCasa_TakeIt-v1``.
+"""TakeIt WP0-16, with an appended TakeItBack WP17-28 return leg.
 
-Current checkpoint: waypoints 0-16.  The planner completes the carry to the
-tray, centers the held cup over it, lowers it, releases it, and verifies placement.
+TakeIt retains its tray-only final predicate. Exact TakeItBack tasks continue in
+that same episode, regrasping the cup and returning it to saved initial cup_pos.
+WP19S can skip the return base route only with a checked arm-only path.
 """
 
 import argparse
-import json
 import os
 import random
 import time
@@ -22,6 +22,7 @@ from mani_skill.agents.robots import Fetch
 from mani_skill.utils.wrappers import RecordEpisode
 
 from my_scenes.my_robocasa_takeit import MyRoboCasaSceneTakeIt
+from my_scenes.my_robocasa_takeitback import MyRoboCasaSceneTakeItBack
 from planners.takeitback_common import _tcp_to
 from robots.fetch.extand import (
     OPEN,
@@ -34,6 +35,7 @@ from robots.fetch.forward_rrt import plan_forward_rrt
 from utils.logging_utils import PlannerLogger, StreamingVideoRecorder, capture_stdout
 from utils.planners_utils import lower_torso_smooth
 from utils.tray_episode_checkers import TrayEpisodeCheckers
+from utils.trajectory_metadata import patch_trajectory_metadata, resolve_sim_backend
 
 
 SETTLE_STEPS = 4
@@ -61,25 +63,13 @@ EXECUTION_ACTION_NOISE = float(os.environ.get("MIKASA_ACTION_NOISE", "0.001"))
 EXECUTION_NOISE_HOLD = int(os.environ.get("MIKASA_NOISE_HOLD", "10"))
 
 
-def _repair_trajectory_metadata(run_dir: Path) -> None:
-    """Keep RoboCasa reconfigure seeds replayable by ManiSkill's checker."""
+def _repair_trajectory_metadata(
+    run_dir: Path, sim_backend: str, episode_seed: int
+) -> None:
+    """Repair actual reset seeds and persist the resolved physics backend."""
     path = run_dir / "trajectory.json"
-    if not path.exists():
-        return
-    data = json.loads(path.read_text(encoding="utf-8"))
-    changed = False
-    for episode in data.get("episodes", []):
-        seed = episode.get("reset_kwargs", {}).get("seed")
-        if isinstance(seed, list) and len(seed) == 1:
-            seed = seed[0]
-        if seed is not None and episode.get("episode_seed") != seed:
-            episode["episode_seed"] = int(seed)
-            changed = True
-    if changed:
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+    if path.exists():
+        patch_trajectory_metadata(path, sim_backend, episode_seed=episode_seed)
 
 
 def _counter_direction_toward_cup(
@@ -176,6 +166,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--log-freq", type=int, default=10)
     parser.add_argument("--no-video", action="store_true")
+    parser.add_argument("--assisted-grasp", action="store_true",
+                        help="Enable CPU-only contact-gated PhysX grasp assistance")
     return parser.parse_args()
 
 
@@ -344,6 +336,289 @@ def _execution_metrics(wall_seconds: float, control_steps: int, control_timestep
     }
 
 
+def _needs_return(task) -> bool:
+    # TakeIt inherits TakeItBack, but overrides its round-trip predicate.
+    return type(task) is MyRoboCasaSceneTakeItBack
+
+
+def _tray_stage_success(task, evaluation) -> bool:
+    if _needs_return(task):
+        return bool(task.placed_on_tray.reshape(-1)[0].item())
+    return bool(evaluation["success"].item())
+
+
+def _return_cup_goal(tcp, cup, initial_position, clearance=0.17):
+    position = np.asarray(initial_position, dtype=float).copy()
+    position[2] += clearance
+    goal = sapien.Pose(position, cup.q)
+    target = goal * (tcp.inv() * cup).inv()
+    return mplib.Pose(p=target.p, q=target.q), goal
+
+
+def _counter_aligned_base_target(base_position, initial_position, axis):
+    """Align the base, not the still-forward held cup, before the counter turn."""
+    target = np.asarray(base_position).copy()
+    target[:2] += axis[:2] * np.dot(
+        np.asarray(initial_position)[:2] - target[:2], axis[:2]
+    )
+    return target
+
+
+def _return_touch_links(links):
+    """Use entity names (including SAPIEN scene/robot prefixes) for the ACM."""
+    grasp_links = ("gripper_link", "l_gripper_finger_link", "r_gripper_finger_link")
+    return [
+        link.name
+        for link in links
+        if any(link.name.endswith(name) for name in grasp_links)
+    ]
+
+
+class _ReturnSafetyStop(RuntimeError):
+    pass
+
+
+def _return_waypoints_17_28(env, planner, task, agent, body) -> bool:
+    """Continue the existing episode: regrasp on tray, retrace the transport."""
+    import sapien.physx as physx
+    from mplib.sapien_utils.conversion import convert_object_name
+
+    initial = task._takeit_initial_cup_position.copy()
+    world = planner.planner.planning_world
+    component = task.cup._objs[0].find_component_by_type(physx.PhysxRigidBaseComponent)
+    cup_name = convert_object_name(component.entity)
+    # The forward base route may leave a planning attachment after release.
+    if world.get_attached_object(cup_name) is not None:
+        world.detach_object(cup_name)
+    planner.planner.update_from_simulation()
+    acm = world.get_allowed_collision_matrix()
+    touch_links = _return_touch_links(agent.robot._objs[0].get_links())
+    for link in agent.robot._objs[0].get_links():
+        acm.set_entry(link.name, cup_name, link.name in touch_links)
+
+    class GuardedTorsoEnv:
+        unwrapped = task
+
+        def step(self, action):
+            if planner.truncated:
+                raise _ReturnSafetyStop("Return torso motion reached episode horizon")
+            result = planner._step(action)
+            if planner.truncated:
+                raise _ReturnSafetyStop("Return torso motion reached episode horizon")
+            return result
+
+    torso_env = GuardedTorsoEnv()
+
+    def stage(number, label):
+        env.log_event("waypoint", f"Waypoint {number}: {label}")
+
+    def complete(number, ok, **metrics):
+        env.log_event(
+            "waypoint_complete" if ok else "error",
+            f"Waypoint {number} {'complete' if ok else 'failed'}",
+            **metrics,
+        )
+        return bool(ok) and not planner.truncated
+
+    def arm_to(target, number, optional=False):
+        planner.planner.update_from_simulation()
+        selected, method, details = _plan_cup_centering(
+            planner, target, agent.robot.get_qpos().cpu().numpy()[0]
+        )
+        env.log_event(
+            "waypoint_plan",
+            f"Waypoint {number} arm-only plan",
+            selected=method,
+            candidates=details,
+        )
+        if selected is None:
+            return None if optional else False
+        planner.follow_forward_path_w_refinement(selected)
+        planner.idle_steps(t=SETTLE_STEPS)
+        planner.planner.update_from_simulation()
+        error = float(np.linalg.norm(agent.tcp.pose.sp.p - target.p))
+        return complete(number, error <= 0.035, tcp_error=error)
+
+    stage(17, "open-hand approach to cup on tray")
+    # The hand just released the cup. Compensate only measured settling drift.
+    target_p = (
+        agent.tcp.pose.sp.p + task.cup.pose.sp.p - task._takeit_released_cup_pose.p
+    )
+    target = mplib.Pose(p=target_p, q=agent.tcp.pose.sp.q)
+    if np.linalg.norm(target_p - agent.tcp.pose.sp.p) > 0.03:
+        if not arm_to(target, 17):
+            return False
+    elif not complete(17, _tcp_to(agent, task.cup.pose.sp.p) <= 0.12):
+        return False
+
+    stage(18, "close gripper and verify regrasp")
+    _align_gripper_switch(planner, task)
+    planner.close_gripper(t=12)
+    planner.idle_steps(t=GRIP_SETTLE_STEPS)
+    if not complete(18, bool(agent.is_grasping(task.cup).item())):
+        return False
+    attach_object(
+        world,
+        component.entity,
+        agent.robot._objs[0],
+        planner.planner.link_name_2_idx[planner.planner.move_group],
+        touch_links=touch_links,
+    )
+    planner.planner.update_from_simulation()
+    baseline = set(planner.touching_now(limit=None))
+    if any(pair.startswith("unreadable") for pair in baseline):
+        return False
+
+    def guard():
+        contacts = set(planner.touching_now(limit=None)) - baseline
+        if (
+            planner.truncated
+            or not bool(agent.is_grasping(task.cup).item())
+            or contacts
+        ):
+            raise _ReturnSafetyStop(f"Return carry safety stop: {sorted(contacts)}")
+
+    env.add_step_observer(guard)
+    try:
+        stage(19, "lift regrasped cup vertically by 0.17 m")
+        cup_before = task.cup.pose.sp.p.copy()
+        torso_start = float(body.qpos[0][2])
+        limits = agent.robot.get_qlimits()[0, 3].cpu().numpy()
+        torso_goal = float(np.clip(torso_start + 0.17, *limits))
+        steps = max(
+            1,
+            int(
+                np.ceil(
+                    (torso_goal - torso_start) / (TORSO_SPEED * task.control_timestep)
+                )
+            ),
+        )
+        arm_hold = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+        body_target = body.qpos[0].cpu().numpy().copy()
+        for i in range(steps + SETTLE_STEPS):
+            body_target[2] = torso_start + (torso_goal - torso_start) * min(
+                1.0, (i + 1) / steps
+            )
+            planner._step(planner._compose(arm_hold, body_target, np.zeros(2)))
+        remaining = cup_before[2] + 0.17 - float(task.cup.pose.sp.p[2])
+        if remaining > 0.01:
+            tcp = agent.tcp.pose.sp
+            position = tcp.p.copy()
+            position[2] += remaining
+            if not arm_to(mplib.Pose(p=position, q=tcp.q), 19):
+                return False
+        if not complete(19, float(task.cup.pose.sp.p[2] - cup_before[2]) >= 0.15):
+            return False
+
+        stage("19S", "optional collision-checked arm-only return")
+        target, _ = _return_cup_goal(agent.tcp.pose.sp, task.cup.pose.sp, initial)
+        skip = arm_to(target, "19S", optional=True)
+        if skip is False:  # Execution started: no fallback after failure.
+            return False
+        if skip is None:
+            stage(20, "reverse retreat from tray")
+            before = agent.base_link.pose.sp.p.copy()
+            planner.drive_straight(-RETREAT_DISTANCE, v=0.10, max_steps=350)
+            if not complete(
+                20, np.linalg.norm(agent.base_link.pose.sp.p[:2] - before[:2]) >= 0.10
+            ):
+                return False
+            stage(21, "align parallel to counter toward initial cup position")
+            axis = (
+                np.array([1.0, 0.0, 0.0])
+                if task.counter_size[0] >= task.counter_size[1]
+                else np.array([0.0, 1.0, 0.0])
+            )
+            if np.dot(initial[:2] - agent.base_link.pose.sp.p[:2], axis[:2]) < 0:
+                axis = -axis
+            if planner.rotate_base_z(axis) == -1 or not complete(
+                21, _heading_error(agent, axis) <= np.deg2rad(5)
+            ):
+                return False
+            stage(22, "drive along counter to original cup position")
+            base = _counter_aligned_base_target(
+                agent.base_link.pose.sp.p, initial, axis
+            )
+            if planner.move_base_forward(base, freeze_arm=True) == -1:
+                return False
+            if not complete(
+                22,
+                abs(np.dot(initial[:2] - agent.base_link.pose.sp.p[:2], axis[:2]))
+                <= 0.08,
+            ):
+                return False
+            stage(23, "face original cup position")
+            normal, _, _, _ = _counter_front_geometry(
+                task, agent.base_link.pose.sp.p[:2], axis
+            )
+            direction = np.r_[-normal, 0.0]
+            if planner.rotate_base_z(direction) == -1 or not complete(
+                23, _heading_error(agent, direction) <= np.deg2rad(5)
+            ):
+                return False
+            stage(24, "approach original cup position")
+            base = agent.base_link.pose.sp.p.copy()
+            base[:2] += direction[:2] * np.dot(
+                initial[:2] - task.cup.pose.sp.p[:2], direction[:2]
+            )
+            if planner.move_base_forward(base, freeze_arm=True) == -1:
+                return False
+            if not complete(
+                24, np.linalg.norm(task.cup.pose.sp.p[:2] - initial[:2]) <= 0.12
+            ):
+                return False
+            stage(25, "center cup above saved initial position")
+            target, _ = _return_cup_goal(agent.tcp.pose.sp, task.cup.pose.sp, initial)
+            if not arm_to(target, 25):
+                return False
+
+        stage(26, "lower cup to original counter surface")
+        drop = float(task.cup.pose.sp.p[2] - initial[2])
+        available = float(body.qpos[0][2]) - float(limits[0])
+        if drop > available + 0.01 or drop < -0.02:
+            return False
+        lower_torso_smooth(
+            torso_env,
+            planner,
+            target_drop=max(0.0, drop),
+            total_steps=max(
+                1, int(np.ceil(max(0.0, drop) / (TORSO_SPEED * task.control_timestep)))
+            ),
+        )
+        if not complete(26, abs(float(task.cup.pose.sp.p[2] - initial[2])) <= 0.04):
+            return False
+    except _ReturnSafetyStop as exc:
+        env.log_event("error", str(exc))
+        return False
+    finally:
+        env.remove_step_observer(guard)
+
+    stage(27, "release cup and verify return")
+    _align_gripper_switch(planner, task)
+    planner.open_gripper(t=12, ramp=12)
+    planner.idle_steps(t=RELEASE_SETTLE_STEPS)
+    world.detach_object(cup_name)
+    planner.planner.update_from_simulation()
+    if not complete(
+        27,
+        bool(task.evaluate()["success"].item())
+        and not bool(agent.is_grasping(task.cup).item()),
+    ):
+        return False
+    stage(28, "withdraw open hand and final task check")
+    start = float(body.qpos[0][2])
+    lift = min(0.08, float(limits[1]) - start)
+    try:
+        lower_torso_smooth(torso_env, planner, target_drop=-lift, total_steps=30)
+    except _ReturnSafetyStop as exc:
+        env.log_event("error", str(exc))
+        return False
+    planner.idle_steps(t=RELEASE_SETTLE_STEPS)
+    success = complete(28, bool(task.evaluate()["success"].item()))
+    env.log_event("result", "TakeItBack continuation finished", success=success)
+    return success
+
+
 def _finish_waypoints_15_16(env, planner, task, agent, body) -> bool:
     """Lower, release, and verify cup after either WP14 route."""
     # WAYPOINT 15: lower the closed gripper and cup to the tray surface.
@@ -426,6 +701,7 @@ def _finish_waypoints_15_16(env, planner, task, agent, body) -> bool:
     # cup settle before using the task's real tray-success predicate.
     env.log_event("waypoint", "Waypoint 16: release cup on tray")
     cup_before_release = task.cup.pose.p[0].cpu().numpy()[:3].copy()
+    task._takeit_released_cup_pose = task.cup.pose.sp
     _align_gripper_switch(planner, task)
     planner.open_gripper(t=12, ramp=12)
     planner.idle_steps(t=RELEASE_SETTLE_STEPS)
@@ -442,7 +718,7 @@ def _finish_waypoints_15_16(env, planner, task, agent, body) -> bool:
     cup_speed = float(torch.linalg.norm(task.cup.linear_velocity[0]).item())
     cup_angular_speed = float(torch.linalg.norm(task.cup.angular_velocity[0]).item())
     evaluation = task.evaluate()
-    task_success = bool(evaluation["success"].item())
+    task_success = _tray_stage_success(task, evaluation)
     waypoint16_success = (
         task_success
         and not grasped_after_release
@@ -479,7 +755,9 @@ def _finish_waypoints_15_16(env, planner, task, agent, body) -> bool:
         cup_angular_speed=cup_angular_speed,
         task_success=task_success,
     )
-    env.log_event("result", "Planner completed after waypoint 16", success=waypoint16_success)
+    env.log_event("result", "Waypoint 16 placement result", success=waypoint16_success)
+    if waypoint16_success and _needs_return(task):
+        return _return_waypoints_17_28(env, planner, task, agent, body)
     return waypoint16_success
 
 
@@ -525,6 +803,7 @@ def _planning_episode(
 
     task: MyRoboCasaSceneTakeIt = env.unwrapped
     env.reset(seed=seed, options={"reconfigure": True})
+    task._takeit_initial_cup_position = np.asarray(task.cup_pos[0]).copy()
     agent: Fetch = cast(Fetch, task.agent)
     checkers = TrayEpisodeCheckers(task)
     task._tray_episode_checkers = checkers
@@ -2009,6 +2288,7 @@ if __name__ == "__main__":
 
     env = gym.make(
         "MyRoboCasa_TakeIt-v1",
+        assisted_grasp=args.assisted_grasp,
         num_envs=1,
         render_mode=None if args.no_video else args.render_mode,
         obs_mode="state" if args.no_video else "rgb",
@@ -2016,6 +2296,7 @@ if __name__ == "__main__":
         control_mode="pd_joint_pos",
         sim_config=dict(scene_config=dict(cpu_workers=1, enable_enhanced_determinism=True)),
     )
+    resolved_sim_backend = resolve_sim_backend(env)
     if not args.no_video:
         env = StreamingVideoRecorder(env, output_dir=str(run_dir), video_fps=30)
     env = RecordEpisode(
@@ -2047,7 +2328,7 @@ if __name__ == "__main__":
             )
     finally:
         env.close()
-    _repair_trajectory_metadata(run_dir)
+    _repair_trajectory_metadata(run_dir, resolved_sim_backend, seed)
     print(f"[INFO] waypoint_16_success={waypoint_success}")
     if not args.no_video:
         print(f"[INFO] Video recording saved in '{run_dir}/'")
