@@ -1,0 +1,76 @@
+{
+ "version": 1,
+ "created_utc": "2026-10-17T17:16:48.768887+00:00",
+ "requested_by": "owner 2026-10-17: collect another 1000 SameDrawer trajectories into a new HF repo, upload through the Mac",
+ "note": "Declared before any collection episode. Same task profile (20) and acceptance rules (v3) as nurtayev-d/samedrawer-1000ep; collected on the lab H100 server; torch pin compared by release (2.14.0+cu126, owner decision 2026-10-17).",
+ "code": {
+  "repo": "pa40l/MIKASA-Robo-MMM",
+  "branch": "feat/ik-chain-stance",
+  "commit": "02eac4a",
+  "worktree": "~/sd-collect/repo"
+ },
+ "training": {
+  "bank": "~/sd-collect/driver/bank.json",
+  "range": "9100000-9102141",
+  "per_drawer_in_bank": 500,
+  "quota_per_drawer": 262,
+  "dataset_per_drawer": 250,
+  "selection": "first 250 accepted per drawer in collection order among episodes passing D6, as in samedrawer-1000ep",
+  "batches": "20 seeds each, declared before running; all attempts count toward SR"
+ },
+ "validation": {
+  "rule": "the same 100 seeds as nurtayev-d/samedrawer-1000ep (8150000-8150123), not collected here"
+ },
+ "excluded": [
+  "9000000-9003100 (first dataset bank)",
+  "8150000-8150123 (validation)",
+  "all earlier ranges of the pod SEED_PLAN.json"
+ ],
+ "amendments": [
+  {
+   "utc": "2026-10-17T21:33:48.945264+00:00",
+   "change": "Profile 21 (assisted grasp, commit 9238467 on collection/samedrawer-ag) replaces profile 20 before any profile-21 episode. New batches same_drawer-ag-train-NNN in ~/sd-collect/runs-ag, same bank from its first seed, same quotas and acceptance rules. The 24 profile-20 batches b2-train-001..024 (stopped) are not part of this dataset.",
+   "reason": "owner 2026-10-17: SameDrawer is trained and evaluated in the assisted-grasp environment only",
+   "validation": "re-frozen under profile 21 from candidates 8250000-8250139 (first 100 planner successes)"
+  },
+  {
+   "utc": "2026-10-17T22:56:06.079656+00:00",
+   "change": "SeasonDish profile 26 (assisted grasp; commit 5dbf5a8 on collection/seasondish-ag, worktree ~/sd-collect/repo-sdish) is declared before any profile-26 episode. Training: sequential seeds from 7780000 (range 7780000-7789999), batches season_dish-ag-train-NNN of 20 in ~/sd-collect/runs-ag, all attempts count toward SR; target 1000 accepted; selection = first 1000 accepted in collection order (batch number, then episode order within the batch export), as seasondish-1000ep. Validation100: first 100 planner successes in ascending order from candidates 7745000-7745179, oracle only, frozen with utils.collection.validation. Gates: ACCEPTANCE_RULES v4 season_dish (the pod's 2026-09-28 audits: followup motion incl. D6, transfer tilt < 15 deg, wrist-only pour, upper and payload clearance).",
+   "reason": "owner 2026-10-18: every task is collected, trained and evaluated with assisted grasp; upload to a new HF repo",
+   "excluded": [
+    "7760000-7769999 (pod p25 training)",
+    "7750000-7750179 (pod validation)",
+    "7761000-7761799 (pod p23)",
+    "7790000-7790079 and 7990000-7990119 (gangway trials 10-17)",
+    "all earlier ranges of the pod SEED_PLAN.json"
+   ]
+  },
+  {
+   "utc": "2026-10-18T14:14:59.193979+00:00",
+   "change": "CabinetSearch profile 16 (assisted grasp, BIMBO door mode; commit 4562981 on collection/samedrawer-ag, worktree ~/sd-collect/repo-cab) is declared before any profile-16 episode. Training: sequential seeds from 7880000 (range 7880000-7889999), batches cabinet_search-ag-train-NNN of 20 in ~/sd-collect/runs-ag, all attempts count toward SR. The first two batches (TARGET=1 driver run) are the pilot of the can-early gate; they count toward the dataset like every other batch. Target 1020 accepted; selection = first 1000 accepted in collection order among episodes passing D6, as cabinetsearch-1000ep. Validation100: first 100 planner successes in ascending order from candidates 7845000-7845179, oracle only. Gates: ACCEPTANCE_RULES v4 cabinet_search (followup motion, transport clearance, cabinet closing, can-early: can xy <= 1 cm and tilt <= 20 deg before the push).",
+   "reason": "owner 2026-10-18: every task is collected, trained and evaluated with assisted grasp; order SameDrawer -> SeasonDish -> DepthRecall -> CabinetSearch, DepthRecall on hold (props to spices, prompt map)",
+   "excluded": [
+    "7860000-7869999 (pod p14/p15 training)",
+    "7850000-7850139 (pod validation)",
+    "7800000-7800039, 9030000-9030039 (pod decision pools)"
+   ]
+  },
+  {
+   "utc": "2026-10-18T18:26:30.268102+00:00",
+   "change": "DepthRecall profile 5 (assisted grasp; RoboCasa spices and sauces in their own looks, the pad map in every instruction; commit ed81c42 on feat/depth-recall-spices-map, worktree ~/sd-collect/repo-dr) is declared before any profile-5 collection episode. Training: sequential seeds from 7970000 (range 7970000-7979999), batches depth_recall-ag-train-NNN of 10 (RGB h5 ~0.5 GB per episode while it exists) in ~/sd-collect/runs-ag, all attempts count toward SR; target 1000 accepted; selection = first 1000 accepted in collection order (D6 is a hard gate). Validation100: first 100 planner successes in ascending order from candidates 7965000-7965179, oracle only. The 20-seed development trial dr5-trial-002 (seeds 7990500-7990519, 20/20 accepted) is not part of the dataset.",
+   "reason": "owner 2026-10-18: \u00ab\u0412\u043b\u0435\u0439 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0441 \u043f\u0440\u0438\u043f\u0440\u0430\u0432\u0430\u043c\u0438 \u0438 \u043c\u0430\u043f\u043e\u0439\u00bb, names and map approved (\u00ab\u043f\u043e\u0434\u0445\u043e\u0434\u0438\u0442\u00bb); order SameDrawer -> SeasonDish -> DepthRecall -> CabinetSearch",
+   "excluded": [
+    "1000-1029, 7990000-7990519 (development, both sessions)"
+   ]
+  },
+  {
+   "utc": "2026-10-19T22:07:00.876325+00:00",
+   "change": "DepthRecall profile 6 (mustard drawn in the yellow pad's colour, the pad map, the old drive pace, start x jitter 0.08; commit ddfbccf on feat/depth-recall-mustard, public on jezvgg and pa40l; worktree ~/sd-collect/repo-dr6) replaces profile 5 before any profile-6 episode. Training: sequential seeds from 7970400 (profile 5 attempted 7970000-7970349; its 35 batches were deleted on the owner's word 2026-10-19), batches depth_recall-ag6-train-NNN of 20 in ~/sd-collect/runs-ag; target 1000 accepted; selection = first 1000 accepted in collection order (D6 hard). Validation100 re-frozen under profile 6 from candidates 7965000-7965179. Gates: ACCEPTANCE_RULES v5 depth_recall. Source h5 go to sources/<batch>/ of nurtayev-d/depthrecall-ag-1000ep and stay on the server.",
+   "reason": "owner 2026-10-19: mustard instead of hot sauce, the old drive pace; DR last; +300 GB, no deletions",
+   "excluded": [
+    "7970000-7970349 (profile 5, deleted)",
+    "7990000-7990785 (development, both sessions)"
+   ]
+  }
+ ]
+}
