@@ -1,0 +1,136 @@
+diff --git a/vla/datasets/rlds/oxe/configs.py b/vla/datasets/rlds/oxe/configs.py
+index cdbbbf9..83eb557 100644
+--- a/vla/datasets/rlds/oxe/configs.py
++++ b/vla/datasets/rlds/oxe/configs.py
+@@ -47,6 +47,7 @@ class ActionEncoding(IntEnum):
+     JOINT_POS = 2           # Joint Delta Position (7) + Gripper Open/Close (1)
+     JOINT_POS_BIMANUAL = 3  # Joint Delta Position (2 x [ Joint Delta Position (6) + Gripper Open/Close (1) ])
+     EEF_R6 = 4              # EEF Delta XYZ (3) + R6 (6) + Gripper Open/Close (1)
++    FETCH_JOINT = 5         # Fetch: arm joint targets (7) + gripper (1) + torso/head targets (3) + base forward/yaw velocity (2)
+     # fmt: on
+ 
+ 
+@@ -697,4 +698,55 @@ OXE_DATASET_CONFIGS = {
+         "state_encoding": StateEncoding.NONE,
+         "action_encoding": ActionEncoding.EEF_POS,
+     },
++
++    # Fetch (MIKASA-Robo-MMM): the mikasa entry's keys, the three cameras in the bi-wrist slots
++    # (main: left base, left_wrist: fetch_hand, right_wrist: right base), 13D joint/base actions.
++    "fetch_samedrawer": {
++        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None,
++                           "left_wrist": "wrist_image", "right_wrist": "right_image"},
++        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
++        "state_obs_keys": [None, None, None, None, None, None, None, None],
++        "state_encoding": StateEncoding.NONE,
++        "action_encoding": ActionEncoding.FETCH_JOINT,
++    },
++    "fetch_seasondish": {
++        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None,
++                           "left_wrist": "wrist_image", "right_wrist": "right_image"},
++        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
++        "state_obs_keys": [None, None, None, None, None, None, None, None],
++        "state_encoding": StateEncoding.NONE,
++        "action_encoding": ActionEncoding.FETCH_JOINT,
++    },
++    "fetch_cabinetsearch": {
++        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None,
++                           "left_wrist": "wrist_image", "right_wrist": "right_image"},
++        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
++        "state_obs_keys": [None, None, None, None, None, None, None, None],
++        "state_encoding": StateEncoding.NONE,
++        "action_encoding": ActionEncoding.FETCH_JOINT,
++    },
++    "fetch_depthrecall": {
++        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None,
++                           "left_wrist": "wrist_image", "right_wrist": "right_image"},
++        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
++        "state_obs_keys": [None, None, None, None, None, None, None, None],
++        "state_encoding": StateEncoding.NONE,
++        "action_encoding": ActionEncoding.FETCH_JOINT,
++    },
++    "fetch_takeitback": {
++        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None,
++                           "left_wrist": "wrist_image", "right_wrist": "right_image"},
++        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
++        "state_obs_keys": [None, None, None, None, None, None, None, None],
++        "state_encoding": StateEncoding.NONE,
++        "action_encoding": ActionEncoding.FETCH_JOINT,
++    },
++    "fetch_veggie": {
++        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None,
++                           "left_wrist": "wrist_image", "right_wrist": "right_image"},
++        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
++        "state_obs_keys": [None, None, None, None, None, None, None, None],
++        "state_encoding": StateEncoding.NONE,
++        "action_encoding": ActionEncoding.FETCH_JOINT,
++    },
+ }
+diff --git a/vla/datasets/rlds/oxe/materialize.py b/vla/datasets/rlds/oxe/materialize.py
+index 8913576..3965991 100644
+--- a/vla/datasets/rlds/oxe/materialize.py
++++ b/vla/datasets/rlds/oxe/materialize.py
+@@ -29,8 +29,8 @@ def make_oxe_dataset_kwargs(
+ ) -> Dict[str, Any]:
+     """Generates config (kwargs) for given dataset from Open-X Embodiment."""
+     dataset_kwargs = deepcopy(OXE_DATASET_CONFIGS[dataset_name])
+-    if dataset_kwargs["action_encoding"] not in [ActionEncoding.EEF_POS, ActionEncoding.EEF_R6]:
+-        raise ValueError(f"Cannot load `{dataset_name}`; only EEF_POS & EEF_R6 actions supported!")
++    if dataset_kwargs["action_encoding"] not in [ActionEncoding.EEF_POS, ActionEncoding.EEF_R6, ActionEncoding.FETCH_JOINT]:
++        raise ValueError(f"Cannot load `{dataset_name}`; only EEF_POS, EEF_R6 & FETCH_JOINT actions supported!")
+ 
+     # [Contract] For EEF_POS & EEF_R6 actions, only the last action dimension (gripper) is absolute!
+     # Normalize all action dimensions *except* the gripper
+@@ -40,6 +40,11 @@ def make_oxe_dataset_kwargs(
+     elif dataset_kwargs["action_encoding"] is ActionEncoding.EEF_R6:
+         dataset_kwargs["absolute_action_mask"] = [False] * 9 + [True]
+         dataset_kwargs["action_normalization_mask"] = [True] * 9 + [False]
++    elif dataset_kwargs["action_encoding"] is ActionEncoding.FETCH_JOINT:
++        # Joint and body targets are absolute (repeat the last one past the end), base velocities
++        # relative (neutral = stop); normalize all but the gripper, as for EEF_POS.
++        dataset_kwargs["absolute_action_mask"] = [True] * 11 + [False] * 2
++        dataset_kwargs["action_normalization_mask"] = [True] * 7 + [False] + [True] * 5
+     dataset_kwargs["action_proprio_normalization_type"] = action_proprio_normalization_type
+ 
+     # Adjust Loaded Camera Views
+diff --git a/vla/datasets/rlds/oxe/mixtures.py b/vla/datasets/rlds/oxe/mixtures.py
+index d946194..3ed415a 100644
+--- a/vla/datasets/rlds/oxe/mixtures.py
++++ b/vla/datasets/rlds/oxe/mixtures.py
+@@ -295,5 +295,21 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
+     "mikasa_dataset": [
+         ("mikasa_dataset", 1.0),
+     ],
++
++    # === Fetch (MIKASA-Robo-MMM) ===
++    "fetch_samedrawer": [("fetch_samedrawer", 1.0)],
++    "fetch_seasondish": [("fetch_seasondish", 1.0)],
++    "fetch_cabinetsearch": [("fetch_cabinetsearch", 1.0)],
++    "fetch_depthrecall": [("fetch_depthrecall", 1.0)],
++    "fetch_takeitback": [("fetch_takeitback", 1.0)],
++    "fetch_veggie": [("fetch_veggie", 1.0)],
++    "fetch_six": [
++        ("fetch_samedrawer", 1.0),
++        ("fetch_seasondish", 1.0),
++        ("fetch_cabinetsearch", 1.0),
++        ("fetch_depthrecall", 1.0),
++        ("fetch_takeitback", 1.0),
++        ("fetch_veggie", 1.0),
++    ],
+ }
+ # fmt: on
+diff --git a/vla/datasets/rlds/oxe/transforms.py b/vla/datasets/rlds/oxe/transforms.py
+index 3fad662..6436d25 100644
+--- a/vla/datasets/rlds/oxe/transforms.py
++++ b/vla/datasets/rlds/oxe/transforms.py
+@@ -931,4 +931,10 @@ OXE_STANDARDIZATION_TRANSFORMS = {
+ 
+     ### mikasa datasets
+     "mikasa_dataset": mikasa_dataset_transform,
++    "fetch_samedrawer": mikasa_dataset_transform,
++    "fetch_seasondish": mikasa_dataset_transform,
++    "fetch_cabinetsearch": mikasa_dataset_transform,
++    "fetch_depthrecall": mikasa_dataset_transform,
++    "fetch_takeitback": mikasa_dataset_transform,
++    "fetch_veggie": mikasa_dataset_transform,
+ }

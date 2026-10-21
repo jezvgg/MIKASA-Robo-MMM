@@ -5,6 +5,10 @@ builder the MemoryVLA authors wrote for a benchmark like ours: one RLDS step per
 frame, the main camera as `image` and the wrist camera as `wrist_image` (JPEG), the
 episode's own instruction. What differs is only what our data is:
 
+* three cameras (the owner's choice, 2026-10-21): `image` the left base camera, `wrist_image`
+  fetch_hand and `right_image` the right base camera, for MemoryVLA's three-view mode
+  (`--load_bi_wrist`: primary + its left_wrist and right_wrist slots, patches/0001);
+
 * the source is a LeRobot v3 dataset (parquet + h264 videos), read frame for frame at its
   stored 10 Hz; images keep their stored size (main 256x256, wrist 128x128), the OXE loader
   resizes them for the model;
@@ -29,6 +33,7 @@ import tensorflow_datasets as tfds
 
 PRIMARY = "observation.images.left_base_camera_link"
 WRIST = "observation.images.fetch_hand"
+RIGHT = "observation.images.right_base_camera_link"
 SOURCES = {
     "fetch_samedrawer": "samedrawer-ag-1000ep",
     "fetch_seasondish": "seasondish-ag-1000ep",
@@ -75,7 +80,7 @@ class FetchRLDS(tfds.core.GeneratorBasedBuilder):
 
     def _info(self) -> tfds.core.DatasetInfo:
         info = json.loads((source_root(self.name) / "meta/info.json").read_text())
-        main, wrist = info["features"][PRIMARY]["shape"], info["features"][WRIST]["shape"]
+        main, wrist, right = (info["features"][k]["shape"] for k in (PRIMARY, WRIST, RIGHT))
         return self.dataset_info_from_configs(features=tfds.features.FeaturesDict({
             "steps": tfds.features.Dataset({
                 "observation": tfds.features.FeaturesDict({
@@ -83,6 +88,8 @@ class FetchRLDS(tfds.core.GeneratorBasedBuilder):
                                                  doc="Main camera (left base) RGB."),
                     "wrist_image": tfds.features.Image(shape=tuple(wrist), dtype=np.uint8, encoding_format="jpeg",
                                                        doc="Wrist camera (fetch_hand) RGB."),
+                    "right_image": tfds.features.Image(shape=tuple(right), dtype=np.uint8, encoding_format="jpeg",
+                                                       doc="Right base camera RGB."),
                     "state": tfds.features.Tensor(shape=(12,), dtype=np.float32, doc="Stored 12D joint state."),
                 }),
                 "action": tfds.features.Tensor(shape=(13,), dtype=np.float32, doc="Stored 13D Fetch command."),
@@ -111,15 +118,17 @@ class FetchRLDS(tfds.core.GeneratorBasedBuilder):
         for _, row in episodes.head(limit).iterrows():
             e = int(row["episode_index"])
             d = data[data.episode_index == e].sort_values("frame_index")
-            main, wrist = video_frames(root, row, PRIMARY), video_frames(root, row, WRIST)
+            main, wrist, right = (video_frames(root, row, k) for k in (PRIMARY, WRIST, RIGHT))
             n = int(row["length"])
-            if not (len(d) == len(main) == len(wrist) == n):
-                raise ValueError(f"{root.name} episode {e}: {len(d)} rows, {len(main)}/{len(wrist)} frames, length {n}")
+            if not (len(d) == len(main) == len(wrist) == len(right) == n):
+                raise ValueError(f"{root.name} episode {e}: {len(d)} rows, "
+                                 f"{len(main)}/{len(wrist)}/{len(right)} frames, length {n}")
             task = str(list(row["tasks"])[0])
             actions = np.stack(d["action"].to_numpy()).astype(np.float32)
             states = np.stack(d["observation.state"].to_numpy()).astype(np.float32)
             steps = [{
-                "observation": {"image": main[i], "wrist_image": wrist[i], "state": states[i]},
+                "observation": {"image": main[i], "wrist_image": wrist[i], "right_image": right[i],
+                                "state": states[i]},
                 "action": actions[i],
                 "discount": 1.0,
                 "reward": float(i == n - 1),
