@@ -1,0 +1,9 @@
+{
+  "camera_keys": [
+    "observation.images.fetch_hand",
+    "observation.images.left_base_camera_link"
+  ],
+  "view_width": 256,
+  "view_height": 256,
+  "notes": "Fetch stacked RGB layout after MemER's panda_stacked_rgb_camera_layout.json: wrist (fetch_hand) above the exterior view (left base camera, the one our pi0.5 runs used). Views stay square at the base camera's stored 256x256; the hand camera (stored 128x128) is resized up."
+}
