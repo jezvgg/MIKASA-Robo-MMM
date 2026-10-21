@@ -11,12 +11,19 @@ Details", §4.4 Mikasa-Robo; code `MemoryVLA` 082ce25, `script/train/mikasa/trai
 |---|---|---|---|
 | Base model | Qwen3-VL-4B-Instruct (code recipe, owner's choice) | pi0.5-DROID | OpenVLA-7B prismatic (step 295000), DINOv2 + SigLIP, DiT-L |
 | Trained / frozen | LLM trained; vision + merger frozen | everything trained | everything trained (full fine-tune) |
-| Steps, global batch | 1500, 128 | 18,000, 128 | 20,000, 256 |
+| Steps, global batch | 1500, 128 | 18,000, 128 | 20,000, 256 (ours 128, see below) |
 | Optimizer | AdamW, LR 6e-5, cosine, warmup 0.05, wd 0, clip 1, bf16, grad ckpt | AdamW b1 0.9 b2 0.95, wd 0 (openpi 1e-10), clip 1, cosine, warmup 0.033 | LR 2e-5 (their script), FSDP |
 | Other | max_pixels 115200, min_pixels 50176, model_max_length 8192; export: frame_subsample 5, recent 8, keyframes 8, prediction_horizon 2 | chunk of 15 actions; prompt = the frame's subtask | repeated diffusion 4, future window 3 (chunk 4), image_aug, group dataloader, shuffle buffer 64k, mem_length 16, no proprio |
 
-A batch the hardware cannot hold is reached by accumulation, never shrunk: MemoryVLA 4 GPUs x 32 x
-accumulation 2 = 256 (theirs 8 x 32); MemER high level per-device x accumulation x GPUs = 128.
+Batch on our 4 x H100, the owner's rule (2026-10-21): no gradient accumulation of our own; what does
+not fit, gets a smaller batch. The authors' per-GPU batch is kept, so the global batch follows the
+GPU count:
+
+| | authors | ours (4 x H100) |
+|---|---|---|
+| MemoryVLA | 8 GPUs x 32 = 256, no accumulation | 4 x 32 = **128** |
+| MemER high level | 2 B200 x 8 x accumulation 8 = 128 (their recipe accumulates) | 4 x 4 x their accumulation 8 = 128 (per-device 4: an H100 has 80 GB, a B200 180 GB) |
+| MemER low level | 128 | 128 (openpi, no accumulation; fits 4 x H100) |
 
 ## Filled where the paper says nothing
 
@@ -48,7 +55,7 @@ The step counts were set for the authors' datasets. Ours have 4,844,230 frames (
 |---|---|---|---|
 | MemER high (code) | 1500 x 128 = 192k | 0.04 | ~6 (50 dusting episodes, ~31k frames) |
 | MemER low (Table 5) | 18,000 x 128 = 2.3M | 0.48 | ~10-20 (3 tasks x ~62 episodes) |
-| MemoryVLA (MIKASA) | 20,000 x 256 = 5.1M | 1.06 | ~50 (5 tasks x 250 short episodes) |
+| MemoryVLA (MIKASA) | 20,000 x 256 = 5.1M (ours 128: 2.6M) | 1.06 (ours 0.53) | ~50 (5 tasks x 250 short episodes) |
 
 Matching the authors' epochs would take 10-150x their steps. The owner decides between the
 literal steps, more steps, or fewer episodes per task.

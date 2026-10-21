@@ -3,7 +3,7 @@
 # script/train/mikasa/train_mikasa.sh, except what one GPU forces and what a smoke is:
 #   expected_world_size 1, per-device and global batch 2, max_steps 3, save_interval 3,
 #   vision AND LLM frozen (their "align" stage) because the full 7B fine-tune does not fit
-#   one 80 GB card (it runs FSDP on 4 GPUs with batch 32 x 4, accumulation 2 = 256);
+#   one 80 GB card (the full run: FSDP on 4 GPUs, 32 per GPU, global 128, no accumulation);
 #   shuffle buffer 1000, jsonl tracker only.
 # Ours on top of theirs: data_mix of a Fetch dataset (patches/0001), --action_dim 13 and
 # --load_bi_wrist True (three cameras). Llama-2 resolves offline from the local HF cache
