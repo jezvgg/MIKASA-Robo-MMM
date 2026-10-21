@@ -162,7 +162,7 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict) -> list[tuple[int
         return [(0, "pick up the cup"), (c1 + 1, "place the cup on the tray"),
                 (o1 + 1, "pick up the cup from the tray"), (c2 + 1, "put the cup back where it was")]
     if task == "veggie":
-        v = p["veggies"][p["picture_target"]].split("_")[1]                  # veg_corn_4 -> corn
+        v = " ".join(p["veggies"][p["picture_target"]].split("_")[1:-1])    # veg_sweet_potato_2 -> sweet potato
         if not D or len(G) != 1:
             raise Unfit(f"drives {len(D)}, grasps {len(G)}")
         return [(0, "look at the picture on the fridge"), (D[0][0], f"pick up the {v}"),

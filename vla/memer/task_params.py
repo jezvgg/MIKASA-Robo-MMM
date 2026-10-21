@@ -4,7 +4,7 @@ MemER's subtask labels name what the memory has to hold (which drawer, which con
 prop goes where), so the labels need the episode's answer. It is read here, at reset, the way
 the collection built each episode (a fresh env, `seed_everything(seed)`, `reset(seed=seed)`);
 nothing is stepped. Our four tasks use their collection profile (`make_env`), jezv's two the
-env kwargs his collection recorded.
+env kwargs his collection recorded and his planners' reconfiguring reset.
 
 usage (simulator venv, repo root on PYTHONPATH):
     task_params.py <task> <dataset dir> <out.json> [--episodes 0,1,2] [--shard k/n]
@@ -82,7 +82,10 @@ def main():
     for e, seed in pairs:
         seed_everything(int(seed))
         env = make_env(run) if args.task in OURS else gym.make(JEZV_ENV[args.task], **kwargs)
-        env.reset(seed=int(seed))
+        # jezv's planners rebuild the scene for every seed (myrobocasa_*_planner.py:
+        # `env.reset(seed=seed, options={"reconfigure": True})`); without it the scene keeps
+        # the one ManiSkill built at gym.make, e.g. the same three vegetables in every episode.
+        env.reset(seed=int(seed), options={"reconfigure": True} if args.task in JEZV_ENV else None)
         out[int(e)] = {"seed": int(seed), **params(args.task, env.unwrapped, int(seed))}
         env.close()
         print(json.dumps({int(e): out[int(e)]}), flush=True)
