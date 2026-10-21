@@ -38,6 +38,9 @@ IMAGE_SLOTS = {
     "base_1_rgb": FIRST_FRAME_KEY,
 }
 IMAGE_KEYS = tuple(IMAGE_SLOTS)
+# Without the first frame (MemER's low level): pi0.5's own three slots, the current cameras only.
+CURRENT_IMAGE_SLOTS = {slot: key for slot, key in IMAGE_SLOTS.items() if key != FIRST_FRAME_KEY}
+CURRENT_IMAGE_KEYS = tuple(CURRENT_IMAGE_SLOTS)
 
 
 def _image(value) -> np.ndarray:
@@ -53,14 +56,17 @@ def _image(value) -> np.ndarray:
 class SameDrawerInputs(transforms.DataTransformFn):
     """Wire format -> openpi model inputs. Images are optional only for the norm-stats pass."""
 
+    first_frame: bool = True
+
     def __call__(self, data: dict) -> dict:
+        slots = IMAGE_SLOTS if self.first_frame else CURRENT_IMAGE_SLOTS
         state = np.asarray(data[STATE_KEY], dtype=np.float32)
         if state.shape[-1] != STATE_DIM:
             raise ValueError(f"Expected a {STATE_DIM}-dim state, got {state.shape}")
         inputs = {"state": state[..., list(STATE_TO_ACTION_ORDER)]}
-        if any(key in data for key in IMAGE_SLOTS.values()):
-            inputs["image"] = {slot: _image(data[key]) for slot, key in IMAGE_SLOTS.items()}
-            inputs["image_mask"] = {slot: np.True_ for slot in IMAGE_SLOTS}
+        if any(key in data for key in slots.values()):
+            inputs["image"] = {slot: _image(data[key]) for slot, key in slots.items()}
+            inputs["image_mask"] = {slot: np.True_ for slot in slots}
         if "actions" in data:
             actions = np.asarray(data["actions"], dtype=np.float32)
             if actions.shape[-1] != ACTION_DIM:

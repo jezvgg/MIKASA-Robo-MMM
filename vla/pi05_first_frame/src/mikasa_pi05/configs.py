@@ -13,6 +13,7 @@ import functools
 import os
 import pathlib
 
+import flax.nnx as nnx
 import openpi.models.pi0_config as pi0_config
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.config as _config
@@ -22,7 +23,7 @@ from openpi import transforms as _transforms
 from typing_extensions import override
 
 from mikasa_pi05 import transforms as sd
-from mikasa_pi05.dataset import CAMERAS, FIRST_FRAME_KEY, SameDrawerDataset
+from mikasa_pi05.dataset import CAMERAS, FIRST_FRAME_KEY, ConcatDataset, SameDrawerDataset
 
 WORK = pathlib.Path(os.environ.get("PI05_WORK", "~/mikasa-pi05")).expanduser()
 HF_REPO_ID = "nurtayev-d/samedrawer-1000ep"
@@ -111,7 +112,7 @@ def _model(action_horizon: int = ACTION_HORIZON, **kwargs) -> pi0_config.Pi0Conf
         pi05=True,
         action_horizon=action_horizon,
         discrete_state_input=True,
-        image_keys=sd.IMAGE_KEYS,
+        image_keys=kwargs.pop("image_keys", sd.IMAGE_KEYS),
         **kwargs,
     )
 
@@ -207,12 +208,98 @@ CONFIGS["pi05_sd_ff_h50_4xh100"] = dataclasses.replace(
 )
 
 
+# --- MemER's low-level policy (Sridhar et al., arXiv 2510.20328, §3.3 + Table 5) -----------------
+# pi0.5 fine-tuned from the public pi0.5-DROID checkpoint on (current images, state, the frame's
+# subtask) -> action chunk, one policy over all tasks. The memer repo has no low-level trainer
+# ("start from openpi, put the subtask in the prompt"), so this is openpi's pi0.5 fine-tune with:
+#   Table 5: batch 128, 18,000 steps, AdamW b1 0.9 b2 0.95, weight decay 0, clip 1, cosine with
+#            warmup ratio 0.033 (594 steps), every parameter trained;
+#   §4:      chunks of 15 actions (pi05_droid's horizon);
+#   openpi defaults where Table 5 says nothing: peak LR 2.5e-5 decaying to 2.5e-6 and EMA 0.99
+#            (CosineDecaySchedule/TrainConfig, as pi05_droid_finetune leaves them), weight decay
+#            1e-10 (openpi's stand-in for 0);
+#   ours: the three Fetch cameras in pi0.5's own three slots, our 13D actions with their own norm
+#         stats (DROID's stats are for DROID's actions), the six tasks' labelled copies
+#         (vla/memer/label_subtasks.py) under $MEMER_DATA_ROOT (default ~/datasets/memer).
+MEMER_TASKS = ("samedrawer", "seasondish", "cabinetsearch", "depthrecall", "takeitback", "veggie")
+MEMER_ACTION_HORIZON = 15
+MEMER_STEPS = 18_000
+MEMER_NORM_STATS_DIR = WORK / "assets" / "memer-lowlevel"
+DROID_WEIGHTS = "gs://openpi-assets/checkpoints/pi05_droid/params"
+MEMER_POLICY_METADATA = {
+    "mikasa_data": MIKASA_DATA,
+    "prompt": "MemER subtask (meta/subtasks.parquet)",
+    "action_horizon": MEMER_ACTION_HORIZON,
+}
+
+
+def memer_data_root() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("MEMER_DATA_ROOT", "~/datasets/memer")).expanduser()
+
+
+def make_memer_dataset(data_config, action_horizon, model_config, *, root, tasks, episodes=None, load_images=True):
+    del data_config, model_config, episodes   # all episodes of every task
+    return ConcatDataset([
+        SameDrawerDataset(pathlib.Path(root) / task, action_horizon, first_frame=False, prompt="subtask",
+                          load_images=load_images)
+        for task in tasks
+    ])
+
+
+@dataclasses.dataclass(frozen=True)
+class MemerLowLevelDataConfig(_config.DataConfigFactory):
+    repo_id: str = "memer-lowlevel"  # the asset id of the norm stats
+    assets: _config.AssetsConfig = dataclasses.field(
+        default_factory=lambda: _config.AssetsConfig(assets_dir=str(MEMER_NORM_STATS_DIR)))
+    data_root: str | None = None
+    tasks: tuple[str, ...] = MEMER_TASKS
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config) -> _config.DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[sd.SameDrawerInputs(first_frame=False), _transforms.DeltaActions(sd.DELTA_ACTION_MASK)],
+            outputs=[_transforms.AbsoluteActions(sd.DELTA_ACTION_MASK), sd.SameDrawerOutputs()],
+        )
+        factory = functools.partial(make_memer_dataset, root=str(self.data_root or memer_data_root()),
+                                    tasks=self.tasks)
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            data_transforms=data_transforms,
+            model_transforms=_config.ModelTransformFactory()(model_config),
+            dataset_factory=factory,
+        )
+
+
+def _memer_config(name: str, **kwargs) -> _config.TrainConfig:
+    defaults = dict(
+        model=_model(action_horizon=MEMER_ACTION_HORIZON, image_keys=sd.CURRENT_IMAGE_KEYS),
+        data=MemerLowLevelDataConfig(),
+        weight_loader=weight_loaders.CheckpointWeightLoader(DROID_WEIGHTS),
+        policy_metadata=MEMER_POLICY_METADATA,
+        freeze_filter=nnx.Nothing(),   # Table 5 freezes nothing (openpi's default)
+        num_train_steps=MEMER_STEPS,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=round(0.033 * MEMER_STEPS), peak_lr=2.5e-5, decay_steps=MEMER_STEPS, decay_lr=2.5e-6),
+    )
+    defaults.update(kwargs)
+    return _train_config(name, **defaults)
+
+
+CONFIGS["memer_lowlevel_4xh100"] = _memer_config(
+    "memer_lowlevel_4xh100", batch_size=128, fsdp_devices=4, num_workers=16, save_interval=1_000, keep_period=None)
+# One-GPU smoke: the same model, data and optimizer; batch 4, 3 steps, no EMA copy.
+CONFIGS["memer_lowlevel_smoke_1xh100"] = _memer_config(
+    "memer_lowlevel_smoke_1xh100", batch_size=4, num_workers=4, num_train_steps=3, save_interval=3,
+    keep_period=None, ema_decay=None)
+
+
 # Steps between full checkpoints (with optimizer state) for configs that snapshot more often.
 # The dummy config uses the same scheme so the whole flow can be checked on a small GPU.
-FULL_CHECKPOINT_EVERY = {"pi05_sd_ff_4xh100": 5_000, "pi05_sd_ff_h50_4xh100": 5_000, "pi05_sd_ff_dummy": 50}
+FULL_CHECKPOINT_EVERY = {"pi05_sd_ff_4xh100": 5_000, "pi05_sd_ff_h50_4xh100": 5_000, "pi05_sd_ff_dummy": 50,
+                         "memer_lowlevel_4xh100": 6_000}
 
 # Configs meant for a single GPU with a small disk (lab server: 100 GB) save params-only checkpoints.
-PARAMS_ONLY_CHECKPOINTS = {"pi05_sd_ff_dummy", "pi05_sd_ff_overfit", "pi05_sd_ff_1xh100"}
+PARAMS_ONLY_CHECKPOINTS = {"pi05_sd_ff_dummy", "pi05_sd_ff_overfit", "pi05_sd_ff_1xh100", "memer_lowlevel_smoke_1xh100"}
 
 
 def get_config(name: str) -> _config.TrainConfig:
