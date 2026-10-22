@@ -9,7 +9,8 @@
 #   high:  MemER high level, the authors' Qwen3-VL command on the six exports (per-device 4 x their
 #          accumulation 8, 400 steps, LR 1e-4 instead of 6e-5), then the authors' deploy-style
 #          offline rollout (memer scripts/eval_subtask_rollout.py: every frame, the model's own
-#          keyframes as memory) on one held-out episode per task ($HELD_OUT, default 990).
+#          keyframes as memory) on held-out episodes ($HELD_OUT: one index or a comma list for
+#          every task, default 990; HELD_OUT_<task> overrides it for one task).
 # usage: nohup vla/memer/debug_1gpu.sh [work dir, default ~/memer-debug] > log 2>&1 < /dev/null &
 # The short report: <work dir>/REPORT.txt
 set -uo pipefail
@@ -19,6 +20,7 @@ TASKS="samedrawer seasondish cabinetsearch depthrecall takeitback veggie"
 DATA=${MEMER_DATA_ROOT:-$HOME/datasets/memer}
 LAYOUT=$REPO/vla/memer/configs/fetch_stacked_rgb_camera_layout.json
 HELD_OUT=${HELD_OUT:-990}
+STAGES=${STAGES:-low high}   # "high" alone reruns the high level against a new work dir
 LOGS=$W/logs REPORT=$W/REPORT.txt
 mkdir -p "$LOGS" "$W/sft"
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
@@ -95,11 +97,12 @@ high() {
   tr '\r' '\n' < "$LOGS/high_train.log" | grep -oE "'loss': [0-9.e+-]+" | awk 'NR==1||NR==10||NR==100||NR==200||NR==400' \
     | tr '\n' ' ' | sed 's/^/  /' >> "$REPORT"; echo >> "$REPORT"
   for t in $TASKS; do
-    local ev=$W/high_eval/$t
+    local ev=$W/high_eval/$t held=HELD_OUT_$t
+    held=${!held:-$HELD_OUT}
     if [ ! -f "$ev/summary.json" ]; then
       (cd "$REPO/third_party/memer" && "$HOME/envs/memer/bin/python" scripts/eval_subtask_rollout.py \
         --model-path "$out" --output-dir "$ev" --lerobot-path "$DATA/$t" --camera-layout-config "$LAYOUT" \
-        --view-width 192 --view-height 192 --episode-indices "$HELD_OUT" --device cuda --dtype bfloat16 \
+        --view-width 192 --view-height 192 --episode-indices "$held" --device cuda --dtype bfloat16 \
         --attn-implementation sdpa) > "$LOGS/high_eval_$t.log" 2>&1 \
         || { say "high: eval $t FAILED"; tail -n 20 "$LOGS/high_eval_$t.log" >> "$REPORT"; continue; }
     fi
@@ -114,14 +117,17 @@ print(f"  {task:14s} frames {m['total_examples']:5d}  subtask accuracy {m['norma
       f"(raw {m['raw_accuracy']:.3f}; majority-label baseline {majority:.3f})  parse failures "
       f"{m['parse_failure_rate']:.3f}  frames that added a keyframe {keyframes}  memory at the end "
       f"{len(rows[-1]['memory_indices_after']) if rows else 0}")
+labels = json.loads((ev / "label_metrics.json").read_text())
+for label, v in sorted(labels.items(), key=lambda kv: -kv[1]["support"])[:6]:
+    print(f"      {v['normalized_accuracy']:.3f} of {v['support']:4d}  {label}")
 EOF
   done
 }
 
 say "MemER debug on $(hostname): $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1); repo $(git -C "$REPO" rev-parse --short HEAD)"
 export_sft &
-low || say "low: stage failed, continuing with the high level"
-high || say "high: stage failed"
+if [[ " $STAGES " == *" low "* ]]; then low || say "low: stage failed, continuing with the high level"; fi
+if [[ " $STAGES " == *" high "* ]]; then high || say "high: stage failed"; fi
 wait
 say "disk: $(du -s --block-size=1G "$HOME" 2>/dev/null | cut -f1) GB used in $HOME"
 say "finished"
