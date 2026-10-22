@@ -37,7 +37,7 @@ GPU count:
 | Change | Where | Why |
 |---|---|---|
 | Three cameras (left base, fetch_hand, right base) | all | owner's decision 2026-10-21. Papers: MemER wrist + exterior; MemoryVLA one third-person view (its MIKASA script: + optional wrist). MemoryVLA uses the authors' own three-view code path (`--load_bi_wrist`), which no script of theirs runs |
-| Stacked views 192x192 (planned; 256x256 tested) | MemER high | Qwen resizes the three-view stack to 192x576 under their max_pixels anyway; theirs: 2 x 320x180 |
+| Three views stacked into one 192x576 image (planned; 256x768 tested) | MemER high | Qwen would shrink a larger stack to 192x576 under their max_pixels anyway (108 tokens; theirs 110 for 2 x 320x180). Their stack_frame_images pads the 128-wide hand image to 256 with black before scaling, so the hand view is 96x115 beside a black block and each base view 192x230; training, their eval and their deploy build it the same way |
 | 13D Fetch actions (arm 7 joint targets, gripper, torso/head 3, base forward/yaw velocity) | all | our robot. Theirs: 7D EEF (MemoryVLA), 8D DROID joint velocity (pi0.5-DROID). MemoryVLA gets a FETCH_JOINT encoding (patch 0001: joint/body absolute, base velocities relative, all but the gripper normalized) and `--action_dim 13` |
 | Our own norm stats | MemER low, MemoryVLA | DROID's/MIKASA's statistics describe other action spaces |
 | Subtask boundaries from the oracle's recorded events; subtask names and keyframe rules written by us | MemER | theirs: operator key presses and their own per-task rules (App. E); every task needs its own. Approved list: ~/Downloads/memer_subtasks_2026-10-20.txt |
