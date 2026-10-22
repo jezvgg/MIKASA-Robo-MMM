@@ -14,10 +14,14 @@ hold (the low-level policy has none):
   `task_params.py`, which resets each episode's environment with its seed.
 
 The subtasks and keyframe rules are the ones in `~/Downloads/memer_subtasks_2026-10-20.txt`
-(owner-approved 2026-10-20); SeasonDish says "pick up the salt"/"the pepper", since the pepper
-is a bottle, not a shaker. If any episode's events do not fit its task's sequence, nothing
-is written (LeRobot v3 indexes frames globally, so an episode cannot simply be dropped): the
-report lists them and the rules get fixed first. `--check` writes only the report.
+(owner-approved 2026-10-20). Since 2026-10-22 (owner) SeasonDish and DepthRecall call salt and
+pepper "the white salt shaker" and "the black pepper shaker": in both tasks they are one
+RoboCasa shaker in two colours (shaker_1, shaker_0), and the colour is all that tells them
+apart on camera. The copy's task text (`meta/tasks.parquet`, `meta/episodes`) is rewritten to
+the environments' current instruction the same way (`TASK_TEXT`). If any episode's events do
+not fit its task's sequence, nothing is written (LeRobot v3 indexes frames globally, so an
+episode cannot simply be dropped): the report lists them and the rules get fixed first.
+`--check` writes only the report.
 
 usage: label_subtasks.py <task> <dataset dir> <params.json> <out dir> [--check]
 """
@@ -37,6 +41,27 @@ DRIVE_GAP = 5          # frames (0.5 s): the oracle's legs of one drive are 0.1-
 DRAWERS = {0: "bottom", 1: "third from the top", 2: "second from the top", 3: "top"}
 ORDINAL = ["first", "second", "third", "fourth"]
 PAD_COLOURS = ["red", "green", "blue", "yellow"]   # prop i's pad (depth_recall_v1.PAD_MAP)
+SPOKEN = {"salt": "white salt shaker", "pepper": "black pepper shaker"}   # depth_recall_v1 PropSpec.spoken
+# The recorded task text -> the environment's current INSTRUCTIONS[0] (season_dish.py,
+# depth_recall_v1.py). The datasets were collected before the shakers' colours were named.
+TASK_TEXT = {
+    "seasondish": {
+        "Remember the salt or pepper shown in the picture on the fridge. After the picture "
+        "disappears, take that condiment and tip it over the bowl to season the dish, leaving "
+        "the other condiment untouched.":
+        "Remember whether the picture on the fridge shows the white salt shaker or the black "
+        "pepper shaker. After the picture disappears, take that shaker and tip it over the bowl "
+        "to season the dish, leaving the other shaker untouched.",
+    },
+    "depthrecall": {
+        "Take the props out of the cabinet onto the counter pads (ketchup on the red pad, pepper "
+        "on the green pad, salt on the blue pad, mustard on the yellow pad), keep the one from "
+        "the back, and put the others back where they stood.":
+        "Take the props out of the cabinet onto the counter pads (ketchup on the red pad, black "
+        "pepper shaker on the green pad, white salt shaker on the blue pad, mustard on the yellow "
+        "pad), keep the one from the back, and put the others back where they stood.",
+    },
+}
 KEYFRAME_RULES = {
     "samedrawer": [{"pattern": "^close the .* drawer$", "select": "first"}],
     "seasondish": [{"exact": "look at the picture on the fridge", "select": "last"}],
@@ -100,7 +125,7 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict) -> list[tuple[int
                 (d1[1] + 1, "pick up the apple"), (g1[0] + 1, "place the apple on the plate"),
                 (g1[1] + 1, "go back to the drawers"), (d2[1] + 1, f"open the {k} drawer")]
     if task == "seasondish":
-        c = "salt" if p["target_is_shaker"] else "pepper"
+        c = SPOKEN["salt" if p["target_is_shaker"] else "pepper"]
         cue_end = p["cue_steps"] // 2        # control steps -> stored 10 Hz frames
         if not D or G == [] or len(G) != 1:
             raise Unfit(f"drives {len(D)}, grasps {len(G)}")
@@ -145,7 +170,7 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict) -> list[tuple[int
                 start = gr[-1][1] + 1
         return out
     if task == "depthrecall":
-        slots, names = p["original_slots"], p["props"]
+        slots, names = p["original_slots"], [SPOKEN.get(x, x) for x in p["props"]]
         deep = len(slots) - 1
         takes = sorted(range(len(slots)), key=lambda i: slots[i])            # front first
         puts = sorted((i for i in takes if slots[i] != deep), key=lambda i: -slots[i])  # deepest empty first
@@ -168,6 +193,21 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict) -> list[tuple[int
         return [(0, "look at the picture on the fridge"), (D[0][0], f"pick up the {v}"),
                 (G[0][0] + 1, f"put the {v} on the plate")]
     raise ValueError(task)
+
+
+def rewrite_task_text(dst: Path, texts: dict[str, str]) -> None:
+    """Replace the recorded task strings in the copy's tasks.parquet and episode table."""
+    new = set(texts.values())
+    tasks = pd.read_parquet(dst / "meta/tasks.parquet")
+    unknown = [t for t in tasks.index if t not in texts and t not in new]
+    if unknown:
+        raise SystemExit(f"task text not in TASK_TEXT: {unknown}")
+    tasks.index = pd.Index([texts.get(t, t) for t in tasks.index], name=tasks.index.name)
+    tasks.to_parquet(dst / "meta/tasks.parquet")
+    for f in sorted(glob.glob(f"{dst}/meta/episodes/*/*.parquet")):
+        ep = pd.read_parquet(f)
+        ep["tasks"] = [[texts.get(t, t) for t in row] for row in ep["tasks"]]
+        ep.to_parquet(f, index=False)
 
 
 def per_frame(starts: list[tuple[int, str]], n: int) -> list[str]:
@@ -221,6 +261,8 @@ def main():
         raise SystemExit(f"{dst} exists")
     shutil.copytree(src / "videos", dst / "videos", copy_function=os.link)
     shutil.copytree(src / "meta", dst / "meta")
+    if args.task in TASK_TEXT:
+        rewrite_task_text(dst, TASK_TEXT[args.task])
     for f in files:
         t = pd.read_parquet(f)
         t["subtask_index"] = [index[labels[int(e)][int(i)]] for e, i in zip(t.episode_index, t.frame_index)]

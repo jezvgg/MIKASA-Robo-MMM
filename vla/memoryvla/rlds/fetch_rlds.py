@@ -34,13 +34,16 @@ import tensorflow_datasets as tfds
 PRIMARY = "observation.images.left_base_camera_link"
 WRIST = "observation.images.fetch_hand"
 RIGHT = "observation.images.right_base_camera_link"
+# The labelled copies (vla/memer/label_subtasks.py): the same frames and videos as the HF
+# datasets, with the task text of the environments' current instructions (salt and pepper
+# named by their shakers' colours since 2026-10-22), which every policy trains on.
 SOURCES = {
-    "fetch_samedrawer": "samedrawer-ag-1000ep",
-    "fetch_seasondish": "seasondish-ag-1000ep",
-    "fetch_cabinetsearch": "cabinetsearch-ag-1000ep",
-    "fetch_depthrecall": "depthrecall-ag-1000ep",
-    "fetch_takeitback": "MyRoboCasa/takeitback",
-    "fetch_veggie": "MyRoboCasa/veggie",
+    "fetch_samedrawer": "memer/samedrawer",
+    "fetch_seasondish": "memer/seasondish",
+    "fetch_cabinetsearch": "memer/cabinetsearch",
+    "fetch_depthrecall": "memer/depthrecall",
+    "fetch_takeitback": "memer/takeitback",
+    "fetch_veggie": "memer/veggie",
 }
 
 

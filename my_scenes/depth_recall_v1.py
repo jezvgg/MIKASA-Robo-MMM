@@ -63,8 +63,10 @@ PAD_COLOR_NAMES = ("red", "green", "blue", "yellow")
 #: Which pad each prop goes on, in identity order: prop i -> pad i. Fixed for every
 #: episode (the pads' SLOTS are what the episode shuffles), so the map is the same words
 #: in every instruction.
-PAD_MAP = ("ketchup on the red pad, pepper on the green pad, salt on the blue pad, "
-           "mustard on the yellow pad")
+#: The two shakers are one RoboCasa model in two colours (shaker_0 black, shaker_1 white), so
+#: the text names the colour that tells them apart (the owner's call 2026-10-22; `PropSpec.spoken`).
+PAD_MAP = ("ketchup on the red pad, black pepper shaker on the green pad, "
+           "white salt shaker on the blue pad, mustard on the yellow pad")
 
 INSTRUCTIONS = (
     "Take the props out of the cabinet onto the counter pads (" + PAD_MAP + "), "
@@ -130,6 +132,9 @@ class PropSpec:
     half_xy: float
     height: float
     recolor: tuple = ()
+    #: How the instruction names the prop when ``label`` alone does not tell it apart on
+    #: camera ("" = ``label``).
+    spoken: str = ""
     "(visual mesh file name, rgba) pairs: those visual parts are drawn in a flat colour."
 
 
@@ -157,8 +162,10 @@ class PropSpec:
 #: (xy within 0.6 mm, z exactly half the height).
 PROPS = (
     PropSpec("ketchup", "ketchup", "ketchup_7", half_xy=0.0217, height=0.1650),
-    PropSpec("pepper", "shaker", "shaker_0", half_xy=0.0262, height=0.0945),
-    PropSpec("salt", "shaker", "shaker_1", half_xy=0.0262, height=0.0945),
+    PropSpec("pepper", "shaker", "shaker_0", half_xy=0.0262, height=0.0945,
+             spoken="black pepper shaker"),
+    PropSpec("salt", "shaker", "shaker_1", half_xy=0.0262, height=0.0945,
+             spoken="white salt shaker"),
     PropSpec("mustard", "ketchup", "ketchup_8", half_xy=0.0215, height=0.1500,
              recolor=(("model_normalized_0.obj", PROP_COLORS[3]),)),
 )
