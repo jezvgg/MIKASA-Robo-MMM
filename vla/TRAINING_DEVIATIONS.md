@@ -41,10 +41,63 @@ GPU count:
 | 13D Fetch actions (arm 7 joint targets, gripper, torso/head 3, base forward/yaw velocity) | all | our robot. Theirs: 7D EEF (MemoryVLA), 8D DROID joint velocity (pi0.5-DROID). MemoryVLA gets a FETCH_JOINT encoding (patch 0001: joint/body absolute, base velocities relative, all but the gripper normalized) and `--action_dim 13` |
 | Our own norm stats | MemER low, MemoryVLA | DROID's/MIKASA's statistics describe other action spaces |
 | Subtask boundaries from the oracle's recorded events; subtask names and keyframe rules written by us | MemER | theirs: operator key presses and their own per-task rules (App. E); every task needs its own. Approved list: ~/Downloads/memer_subtasks_2026-10-20.txt |
+| A keyframe before a sample's first subsampled frame moves to that frame instead of being dropped (`vla/memer/patches/memer-0001-early-keyframes.patch`, one line in their `generate_sft_data.py`) | MemER high | owner 2026-10-22; without it SameDrawer's cue reaches 20% of the samples that need it. See "Early keyframes" below |
 | Data: 6 tasks x 1000 oracle episodes, no interventions | all | our benchmark. MemER: 3 tasks x 50 demos (+10-15 interventions for the low level); MemoryVLA on MIKASA-Robo: 5 tasks x 250 demos at 128x128 |
 | Data formats: RLDS built from our LeRobot; MemER export from LeRobot | MemoryVLA, MemER high | format only; their loaders read them |
 | Llama-2 from the NousResearch copy | MemoryVLA | weights sha256-identical to meta-llama's |
 | Software pins (tensorflow-metadata 1.14, wandb 0.17.9, setuptools), rendezvous on 127.0.0.1 | MemoryVLA, MemER high | their unpinned dependencies no longer import together; lab container |
+
+## Early keyframes in the MemER high-level export (owner's decision, 2026-10-22)
+
+**What the authors' code does.** `scripts/generate_sft_data.py` makes one SFT sample per timestep
+t. The sample sees the frames t, t-5, t-10, ... (frame_subsample 5), a grid that starts at frame
+t mod 5. Its memory holds the rule keyframes aligned to that grid by `align_frames_with_subsampling`
+(`memer_eval/utils.py`), which keeps a keyframe k only if k >= t mod 5. So a keyframe on frames 0-3
+reaches only the samples whose grid starts at or before it: a keyframe on frame 0 reaches one
+sample in five.
+
+**What it did to our data.** Our keyframe rules are of the authors' kind (first or last frame of a
+named subtask; approved list above). In two tasks the cue that must be remembered is visible only
+at the very start of the episode:
+- SameDrawer: the open drawer. The rule is the first frame of "close the X drawer" = frame 0.
+  The drawer was in memory for 20% of the "open the X drawer" samples (365 of 1823 in the
+  20-episode debug export; 72,072 of 90,117 missing over all 1000 episodes,
+  `artifacts/data-audit/memer-high.md`). All 160 keyframe targets fell on samples with
+  t mod 5 = 0. The 400-step debug model never selected a keyframe; its 0.886 on held-out
+  episode 990 came from naming the most frequent drawer.
+- Veggie: the picture on the fridge. The rule is the last frame of "look at the picture on the
+  fridge" = frame 2, so the picture was missing from 40% of the samples that need it.
+
+The authors never meet this: their rules (paper App. E, `configs/tasks_from_paper`) take the last
+frame of a subtask or nothing, and none of their cues sits in the first frames of an episode.
+
+**The change.** In `build_qwen_example` a keyframe k < t mod 5 moves to frame t mod 5, the
+sample's first frame, instead of being dropped. One line, applied by `vla/memer/setup_memer.sh`.
+`align_frames_with_subsampling`, the authors' eval and their deploy code are untouched, and
+keyframes on frame 4 or later are not affected. In the first 0.4 s the robot has barely moved: the
+exported images of frames 0 and 4 show the same open drawer (checked on SameDrawer episodes 0, 7
+and 13). At deployment the model picks keyframes from its own recent window, which at the first
+call contains frame 0, so the cue is available there anyway; the change gives training the same.
+
+**Effect** (20-episode debug exports, before -> after):
+
+| Task | samples that need the cue with it in memory or in the recent window | keyframe targets |
+|---|---|---|
+| SameDrawer ("open the X drawer") | 365 / 1823 (20%) -> 1823 / 1823 (100%) | 160 -> 800 of 11,248 |
+| Veggie ("pick up the X", "put the X on the plate") | 11,191 / 18,701 (60%) -> 18,661 / 18,701 (99.8%; the rest are frames 0-1, before the keyframe) | 440 -> 760 of 18,701 |
+
+DepthRecall and TakeItBack change too: their first keyframe (first frame of "take the ... to the
+... pad", "pick up the cup") is frame 0, which now reaches all of their samples instead of one in
+five (22,008 of 27,520 and 8,626 of 10,788 samples changed). SeasonDish and CabinetSearch exports
+are byte-identical.
+
+**Alternatives we did not take.**
+- Split "close the X drawer" at the first contact so the keyframe lands later: it changes the
+  approved subtask list, the contact time is not in the dataset, and Veggie has no such fix (the
+  picture is in full view only in the first ~6 frames).
+- Export only samples with t mod 5 = 0: it fixes the coverage but drops 80% of the authors'
+  samples per episode, a larger deviation.
+- Leave it: the high level then cannot learn to remember the drawer in SameDrawer.
 
 ## Not settled: training length on our data
 
