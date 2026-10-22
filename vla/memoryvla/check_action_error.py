@@ -78,6 +78,8 @@ def main() -> None:
     ap.add_argument("unnorm_key")
     ap.add_argument("--episodes", default="990,991,992,993,994")
     ap.add_argument("--every", type=int, default=4)
+    ap.add_argument("--cfg-scale", type=float, default=1.5, help="deploy.py default 1.5; 1.0 disables CFG")
+    ap.add_argument("--ddim-steps", type=int, default=10)
     ap.add_argument("--absolute-joints", dest="joint_deltas", action="store_false",
                     help="the run predicts absolute joint targets (before patch 0001's deltas)")
     ap.add_argument("--out", type=Path)
@@ -107,7 +109,7 @@ def main() -> None:
             pred, _ = vla.predict_action(
                 image=resize_image(cams[0][t]), image_wrist=resize_image(cams[1][t]),
                 image_wrist_2=resize_image(cams[2][t]), instruction=text, unnorm_key=args.unnorm_key,
-                cfg_scale=1.5, use_ddim=True, num_ddim_steps=10,
+                cfg_scale=args.cfg_scale, use_ddim=True, num_ddim_steps=args.ddim_steps,
                 episode_first_frame="True" if t == 0 else "False")
             pred = np.asarray(pred, dtype=np.float64)
             idx = np.minimum(np.arange(t, t + len(pred)), len(a) - 1)

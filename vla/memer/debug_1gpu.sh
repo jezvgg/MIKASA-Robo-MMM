@@ -21,6 +21,8 @@ DATA=${MEMER_DATA_ROOT:-$HOME/datasets/memer}
 LAYOUT=$REPO/vla/memer/configs/fetch_stacked_rgb_camera_layout.json
 HELD_OUT=${HELD_OUT:-990}
 STAGES=${STAGES:-low high}   # "high" alone reruns the high level against a new work dir
+HIGH_LR=${HIGH_LR:-1e-4}     # the high level's LR (the authors' recipe: 6e-5)
+EVAL_TASKS=${EVAL_TASKS:-$TASKS}   # tasks the high level is scored on
 LOGS=$W/logs REPORT=$W/REPORT.txt
 mkdir -p "$LOGS" "$W/sft"
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
@@ -84,7 +86,7 @@ high() {
       --data_flatten True --tune_mm_vision False --tune_mm_mlp False --tune_mm_llm True --bf16 \
       --output_dir "$out" --num_train_epochs 15 --max_steps 400 --per_device_train_batch_size 4 \
       --gradient_accumulation_steps 8 --optim adamw_torch --max_pixels 115200 --min_pixels 50176 \
-      --eval_strategy no --save_strategy no --learning_rate 1e-4 --weight_decay 0 --warmup_ratio 0.05 \
+      --eval_strategy no --save_strategy no --learning_rate "$HIGH_LR" --weight_decay 0 --warmup_ratio 0.05 \
       --max_grad_norm 1 --lr_scheduler_type cosine --logging_steps 1 --logging_nan_inf_filter False \
       --model_max_length 8192 --gradient_checkpointing True --dataloader_num_workers 4 --report_to none) \
       > "$LOGS/high_train.log" 2>&1
@@ -96,7 +98,7 @@ high() {
   say "high: training done; loss at steps 1, 10, 100, 200, 400:"
   tr '\r' '\n' < "$LOGS/high_train.log" | grep -oE "'loss': [0-9.e+-]+" | awk 'NR==1||NR==10||NR==100||NR==200||NR==400' \
     | tr '\n' ' ' | sed 's/^/  /' >> "$REPORT"; echo >> "$REPORT"
-  for t in $TASKS; do
+  for t in $EVAL_TASKS; do
     local ev=$W/high_eval/$t held=HELD_OUT_$t
     held=${!held:-$HELD_OUT}
     if [ ! -f "$ev/summary.json" ]; then
