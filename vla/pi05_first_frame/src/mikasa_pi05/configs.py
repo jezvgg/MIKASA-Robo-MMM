@@ -238,10 +238,10 @@ def memer_data_root() -> pathlib.Path:
 
 
 def make_memer_dataset(data_config, action_horizon, model_config, *, root, tasks, episodes=None, load_images=True):
-    del data_config, model_config, episodes   # all episodes of every task
+    del data_config, model_config   # `episodes`: the same indices of every task; None = all
     return ConcatDataset([
         SameDrawerDataset(pathlib.Path(root) / task, action_horizon, first_frame=False, prompt="subtask",
-                          load_images=load_images)
+                          episodes=None if episodes is None else list(episodes), load_images=load_images)
         for task in tasks
     ])
 
@@ -253,6 +253,8 @@ class MemerLowLevelDataConfig(_config.DataConfigFactory):
         default_factory=lambda: _config.AssetsConfig(assets_dir=str(MEMER_NORM_STATS_DIR)))
     data_root: str | None = None
     tasks: tuple[str, ...] = MEMER_TASKS
+    # Train on these episode indices of every task only (debug runs hold the rest out); None = all.
+    episodes: tuple[int, ...] | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config) -> _config.DataConfig:
@@ -261,7 +263,7 @@ class MemerLowLevelDataConfig(_config.DataConfigFactory):
             outputs=[_transforms.AbsoluteActions(sd.DELTA_ACTION_MASK), sd.SameDrawerOutputs()],
         )
         factory = functools.partial(make_memer_dataset, root=str(self.data_root or memer_data_root()),
-                                    tasks=self.tasks)
+                                    tasks=self.tasks, episodes=self.episodes)
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             data_transforms=data_transforms,
@@ -291,6 +293,14 @@ CONFIGS["memer_lowlevel_4xh100"] = _memer_config(
 CONFIGS["memer_lowlevel_smoke_1xh100"] = _memer_config(
     "memer_lowlevel_smoke_1xh100", batch_size=4, num_workers=4, num_train_steps=3, save_interval=3,
     keep_period=None, ema_decay=None)
+# One-GPU debug (owner 2026-10-22, vla/memer/debug_1gpu.sh): all six tasks, episodes 0-979 of each
+# (980-999 held out for tests/check_memer_action_error.py), batch 32, 2000 steps, peak LR 1e-4 (4x
+# the full run's) for a quick learning signal, no EMA. Not the paper's recipe; a pipeline check.
+MEMER_DEBUG_TRAIN_EPISODES = tuple(range(980))
+CONFIGS["memer_lowlevel_debug_1xh100"] = _memer_config(
+    "memer_lowlevel_debug_1xh100", data=MemerLowLevelDataConfig(episodes=MEMER_DEBUG_TRAIN_EPISODES),
+    batch_size=32, num_workers=6, num_train_steps=2_000, save_interval=2_000, keep_period=None, ema_decay=None,
+    lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=100, peak_lr=1e-4, decay_steps=2_000, decay_lr=1e-5))
 
 
 # Steps between full checkpoints (with optimizer state) for configs that snapshot more often.
@@ -299,7 +309,8 @@ FULL_CHECKPOINT_EVERY = {"pi05_sd_ff_4xh100": 5_000, "pi05_sd_ff_h50_4xh100": 5_
                          "memer_lowlevel_4xh100": 6_000}
 
 # Configs meant for a single GPU with a small disk (lab server: 100 GB) save params-only checkpoints.
-PARAMS_ONLY_CHECKPOINTS = {"pi05_sd_ff_dummy", "pi05_sd_ff_overfit", "pi05_sd_ff_1xh100", "memer_lowlevel_smoke_1xh100"}
+PARAMS_ONLY_CHECKPOINTS = {"pi05_sd_ff_dummy", "pi05_sd_ff_overfit", "pi05_sd_ff_1xh100", "memer_lowlevel_smoke_1xh100",
+                           "memer_lowlevel_debug_1xh100"}
 
 
 def get_config(name: str) -> _config.TrainConfig:
