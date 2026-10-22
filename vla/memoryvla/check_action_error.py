@@ -7,9 +7,11 @@ first frame. Compares the predicted chunk with the recorded actions:
 
   base turn (12) and forward speed (11): on steps where the recording moves vs. where it does
       not; the turn is the channel a q01/q99 bound used to erase in DepthRecall;
-  arm (0-6): mean |error| against "hold still" (target = current joints), on chunks where the
-      arm moves and where it does not; MemoryVLA sees no joint state, so this shows whether it
-      reads the arm's pose from the images;
+  arm (0-6): mean |error| against "hold still", on chunks where the arm moves and where it does
+      not. With joint deltas (patch 0001, the default) both are compared as deltas from each
+      step's joints and holding still is 0; with --absolute-joints as targets, holding still
+      being the current joints (MemoryVLA sees no joint state, so it must read the pose from
+      the images);
   gripper (7): sign agreement.
 
 usage: check_action_error.py <run dir> <lerobot task dir> <unnorm key> [--episodes 990,991] [--every 4]
@@ -38,6 +40,7 @@ CAMERAS = ("observation.images.left_base_camera_link",    # primary
            "observation.images.fetch_hand",                # left_wrist slot
            "observation.images.right_base_camera_link")    # right_wrist slot
 STATE_TO_ACTION_ORDER = (2, 4, 5, 6, 7, 8, 9, 10, 1, 3, 0, 11)   # mikasa_pi05.transforms
+JOINTS = list(range(7)) + [8, 9, 10]                               # arm, head, torso
 
 
 def resize_image(image: Image.Image, size=(224, 224)) -> Image.Image:
@@ -75,6 +78,8 @@ def main() -> None:
     ap.add_argument("unnorm_key")
     ap.add_argument("--episodes", default="990,991,992,993,994")
     ap.add_argument("--every", type=int, default=4)
+    ap.add_argument("--absolute-joints", dest="joint_deltas", action="store_false",
+                    help="the run predicts absolute joint targets (before patch 0001's deltas)")
     ap.add_argument("--out", type=Path)
     args = ap.parse_args()
 
@@ -106,8 +111,15 @@ def main() -> None:
                 episode_first_frame="True" if t == 0 else "False")
             pred = np.asarray(pred, dtype=np.float64)
             idx = np.minimum(np.arange(t, t + len(pred)), len(a) - 1)
-            rec["pred"].append(pred); rec["truth"].append(a[idx])
-            rec["hold"].append(np.repeat(s[t:t + 1, :11], len(pred), axis=0))
+            truth = a[idx].copy()
+            if args.joint_deltas:
+                # The model predicts arm/head/torso deltas from each step's joints (patch 0001's
+                # fetch_dataset_transform); compare in that space, where "hold still" is 0.
+                truth[:, JOINTS] -= s[idx][:, JOINTS]
+                hold = np.zeros((len(pred), 11))
+            else:
+                hold = np.repeat(s[t:t + 1, :11], len(pred), axis=0)
+            rec["pred"].append(pred); rec["truth"].append(truth); rec["hold"].append(hold)
         print(f"episode {e}: {len(range(0, len(a), args.every))} calls", flush=True)
 
     p, g, h = (np.stack(rec[k]) for k in ("pred", "truth", "hold"))     # [calls, chunk, 13|11]

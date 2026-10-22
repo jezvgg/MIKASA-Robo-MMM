@@ -4,7 +4,10 @@
 # A check, not the paper's recipe: one task, $EPISODES episodes, the authors' train.py with the
 # vision and LLM backbones frozen (their "align" stage; the full 7B fine-tune does not fit one
 # card), batch $BS, $STEPS steps at LR $LR; everything else as script/train/mikasa/train_mikasa.sh
-# plus our --action_dim 13 --load_bi_wrist True. Stages (a finished stage is skipped on a re-run):
+# with the authors' long-episode memory settings (script/train/real_world/train_real.sh:
+# --dataloader_type stream --mem_length 256; supervisor 2026-10-22), plus our --action_dim 13
+# --load_bi_wrist True; arm/head/torso are joint deltas (patch 0001). Stages (a finished stage is
+# skipped on a re-run):
 #   rlds   episodes 0..$EPISODES-1 of the task's LeRobot copy ($DATA_ROOT/<task>) -> $W/rlds;
 #   stats  the authors' code computes dataset_statistics_<hash>.json on a first launch, which is
 #          stopped as soon as the file exists; set_norm_bounds.py then rewrites its q01/q99;
@@ -35,7 +38,7 @@ train() {  # train RUN_ID MAX_STEPS BATCH -> runs in its own process group
     --vla.freeze_llm_backbone True --vla.shuffle_buffer_size 1000 --data_root_dir "$W/rlds" \
     --run_root_dir "$W/runs" --run_id "$1" --image_aug True --save_interval "$2" \
     --repeated_diffusion_steps 4 --future_action_window_size 3 --action_model_type DiT-L \
-    --dataloader_type group --is_resume False --hf_token HF_TOKEN --trackers '["jsonl"]' \
+    --dataloader_type stream --mem_length 256 --is_resume False --hf_token HF_TOKEN --trackers '["jsonl"]' \
     --action_dim 13 --load_bi_wrist True
 }
 stats_file() { find "$W/rlds/fetch_$TASK" -name 'dataset_statistics_*.json' 2>/dev/null | head -1; }

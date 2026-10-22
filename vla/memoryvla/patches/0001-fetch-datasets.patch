@@ -1,16 +1,17 @@
 diff --git a/vla/datasets/rlds/oxe/configs.py b/vla/datasets/rlds/oxe/configs.py
-index cdbbbf9..83eb557 100644
+index cdbbbf9..8146cb6 100644
 --- a/vla/datasets/rlds/oxe/configs.py
 +++ b/vla/datasets/rlds/oxe/configs.py
-@@ -47,6 +47,7 @@ class ActionEncoding(IntEnum):
+@@ -47,6 +47,8 @@ class ActionEncoding(IntEnum):
      JOINT_POS = 2           # Joint Delta Position (7) + Gripper Open/Close (1)
      JOINT_POS_BIMANUAL = 3  # Joint Delta Position (2 x [ Joint Delta Position (6) + Gripper Open/Close (1) ])
      EEF_R6 = 4              # EEF Delta XYZ (3) + R6 (6) + Gripper Open/Close (1)
-+    FETCH_JOINT = 5         # Fetch: arm joint targets (7) + gripper (1) + torso/head targets (3) + base forward/yaw velocity (2)
++    FETCH_JOINT = 5         # Fetch: arm joint deltas (7) + gripper (1) + head/torso deltas (3) + base forward/yaw velocity (2);
++                            # deltas = recorded target - the frame's joint state (transforms.fetch_dataset_transform)
      # fmt: on
  
  
-@@ -697,4 +698,55 @@ OXE_DATASET_CONFIGS = {
+@@ -697,4 +699,55 @@ OXE_DATASET_CONFIGS = {
          "state_encoding": StateEncoding.NONE,
          "action_encoding": ActionEncoding.EEF_POS,
      },
@@ -67,7 +68,7 @@ index cdbbbf9..83eb557 100644
 +    },
  }
 diff --git a/vla/datasets/rlds/oxe/materialize.py b/vla/datasets/rlds/oxe/materialize.py
-index 8913576..3965991 100644
+index 8913576..714f1b3 100644
 --- a/vla/datasets/rlds/oxe/materialize.py
 +++ b/vla/datasets/rlds/oxe/materialize.py
 @@ -29,8 +29,8 @@ def make_oxe_dataset_kwargs(
@@ -81,14 +82,15 @@ index 8913576..3965991 100644
  
      # [Contract] For EEF_POS & EEF_R6 actions, only the last action dimension (gripper) is absolute!
      # Normalize all action dimensions *except* the gripper
-@@ -40,6 +40,11 @@ def make_oxe_dataset_kwargs(
+@@ -40,6 +40,12 @@ def make_oxe_dataset_kwargs(
      elif dataset_kwargs["action_encoding"] is ActionEncoding.EEF_R6:
          dataset_kwargs["absolute_action_mask"] = [False] * 9 + [True]
          dataset_kwargs["action_normalization_mask"] = [True] * 9 + [False]
 +    elif dataset_kwargs["action_encoding"] is ActionEncoding.FETCH_JOINT:
-+        # Joint and body targets are absolute (repeat the last one past the end), base velocities
-+        # relative (neutral = stop); normalize all but the gripper, as for EEF_POS.
-+        dataset_kwargs["absolute_action_mask"] = [True] * 11 + [False] * 2
++        # Arm, head and torso are deltas from the frame's joints (fetch_dataset_transform) and base
++        # velocities: all relative (neutral past the end = hold / stop); the gripper is absolute.
++        # Normalize all but the gripper, as for EEF_POS.
++        dataset_kwargs["absolute_action_mask"] = [False] * 7 + [True] + [False] * 5
 +        dataset_kwargs["action_normalization_mask"] = [True] * 7 + [False] + [True] * 5
      dataset_kwargs["action_proprio_normalization_type"] = action_proprio_normalization_type
  
@@ -120,17 +122,45 @@ index d946194..3ed415a 100644
  }
  # fmt: on
 diff --git a/vla/datasets/rlds/oxe/transforms.py b/vla/datasets/rlds/oxe/transforms.py
-index 3fad662..6436d25 100644
+index 3fad662..ae595d5 100644
 --- a/vla/datasets/rlds/oxe/transforms.py
 +++ b/vla/datasets/rlds/oxe/transforms.py
-@@ -931,4 +931,10 @@ OXE_STANDARDIZATION_TRANSFORMS = {
+@@ -846,6 +846,27 @@ def mikasa_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+     return trajectory
+ 
+ 
++# Fetch (MIKASA-Robo-MMM): the recorded 13D action holds absolute targets for the arm (0-6), head
++# (8, 9) and torso (10); they become deltas from the same frame's joints, which the 12D state
++# holds at these indices (mikasa_pi05.transforms.STATE_TO_ACTION_ORDER). At inference the measured
++# joints are added back. The gripper (7) and the base velocities (11, 12) stay as recorded.
++FETCH_ARM_STATE = [2, 4, 5, 6, 7, 8, 9]
++FETCH_HEAD_STATE = [1, 3]
++FETCH_TORSO_STATE = [0]
++
++
++def fetch_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
++    a, s = trajectory["action"], tf.cast(trajectory["observation"]["state"], trajectory["action"].dtype)
++    trajectory["action"] = tf.concat([
++        a[:, :7] - tf.gather(s, FETCH_ARM_STATE, axis=-1),
++        a[:, 7:8],
++        a[:, 8:10] - tf.gather(s, FETCH_HEAD_STATE, axis=-1),
++        a[:, 10:11] - tf.gather(s, FETCH_TORSO_STATE, axis=-1),
++        a[:, 11:13],
++    ], axis=-1)
++    return trajectory
++
++
+ # === Registry ===
+ OXE_STANDARDIZATION_TRANSFORMS = {
+     "bridge_oxe": bridge_oxe_dataset_transform,
+@@ -931,4 +952,10 @@ OXE_STANDARDIZATION_TRANSFORMS = {
  
      ### mikasa datasets
      "mikasa_dataset": mikasa_dataset_transform,
-+    "fetch_samedrawer": mikasa_dataset_transform,
-+    "fetch_seasondish": mikasa_dataset_transform,
-+    "fetch_cabinetsearch": mikasa_dataset_transform,
-+    "fetch_depthrecall": mikasa_dataset_transform,
-+    "fetch_takeitback": mikasa_dataset_transform,
-+    "fetch_veggie": mikasa_dataset_transform,
++    "fetch_samedrawer": fetch_dataset_transform,
++    "fetch_seasondish": fetch_dataset_transform,
++    "fetch_cabinetsearch": fetch_dataset_transform,
++    "fetch_depthrecall": fetch_dataset_transform,
++    "fetch_takeitback": fetch_dataset_transform,
++    "fetch_veggie": fetch_dataset_transform,
  }
