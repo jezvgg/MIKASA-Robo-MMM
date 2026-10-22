@@ -8,6 +8,8 @@ which QuickTime, browsers and messengers play (our files are H.264 yuv444p, whic
 
     # from the Hub (downloads only meta/ and the video files the episodes need)
     python tools/export_episode_videos.py nurtayev-d/cabinetsearch-ag-1000ep --episodes 0 5 --out clips
+    # the organization's repo keeps each task in its own folder
+    python tools/export_episode_videos.py MIKASA-Robo-MMM/MIKASA-Robo-MMM --subdir veggie --episodes 0 --out clips
     # from a local copy, all three cameras side by side in one clip
     python tools/export_episode_videos.py ~/datasets/cabinetsearch-ag-1000ep --episodes 0 --grid --out clips
 
@@ -26,16 +28,17 @@ import numpy as np
 import pyarrow.parquet as pq
 
 
-def open_dataset(source: str, revision: str | None):
+def open_dataset(source: str, revision: str | None, subdir: str = ""):
     """Return (root, fetch): fetch(relative path) -> local path, downloading from the Hub if needed."""
-    local = pathlib.Path(source).expanduser()
+    local = pathlib.Path(source).expanduser() / subdir
     if local.exists():
         return local, lambda rel: local / rel
     from huggingface_hub import hf_hub_download, snapshot_download
 
-    root = pathlib.Path(snapshot_download(source, repo_type="dataset", revision=revision, allow_patterns=["meta/*"]))
-    return root, lambda rel: pathlib.Path(
-        hf_hub_download(source, rel, repo_type="dataset", revision=revision))
+    prefix = f"{subdir.strip('/')}/" if subdir else ""
+    snapshot = snapshot_download(source, repo_type="dataset", revision=revision, allow_patterns=[f"{prefix}meta/*"])
+    return pathlib.Path(snapshot) / prefix, lambda rel: pathlib.Path(
+        hf_hub_download(source, prefix + rel, repo_type="dataset", revision=revision))
 
 
 def read_frames(path: pathlib.Path, start: float, end: float, fps: float) -> list[np.ndarray]:
@@ -89,9 +92,11 @@ def main() -> None:
     parser.add_argument("--grid", action="store_true", help="one clip per episode with the cameras side by side")
     parser.add_argument("--out", default="clips")
     parser.add_argument("--revision", default=None)
+    parser.add_argument("--subdir", default="", help="the dataset's folder inside the repo, e.g. veggie for "
+                        "MIKASA-Robo-MMM/MIKASA-Robo-MMM (one repo, one folder per task)")
     args = parser.parse_args()
 
-    root, fetch = open_dataset(args.source, args.revision)
+    root, fetch = open_dataset(args.source, args.revision, args.subdir)
     info = json.loads((root / "meta/info.json").read_text())
     fps = float(info["fps"])
     table = pq.read_table(sorted(glob.glob(str(root / "meta/episodes/*/*.parquet")))).to_pandas()
