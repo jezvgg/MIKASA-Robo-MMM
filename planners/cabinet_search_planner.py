@@ -1571,7 +1571,11 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 door_rad=round(rad, 3))
         else:
             closed = False
-            if CLOSE_RETRACE and rec:
+            if fist_open:
+                res, closed = _fist.close_the_leaf(env, planner, task, door=door, res=res)
+                if common.stopped_by_horizon(planner):
+                    return res
+            if CLOSE_RETRACE and rec and not fist_open:
                 # Undo the opening rather than drive around the leaf. A False hands
                 # over to the measured ladder from a defined pose (hand open, arm at
                 # rest), so this can only add a path, never remove one.

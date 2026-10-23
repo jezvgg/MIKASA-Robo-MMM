@@ -78,7 +78,14 @@ def main():
 
     q_dtype = robot.get_qpos().dtype
 
-    def ik_ok(T) -> bool:
+    roll_idx = [int(jm[n].active_index[0]) for n in ("upperarm_roll_joint", "forearm_roll_joint",
+                                                       "wrist_roll_joint")]
+    rest_roll = robot.get_qpos()[0].cpu().numpy().astype(np.float64)[roll_idx]
+    from robots.fetch.utils import unwrap_toward
+
+    def ik_need(T):
+        """None if no IK; else the smallest, over solutions, of the largest roll excursion from
+        the reset posture's rolls (what the episode's roll window would have to grow by)."""
         cur = robot.get_qpos()[0].cpu().numpy().astype(np.float64)
         cur_f = p.fold_qpos(cur)
         pose = sapien.Pose(p=T[:3, 3], q=fd._quat(T))
@@ -86,8 +93,17 @@ def main():
         try:
             status, sol = p.IK(goal_b, cur_f, mask, n_init_qpos=args.n_init)
         except Exception:
-            return False
-        return status == "Success" and sol is not None and len(np.atleast_2d(sol)) > 0
+            return None
+        if status != "Success" or sol is None or len(np.atleast_2d(sol)) == 0:
+            return None
+        best = np.inf
+        for g in np.atleast_2d(sol):
+            g = unwrap_toward(g, cur_f, p.joint_limits)
+            best = min(best, float(np.max(np.abs(np.asarray(g)[roll_idx] - rest_roll))))
+        return best
+
+    def ik_ok(T) -> bool:
+        return ik_need(T) is not None
 
     leaf = fd.Leaf(task, door)
 
@@ -99,7 +115,8 @@ def main():
         u, nin = leaf.u(rad), leaf.inner(rad)
         a2 = ds.rot2(sign * leaf.s * yaw_off) @ (-u)
         a = np.array([math.cos(pitch) * a2[0], math.cos(pitch) * a2[1], math.sin(pitch)])
-        c = np.array([nin[0], nin[1], 0.0]) if closing == "across" else np.array([0.0, 0.0, 1.0])
+        c = {"across": np.array([nin[0], nin[1], 0.0]), "vertical": np.array([0.0, 0.0, 1.0]),
+             "diag": np.array([nin[0], nin[1], 1.0]) / math.sqrt(2.0)}[closing]
         if abs(c @ a) > 0.95:
             c = np.array([nin[0], nin[1], 0.0])
         c = c - (c @ a) * a
@@ -113,36 +130,50 @@ def main():
         rads = (fd.OPEN_RAD, 0.9, 0.5, 0.1)
         stances = list(itertools.product((0.55, 0.70, 0.85, 1.0), (-1.45, -1.30, -1.15)))
     torsos = (0.20, 0.386)
-    yaw_offs = (0.0, 0.35, 0.7, 1.05)
+    yaw_offs = (-0.35, 0.0, 0.35, 0.7)
     pitches = (0.0, math.radians(35), math.radians(70), math.radians(90))
     zs = (1.50,)
     alongs = (0.08,)
-    closings = ("across", "vertical")
-    offsets = (0.06, 0.09)
+    offsets = (0.09,)
+    closings = ("across", "vertical", "diag")
     rows = []
     for (x, y), torso in itertools.product(stances, torsos):
         for yaw_off, pitch, z, along, closing, off in itertools.product(yaw_offs, pitches, zs, alongs,
                                                                          closings, offsets):
-            ok = []
+            ok, needs = [], []
             for rad in rads:
                 set_door(rad)
                 press = leaf.point(rad, along, off if args.side == "inner" else -off)
                 yaw = math.atan2(press[1] - y, press[0] - x)
                 set_base(x, y, yaw, torso)
                 planner.planner.update_from_simulation()
-                ok.append(ik_ok(pose_for(rad, along, off, z, yaw_off, pitch, closing)))
+                need = ik_need(pose_for(rad, along, off, z, yaw_off, pitch, closing))
+                ok.append(need is not None)
+                needs.append(need)
             rows.append(dict(x=x, y=y, torso=torso, yaw_off=yaw_off, pitch_deg=round(math.degrees(pitch)),
-                             z=z, along=along, closing=closing, off=off, ok=ok, all=all(ok)))
+                             z=z, along=along, closing=closing, off=off, ok=ok, all=all(ok),
+                             roll_need=(max(needs) if all(ok) else None)))
         good = [r for r in rows if r["x"] == x and r["y"] == y and r["torso"] == torso and r["all"]]
         print(f"stance ({x}, {y}) torso {torso}: {len(good)} poses reachable at every angle "
               f"{[(r['yaw_off'], r['pitch_deg'], r['closing'], r['off']) for r in good][:8]}", flush=True)
     by = {}
     for r in rows:
         by.setdefault((r["yaw_off"], r["pitch_deg"], r["closing"], r["off"]), []).append(r["ok"])
-    print("per (yaw_off rad, pitch deg, closing, offset): reachable fraction at crack / 0.9 / open")
+    need = {}
+    for r in rows:
+        if r["roll_need"] is not None:
+            need.setdefault((r["yaw_off"], r["pitch_deg"], r["closing"], r["off"]), []).append(r["roll_need"])
+    print("per (yaw_off rad, pitch deg, closing, offset): reachable fraction at each angle | "
+          "stances reachable at all | median and min roll excursion (rad) over those stances")
     for k, v in sorted(by.items()):
         a = np.array(v, dtype=float).mean(axis=0)
-        print(f"  {k}: {np.round(a, 2).tolist()}")
+        n = need.get(k, [])
+        print(f"  {k}: {np.round(a, 2).tolist()} | {len(n)} | "
+              f"{(round(float(np.median(n)), 2), round(float(np.min(n)), 2)) if n else '-'}")
+    best = sorted((r for r in rows if r["roll_need"] is not None), key=lambda r: r["roll_need"])[:12]
+    print("lowest roll excursion:")
+    for r in best:
+        print("  ", {k: r[k] for k in ("x", "y", "torso", "yaw_off", "pitch_deg", "closing", "roll_need")})
     Path(f"reach_scan_{args.side}.json").write_text(json.dumps(rows))
     env.close()
 
