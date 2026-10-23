@@ -13,7 +13,8 @@ camera) from entering those objects. This script measures it geometrically from 
 
 Replay: the dataset's own profile env kwargs, reset with the episode seed, each 10 Hz action held for
 two 20 Hz control steps (the protocol our datasets replay bit-exactly with); the replayed 12D state is
-compared with the recorded one every frame.
+compared with the recorded one every frame, and the env's success is recorded. Run it with the
+assisted grasp code under test on PYTHONPATH (MIKASA_AG_LEGACY_DRIVE=1: the pre-fix drives).
 usage: hand_overlap_replay.py <lerobot dataset dir> <out.json> <episode> [<episode> ...]"""
 import glob, json, sys
 import numpy as np, gymnasium as gym, pyarrow.parquet as pq
@@ -70,10 +71,13 @@ for ep in episodes:
             objects.append((comp.entity.name, kind, comp, s, ConvexHull(v).equations, v.min(0), v.max(0)))
     rec = data[data.episode_index == ep].sort_values("frame_index")
     A, S = np.stack(rec["action"].to_numpy()), np.stack(rec["observation.state"].to_numpy())
-    per_frame, state_err = [], []
+    per_frame, state_err, success, first_success = [], [], False, None
     for k, a in enumerate(A):
         for _ in range(2):
-            env.step(a)
+            _, _, _, _, info = env.step(a)
+        if bool(np.asarray(info["success"].cpu()).reshape(-1)[0]):
+            success = True
+            first_success = k if first_success is None else first_success
         q = np.asarray(base.agent.robot.get_qpos().cpu()).reshape(-1)[3:]
         if k + 1 < len(S):
             state_err.append(float(np.abs(q - S[k + 1]).max()))
@@ -106,7 +110,10 @@ for ep in episodes:
                           "held": None if held is None or held < 0 else name_of(ag.objects[held])})
     env.close()
     pm = np.array([f["panel_mm"] for f in per_frame]); om = np.array([f["other_mm"] for f in per_frame])
-    row = {"episode": ep, "frames": len(per_frame), "max_state_err": max(state_err, default=0.0),
+    err = np.array(state_err)
+    row = {"episode": ep, "frames": len(per_frame), "replay_success": success,
+           "first_success_frame": first_success, "max_state_err": max(state_err, default=0.0),
+           "first_frame_err_gt_1e-3": int(np.argmax(err > 1e-3)) + 1 if (err > 1e-3).any() else None,
            "panel_max_mm": float(pm.max()), "panel_frames_gt5mm": int((pm > 5).sum()),
            "panel_frames_gt10mm": int((pm > 10).sum()), "panel_frames_gt20mm": int((pm > 20).sum()),
            "panel_frames_gt50mm": int((pm > 50).sum()),

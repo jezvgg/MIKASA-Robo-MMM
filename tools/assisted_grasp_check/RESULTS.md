@@ -44,3 +44,51 @@ leaf: `artifacts/assisted-grasp-check/cabinetsearch_ep0_hand_through_door.png` (
 Not measured: the visual meshes (the dataset videos show the visual leaf, which may be thicker than its
 collision box), and jezv's TakeItBack and Veggie, which use the same assisted grasp code in this tree
 but were collected with his copy of it.
+
+## The fix and what it changes (2026-10-23, commit 8b3b8c8)
+
+`utils/mikasa/assisted_grasp.py` now starts every object's drive at one shapeless, gravity-free proxy
+that one more drive locks to the hand while something is held; the hand is in no drive. The test
+(`drive_collision_test.py`): a direct drive, enabled OR disabled, lets the box fall through the slab;
+the proxy chain rests it on the slab with the same 172 contact steps as no drive at all.
+`MIKASA_AG_LEGACY_DRIVE=1` (or `AssistedGraspConfig.hand_collides=False`) rebuilds the old drives.
+
+**Legacy mode reproduces the collected data:** episode 0 of each task replays with state error 0.0 and
+succeeds; CabinetSearch shows the same 95 through-the-leaf frames (57 mm) as before the change.
+
+**The recorded actions under the fixed physics** (5 episodes per task, open loop):
+
+| Task | Replay succeeds | Largest 12D state difference from the dataset | Hand inside an object |
+|---|---|---|---|
+| SeasonDish | 5/5 | 0.6 mrad | never |
+| DepthRecall | 5/5 | 5.8 mrad | never |
+| SameDrawer | 5/5 | 1-7 mrad; episode 400: 31 mrad (from frame 250) | never |
+| CabinetSearch | 1/5 | 45-386 mrad, from frames 148-185 (the end of the first opening) | never |
+
+So SeasonDish, DepthRecall and SameDrawer stay valid: the same actions do the same thing within a few
+mrad and still succeed; only their bit-exact replay now needs `MIKASA_AG_LEGACY_DRIVE=1`.
+CabinetSearch's recorded actions no longer work once the hand collides with the leaf: re-collect it.
+
+**The CabinetSearch planner itself under the fixed physics** (`scripts/collection_episode.py
+cabinet_search <seed> --assisted-grasp`, the seeds of dataset episodes 0, 200, 400, 600): 4/4
+succeed. All seven openings end the same way: `swing done why=stalled` at 1.684-1.713 rad (target
+1.75; the hand's own reading says 1.77-1.80), 157-159 controls. The leaf stops against the hand and
+the swing keeps commanding for its 60-control stall window (STALL_STEPS) before it gives up, i.e. the
+hand presses the leaf for ~3 s per opening. After the release the leaves rest at 1.625-1.666 rad. The
+closing pushes (seeds 7880000 and 7880793 close two and one leaves) all close.
+
+## What to change in BIMBO (planners/cabinet_door_bimbo.py)
+
+The cause of the contact: `HAND_TURN = 0` keeps the hand's world orientation while the leaf turns
+~100 deg about the hinge (full BIMBO turns the hand with the leaf, out of a Fetch's reach), and the
+weld lets the bar rotate freely in the hand, so near the end the leaf face meets the hand body.
+1. End the swing at the contact, not after a 60-control stall: stop when the hand touches the leaf
+   (contact force hand <-> leaf from the scene) or when the door has not advanced for a few controls,
+   and target the angle the hand allows (~1.68 rad) instead of 1.75.
+2. Keep the palm off the leaf: let the hand's yaw follow part of the leaf's turn (`HAND_TURN` 0.2-0.3,
+   inside the roll window), so the leaf reaches 1.75 without touching. Needs a reach check: the shipped
+   reason for 0 is that the full turn (1.0) is out of reach.
+3. Re-measure the later stages from the new end state (they were measured from the arc pull's end
+   stance, LEVER_END): push from here, tuck, touch-dock drive. The four runs above passed them.
+Then validate on 20-40 seeds (success, motion audit, clearance gates, `hand_overlap_replay.py` = 0 on
+the new episodes, a look at the hand camera) before re-collecting 1000.
