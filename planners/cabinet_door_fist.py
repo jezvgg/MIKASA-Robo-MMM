@@ -35,6 +35,7 @@ closed on the bar; afterwards the last 5-tuple, the caller judging the leaf by `
 
 from __future__ import annotations
 
+import math
 import os
 
 import numpy as np
@@ -56,23 +57,52 @@ CRACK_RAD = _f("MIKASA_FD_CRACK_RAD", 0.45)
 """How far the bar swing opens the leaf before the fist goes in: a ~0.21 m chord at the free edge."""
 OPEN_RAD = _f("MIKASA_FD_OPEN_RAD", 1.30)
 """Where the fist leaves the leaf (`my_scenes.cabinet_search.CAB_1_FIST_OPEN_RAD`)."""
-IN_ALONG_M = _f("MIKASA_FD_IN_ALONG_M", 0.10)
+IN_ALONG_M = _f("MIKASA_FD_IN_ALONG_M", 0.08)
 """How far in from the free edge, along the leaf, the fist presses."""
-IN_OFFSET_M = _f("MIKASA_FD_IN_OFFSET_M", 0.06)
-"""The fist centre off the leaf's inner face at the start of the push (half a fist plus ~2 cm)."""
+IN_OFFSET_M = _f("MIKASA_FD_IN_OFFSET_M", 0.09)
+"""The fist centre off the leaf's inner face where it goes in. `tools/cab5/reach_scan.py` (mplib IK
+with the scene, the fingers shut, 24 stances x 2 torsos): at 0.06 no pose is collision-free at any
+angle (the palm meets the leaf); at 0.09 the pitched fist is reachable from ~95 % of them. The push
+closes the gap with the lead (LEAD_MAX)."""
 PRE_PAST_M = _f("MIKASA_FD_PRE_PAST_M", 0.14)
 """The pre-insert pose stands this far past the free edge, along the leaf."""
-PUSH_Z = _f("MIKASA_FD_PUSH_Z", 1.62)
-"""Height of the fist: 3 cm over the bar, ~20 cm over the shelf floor (1.42)."""
-LEAD_MAX = _f("MIKASA_FD_LEAD_MAX", 0.06)
-"""Rad the commanded angle may run ahead of the measured leaf: the fist's press."""
+PUSH_Z = _f("MIKASA_FD_PUSH_Z", 1.47)
+"""Height of the fist: 11 cm over the leaf's bottom edge (1.391), under the bar (1.592): at
+1.62 the servo could not reach the press point from the insert stance (19 cm short, two seeds)."""
+LEAD_MAX = _f("MIKASA_FD_LEAD_MAX", 0.20)
+"""Rad the commanded angle may run ahead of the measured leaf: ~0.12 rad closes IN_OFFSET_M's gap
+at the press radius (0.40 m), the rest is the press."""
 LEAD_RATE = _f("MIKASA_FD_LEAD_RATE", 0.30)
 """Rad/s the commanded angle advances."""
 PUSH_MAX_STEPS = int(_f("MIKASA_FD_PUSH_MAX_STEPS", 500))
 INSERT_MAX_STEPS = 80
 WITHDRAW_M = _f("MIKASA_FD_WITHDRAW_M", 0.25)
+INSERT_REACH_M = _f("MIKASA_FD_INSERT_REACH_M", 0.65)
+"""The insert stance: the base this far from the fist's first press point..."""
+INSERT_SKEW = _f("MIKASA_FD_INSERT_SKEW", 0.58)
+"""...facing it from `INSERT_SKEW` rad off the leaf's line toward the room, so the fist points
+~28 deg left of the heading when it goes in and ~25 deg further left when the leaf is open. From
+the handle dock (facing +y) the pre-insert pose, pointing along the leaf, has no IK (shoulder
+joint limit, measured on two seeds)."""
 STALL_STEPS = 40
 STALL_EPS = 0.01
+FIST_PITCH = math.radians(_f("MIKASA_FD_FIST_PITCH_DEG", 70.0))
+"""The fist points along the leaf toward the hinge, pitched up by this much (the reach scan's best:
+0.92-0.96 of the stances at the crack, mid-push and open angles; 0 deg: 0.83-0.88, 90 deg:
+0.79-0.92). It goes in from under the leaf's bottom edge along its own axis."""
+FIST_UP = True
+"""How the fist meets the leaf. "up" (default): the hand points straight up and rises into the
+gap from under the leaf's bottom edge (1.391), so the wrist and forearm stay below the leaf (the
+BIMBO task-62 demos drop the hand into the fridge door's gap; a wall cabinet is reached from
+below instead). "along": the hand points along the leaf toward the hinge with the forearm past
+the free edge — measured on four seeds: the press point is never reached (the TCP stops 6-14 cm
+short, the planned insert refuses) and the leaf stalls at 0.42-0.66 rad."""
+UNDER_BACK_M = _f("MIKASA_FD_UNDER_BACK_M", 0.16)
+"""The pre-insert pose stands this far back along the fist's axis: 0.15 m lower (z 1.35, just
+under the leaf's bottom edge at 1.391) and 0.05 m toward the free edge. At 0.28 (z 1.21) it had no
+IK and its screw put the upper arm into the counter (four seeds)."""
+YAW_GAIN = 2.0
+YAW_W_MAX = 0.4
 
 FIST_STEM = "cab_1_main_group"
 """The one leaf this stage serves (`my_scenes.cabinet_search.CAB_1_FIST`)."""
@@ -103,8 +133,10 @@ class Leaf:
         bar0 = np.asarray(door.handle_bar, dtype=np.float64)[:2]
         r_bar = max(float(np.linalg.norm(bar0 - self.anchor)), 1e-6)
         edge0 = self.anchor + (bar0 - self.anchor) * (1.0 + _bimbo.LEAF_EDGE_PAST_BAR / r_bar)
-        self.L = float(np.linalg.norm(edge0 - self.anchor))
-        self.u0 = (edge0 - self.anchor) / self.L
+        # The shut leaf lies along world x toward `panel_dir` with its inner face toward +y
+        # (`push_frame`'s convention); the bar's 3.5 cm of depth is not the leaf's direction.
+        self.u0 = np.array([float(door.panel_dir), 0.0])
+        self.L = float(abs(edge0[0] - self.anchor[0]))
 
     def rad(self) -> float:
         return float(crp.door_rad_now(self.task, self.door))
@@ -115,20 +147,21 @@ class Leaf:
 
     def inner(self, rad: float) -> np.ndarray:
         """Unit normal of the leaf's INNER face (the cabinet side when shut) at `rad`."""
-        _, n = crp.push_frame(self.anchor, self.sense, self.door.open_dir * float(rad), self.door)
-        return -np.asarray(n, dtype=np.float64)
+        return ds.rot2(self.s * float(rad)) @ np.array([0.0, 1.0])
 
     def point(self, rad: float, along_from_edge: float, off_inner: float) -> np.ndarray:
         return self.anchor + self.u(rad) * (self.L - along_from_edge) + self.inner(rad) * off_inner
 
-    def fist_pose(self, task, rad: float, along_from_edge: float, off_inner: float) -> np.ndarray:
-        """The fist at the leaf: approach along the leaf toward the hinge, fingers closing
-        across it (so a finger's outer face meets the inner face), at PUSH_Z."""
+    def fist_pose(self, task, rad: float, along_from_edge: float, off_inner: float,
+                  z: float = PUSH_Z) -> np.ndarray:
+        """The fist at the leaf, fingers closing across it (so a finger's outer face meets the
+        inner face): pointing up (FIST_UP) or along the leaf toward the hinge."""
         xy = self.point(rad, along_from_edge, off_inner)
         u, nin = self.u(rad), self.inner(rad)
-        pose = task.agent.build_grasp_pose(np.array([-u[0], -u[1], 0.0]),
-                                           np.array([nin[0], nin[1], 0.0]),
-                                           np.array([xy[0], xy[1], PUSH_Z]))
+        approach = np.array([-math.cos(FIST_PITCH) * u[0], -math.cos(FIST_PITCH) * u[1],
+                             math.sin(FIST_PITCH)])
+        pose = task.agent.build_grasp_pose(approach, np.array([nin[0], nin[1], 0.0]),
+                                           np.array([xy[0], xy[1], z]))
         return _T(pose)
 
 
@@ -161,18 +194,44 @@ def open_the_door(env, planner, task, *, door, crack_rad: float = CRACK_RAD,
         say(env, "MISSED: the bar swing did not crack the leaf", door_rad=round(rad0, 3))
         return res
 
-    # -- fist, in free air ------------------------------------------------------------------
-    r = planner.close_gripper(t=12)
-    if r != -1:
-        res = r
+    # -- fist, in free air, pulled in under the leaf ----------------------------------------
+    crp.stow_hand(env, planner, task, z=1.30, aheads=(0.55, 0.45, 0.70))   # closes the hand
+    if common.stopped_by_horizon(planner):
+        return planner._guard.last_step
+    planner.planner.update_from_simulation()
+
+    # -- drive to the insert stance: facing the gap from the room's side ---------------------
+    press = leaf.point(rad0, IN_ALONG_M, IN_OFFSET_M)
+    h = ds.rot2(leaf.s * INSERT_SKEW) @ (-leaf.u(rad0))
+    stance = press - INSERT_REACH_M * h
+    say(env, "drive to the insert stance", stance=[round(float(v), 3) for v in stance],
+        heading_deg=round(float(np.degrees(np.arctan2(h[1], h[0]))), 1),
+        press=[round(float(v), 3) for v in press])
+    got = planner.drive_base(target_pos=np.array([stance[0], stance[1], 0.0]),
+                             target_view_vec=np.array([h[0], h[1], 0.0]), freeze_arm=True,
+                             arrive_tol=0.05)
+    if got == -1:
+        say(env, "MISSED: the insert stance drive refused", door_rad=round(leaf.rad(), 3))
+        return res
+    res = got
     if common.stopped_by_horizon(planner):
         return res
     planner.planner.update_from_simulation()
+    if int(getattr(planner, "gripper_state", 1)) != -1:
+        r = planner.close_gripper(t=12)
+        if r != -1:
+            res = r
 
     # -- insert: planned to the pre-insert pose past the free edge, then the stroke ----------
-    pre = leaf.fist_pose(task, rad0, -PRE_PAST_M, IN_OFFSET_M)
+    pre = leaf.fist_pose(task, rad0, IN_ALONG_M, IN_OFFSET_M)
+    pre[:3, 3] -= UNDER_BACK_M * pre[:3, 2]          # back along the fist's axis: under the leaf
     got = common.arm_move(env, planner, sapien.Pose(p=pre[:3, 3], q=_quat(pre)), who=WHO,
-                          stage="pre-insert the fist past the free edge", tries=3)
+                          stage="pre-insert the fist under the leaf", tries=3)
+    if got == -1:
+        # The press pose itself is what the reach scan measured: plan there directly.
+        press_T = leaf.fist_pose(task, rad0, IN_ALONG_M, IN_OFFSET_M)
+        got = common.arm_move(env, planner, sapien.Pose(p=press_T[:3, 3], q=_quat(press_T)), who=WHO,
+                              stage="the fist straight to the press point", tries=3)
     if got == -1:
         say(env, "MISSED: no plan to the pre-insert pose", door_rad=round(leaf.rad(), 3),
             pre=[round(float(v), 3) for v in pre[:3, 3]])
@@ -190,12 +249,22 @@ def open_the_door(env, planner, task, *, door, crack_rad: float = CRACK_RAD,
     servo.hold_rolls_here()
     rad_in = leaf.rad()
     goal = leaf.fist_pose(task, rad_in, IN_ALONG_M, IN_OFFSET_M)
+    got = common.arm_move(env, planner, sapien.Pose(p=goal[:3, 3], q=_quat(goal)), who=WHO,
+                          stage="the fist into the gap", tries=2)
+    if got != -1:
+        res = got
+        if common.stopped_by_horizon(planner):
+            return res
+        planner.planner.update_from_simulation()
+    drv.reset_command()
+    servo.hold_rolls_here()
     out, err = _servo_to(env, planner, task, drv, goal, steps=INSERT_MAX_STEPS)
     if out is None:
         return planner._guard.last_step
-    res = out if out is not None else res
+    res = out
     tcp = _T(task.agent.tcp.pose.sp)[:3, 3]
     say(env, "fist in the gap", door_rad=round(leaf.rad(), 3), err_m=round(err, 3),
+        planned=got != -1, torso=round(_bimbo._torso(task), 3),
         tcp=[round(float(v), 3) for v in tcp], goal=[round(float(v), 3) for v in goal[:3, 3]],
         off_inner=round(float((tcp[:2] - leaf.anchor) @ leaf.inner(leaf.rad())), 3),
         touching=planner.touching_now())
@@ -212,6 +281,9 @@ def open_the_door(env, planner, task, *, door, crack_rad: float = CRACK_RAD,
     link = joints[[j.name for j in joints].index(door.hinge)].child_link
     press_max, perr_max = 0.0, 0.0
     drv.reset_command()
+    q = _bimbo._qpos(task)
+    d0 = G0[:2, 3] - q[:2]
+    bearing0 = float(np.arctan2(d0[1], d0[0])) - float(q[2])
     for i in range(PUSH_MAX_STEPS):
         rad = leaf.rad()
         hist.append(rad)
@@ -224,7 +296,14 @@ def open_the_door(env, planner, task, *, door, crack_rad: float = CRACK_RAD,
         sw = min(open_rad + 0.02, sw + LEAD_RATE * dt, max(sw, rad + LEAD_MAX))
         turn = leaf.s * (sw - ref)
         goal = ds.door_frames(G0, leaf.anchor, turn, hand_turn=turn)[1]
-        res, dp, _, fresh = drv.step(goal)
+        # The base turns in place to keep the press point at the bearing it had at the start
+        # (the fist sweeps ~25 deg left round the hinge); it never translates: a base riding
+        # the hinge's circle ends in the west wall.
+        q = _bimbo._qpos(task)
+        d = goal[:2, 3] - q[:2]
+        bearing = float(np.arctan2(d[1], d[0])) - float(q[2])
+        err_yaw = (bearing - bearing0 + np.pi) % (2 * np.pi) - np.pi
+        res, dp, _, fresh = drv.step(goal, (0.0, float(np.clip(YAW_GAIN * err_yaw, -YAW_W_MAX, YAW_W_MAX))))
         if fresh:
             perr_max = max(perr_max, float(np.linalg.norm(dp)))
         press = float(np.linalg.norm(_bimbo._np(task.scene.get_pairwise_contact_forces(hand, link))
@@ -240,7 +319,7 @@ def open_the_door(env, planner, task, *, door, crack_rad: float = CRACK_RAD,
     rad1 = leaf.rad()
     T = _T(task.agent.tcp.pose.sp)
     out_goal = T.copy()
-    out_goal[:3, 3] = T[:3, 3] + WITHDRAW_M * np.array([*leaf.u(rad1), 0.0])
+    out_goal[:3, 3] = T[:3, 3] - WITHDRAW_M * T[:3, 2]          # back down the fist's axis
     out, err = _servo_to(env, planner, task, drv, out_goal, steps=60, tol=0.02)
     if out is None:
         return planner._guard.last_step
