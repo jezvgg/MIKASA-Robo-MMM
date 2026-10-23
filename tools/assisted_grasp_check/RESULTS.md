@@ -129,3 +129,25 @@ the fix the same seed pushed the can: the swing now ends earlier, the stance aft
 the readying path that followed reaches the can, which the hand now cannot pass through. To fix
 in the planner: check the readying joint lines against the can (or raise and level the hand before
 the hand is inside the compartment).
+
+## HAND_TURN 0.25 and the closing push (2026-10-23, all with the fixed assisted grasp)
+
+`MIKASA_BD_HAND_TURN=0.25` (the hand's yaw follows a quarter of the leaf's turn), seeds of episodes
+0, 200, 400, 600, 800:
+
+| | HAND_TURN 0 (debe78b) | HAND_TURN 0.25 |
+|---|---|---|
+| success | 5/5 (one knocks the can: 4 acceptable) | 3/5, all acceptable |
+| swing end | 1.68-1.71 rad, all `hand-on-leaf` | 1.73-1.75 rad, 3 of 5 on the target |
+| hand on leaf, max | 193-215 N | 67-112 N |
+| controls above 20 N per run | 94-279 | 14-60 |
+
+Both misses (seeds 7880000, 7880793; left leaves) are in the close: the fist pushes the leaf shut
+(0.0 rad), the arm cannot withdraw (`joint limit at index [7]`, no IK), and whatever withdrawal
+follows pulls the shut leaf open again (0.38-0.71 rad), then the correction fails. No weld forms (no
+assisted-grasp event between the push and the withdrawal). Tried and reverted, none fixed a miss:
+an RRT retreat with the cabinet out of the planning world (swept the hand into the leaf, 0.44-0.50),
+a 0.20 m and a 0.35 m straight base back-off with the arm held (0.38-0.71), withdrawing with the fist
+and opening when away (0.44, 0.71), and `MIKASA_CLOSE_R_PUSH=0.25` (no effect: the push from here does
+not use that radius). The same miss class appeared once with HAND_TURN 0 (seed 7880608). The planner
+here is back to the validated debe78b closing code.
