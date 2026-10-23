@@ -91,6 +91,7 @@ import os
 import numpy as np
 
 from planners import cabinet_door_bimbo as _bimbo
+from planners import cabinet_door_fist as _fist
 from planners.oracle import oracle_common as common
 from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 from planners import cabinet_retrieval_planner as _crp
@@ -1266,6 +1267,11 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         planner.track_target(lambda cab=cab: compartment_gaze(cab))
         door = door_spec_for(comp, closed_rad=cfg.theta_closed)
         wall_park = str(getattr(comp, "close_policy", "push")) == "wall_park"
+        # cab_1 pushed shut (MikasaCabinetSearch5-v0, EXPERIMENTAL): cracked by the bar, opened
+        # from inside by the fist, closed from the ladder `cabinet_door_fist` measures for it.
+        fist_open = comp.stem == _fist.FIST_STEM and not wall_park
+        if fist_open:
+            door = dataclasses.replace(door, close_docks=_fist.CLOSE_DOCKS)
         say(env, "round", k=k, compartment=comp.name, pick=cab,
             close_policy=("wall_park" if wall_park else "push"),
             dock=[float(v) for v in door.handle_dock])
@@ -1302,7 +1308,9 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         # the leaf by undoing this stage instead of driving around it. Per round, and
         # dead at the end of it: this is a memory task, and no state may outlive a round.
         rec: dict = {}
-        if door_mode(task) == "bimbo":
+        if fist_open:
+            r = _fist.open_the_door(env, planner, task, door=door, record=rec)
+        elif door_mode(task) == "bimbo":
             r = _bimbo.open_the_door(env, planner, task, door=door, park_rad=park, record=rec)
         else:
             r = open_the_door(env, planner, task, door=door, park_rad=park, record=rec,

@@ -1952,3 +1952,40 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
             setattr(self, key, restore_task_tensor(
                 getattr(self, key), state[key], self.device
             ))
+
+
+# ------------------------------------------------- N = 5: cab_1 opened by the fist --
+
+CAB_1_FIST = Compartment(CAB_1_STEM, ("doorhinge",), "doorhinge", (-1,), close_policy="push")
+"""cab_1 for the fist-opened leaf (2026-10-24, the owner's ask): the leaf is cracked by the
+bar, the fist goes into the gap and pushes it open from inside to `CAB_1_FIST_OPEN_RAD`, short
+of where its push side would stand in the west wall, and the round closes it shut like every
+other leaf (`close_policy="push"`), instead of W24's wall park. EXPERIMENTAL."""
+
+CAB_1_FIST_OPEN_RAD = 1.30
+"""How open the fist leaves cab_1: past `theta_reveal` (1.2), and short of the ~1.6 rad past
+which the leaf's outer face (its closing push side) turns toward the west wall at x = 0."""
+
+COMPARTMENTS_5_FIST = (CAB_1_FIST,) + DEFAULT_COMPARTMENTS
+
+
+@dataclass
+class CabinetSearch5Config(CabinetSearchConfig):
+    """N = 5 with cab_1 opened by the fist and pushed shut (EXPERIMENTAL, unmeasured).
+
+    The horizon is the N = 4 one scaled by 5/4 for the extra round, not a measurement."""
+
+    compartments: tuple = COMPARTMENTS_5_FIST
+    untangle_stems: frozenset = frozenset({CAB_1_STEM})
+    horizon: int = 9000
+
+
+@register_env(
+    "MikasaCabinetSearch5-v0",
+    max_episode_steps=CabinetSearch5Config.horizon,
+    asset_download_ids=["RoboCasa"],
+)
+class CabinetSearch5Task(CabinetSearchTask):
+    """`MikasaCabinetSearch-v0` with the west wall unit as a fifth compartment (index 0)."""
+
+    cfg = CabinetSearch5Config()

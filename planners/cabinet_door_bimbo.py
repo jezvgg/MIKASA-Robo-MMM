@@ -559,7 +559,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
 
 
 def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
-                  record: dict | None = None):
+                  record: dict | None = None, target_rad: float | None = None):
     """Grasp the leaf's bar, swing it open with the servoed hand, let go and clear the hand.
 
     Same contract as `cabinet_retrieval_planner.open_the_door` (D6): -1 only for a refusal
@@ -573,12 +573,17 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         park_rad: a wall-park target (cab_1); the swing then runs to the larger of it and
             `DOOR_OPEN_TARGET` on the same grip.
         record: optional dict for `retrace_the_door`.
+        target_rad: a swing target of its own (`cabinet_door_fist`'s crack of the leaf); the
+            base then keeps the grasp's lever instead of settling on LEVER_END. None (default)
+            is the shipped target and stance.
 
     Example:
         >>> res = open_the_door(env, planner, task, door=CAB_MAIN_RIGHT)   # doctest: +SKIP
     """
     target = float(crp.DOOR_OPEN_TARGET if park_rad is None
                    else max(crp.DOOR_OPEN_TARGET, float(park_rad)))
+    if target_rad is not None:
+        target = float(target_rad)
     dock = np.array([door.handle_dock[0], door.handle_dock[1], 0.0])
     res, done = crp.grasp_the_bar(env, planner, task, door, bar=door.handle_bar, dock=dock)
     if done:
@@ -640,14 +645,14 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     rad0 = float(crp.door_rad_now(task, door))
     q = _qpos(task)
     lever = _lever(G0[:2, 3], q)
-    lever_end = lever if LEVER_END[0] <= 0 else (LEVER_END[0], s * LEVER_END[1])
+    lever_end = lever if (LEVER_END[0] <= 0 or target_rad is not None) else (LEVER_END[0], s * LEVER_END[1])
     yaw0 = float(q[2])
     res, reason, goal = _swing(env, planner, task, door, drv, servo, G0=G0, rad0=rad0,
                                anchor_xy=anchor_xy, s=s, start=rad0, target=target,
                                lever_a=lever, lever_b=lever_end, res=res, label="swing")
     if res is None:
         return planner._guard.last_step
-    if reason == "target" and STANCE_TURN > 0 and LEVER_END[0] > 0:
+    if reason == "target" and STANCE_TURN > 0 and LEVER_END[0] > 0 and target_rad is None:
         q1 = _qpos(task)
         out = _square_stance(env, planner, task, drv, goal, yaw_goal=yaw0 - s * STANCE_TURN,
                              lever_goal=lever_end)
