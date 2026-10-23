@@ -127,8 +127,10 @@ On: a refused pre-contact hands control back to the ladder and the next rung is 
 The fist is made once, at the first rung that is taken, so the later rungs are driven
 with a closed hand — a smaller sweep than the stowed one, never a larger one.
 Off: the measured K106 ladder and the K109 acceptance, byte for byte."""
-CLOSE_R_PUSH = 0.35
-"Push-point radius on the panel's mid-plane arc from the hinge (W15's winner)."
+CLOSE_R_PUSH = float(os.environ.get("MIKASA_CLOSE_R_PUSH", "0.35"))
+"""Push-point radius on the panel's mid-plane arc from the hinge (W15's winner, 0.35). The bar
+stands ~0.43 m out, so a fist at 0.35 rests beside it; with the hand colliding with the leaves
+(2026-10-23) withdrawing from there pulls the shut leaf open by the bar (0.44-0.71 rad)."""
 CLOSE_PUSH_Z = 1.55
 "Panel z-span is 1.39..2.31 (W12); lower third, inside the arm's reach."
 CLOSE_PUSH_GRID = (
