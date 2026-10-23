@@ -362,12 +362,9 @@ def open_the_door(env, planner, task, *, door, crack_rad: float = CRACK_RAD,
     servo.hold_rolls_here()
     rad_in = leaf.rad()
     goal = leaf.fist_pose(task, rad_in, IN_ALONG_M, IN_OFFSET_M, z=PUSH_Z_OPEN)
-    got = _move(env, planner, goal, stage="the fist into the gap", tries=2)
-    if got != -1:
-        res = got
-        if common.stopped_by_horizon(planner):
-            return res
-        planner.planner.update_from_simulation()
+    # The stroke up into the gap is the servo's alone, straight along the fist's axis: a planned move
+    # here took its own IK goal and wound the upper-arm roll 0.99 -> 2.46 rad (seed 7991002).
+    got = -1
     drv.reset_command()
     servo.hold_rolls_here()
     out, err = _servo_to(env, planner, task, drv, goal, steps=INSERT_MAX_STEPS)
@@ -532,15 +529,6 @@ def close_the_leaf(env, planner, task, *, door, res):
         if common.stopped_by_horizon(planner):
             return res, False
         planner.planner.update_from_simulation()
-    got = _move(env, planner, goal, stage="the fist to the outer face", tries=3)
-    if got == -1:
-        say(env, "MISSED: no plan to the outer face", door_rad=round(leaf.rad(), 3),
-            goal=[round(float(v), 3) for v in goal[:3, 3]])
-        return res, False
-    res = got
-    if common.stopped_by_horizon(planner):
-        return res, False
-    planner.planner.update_from_simulation()
     try:
         servo = _bimbo.HandServo(task, planner)
     except Exception as exc:
@@ -548,6 +536,14 @@ def close_the_leaf(env, planner, task, *, door, res):
         return res, False
     drv = _bimbo._Driver(planner, task, servo, _bimbo._torso(task))
     servo.hold_rolls_here()
+    out, err = _servo_to(env, planner, task, drv, goal, steps=INSERT_MAX_STEPS)   # the stroke up
+    if out is None:
+        return planner._guard.last_step, False
+    res = out
+    if err > 0.03:
+        say(env, "MISSED: the fist did not reach the outer face", door_rad=round(leaf.rad(), 3),
+            err_m=round(err, 3), goal=[round(float(v), 3) for v in goal[:3, 3]])
+        return res, False
     drv.reset_command()
     G0, ref = goal.copy(), float(rad1)
     tcp = _T(task.agent.tcp.pose.sp)[:3, 3]
