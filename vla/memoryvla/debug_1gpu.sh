@@ -56,7 +56,11 @@ if [ -n "${WAIT_CMD:-}" ]; then
   say "waiting for: $WAIT_CMD"; until eval "$WAIT_CMD"; do sleep 60; done
 fi
 
-if [ -z "$(stats_file)" ]; then
+RUN=$W/runs/${TASK}_bounds--image_aug
+if [ -z "$(ls "$RUN/checkpoints/"*.pt 2>/dev/null)" ]; then
+  # The cache file's name hashes the dataset path, so a stale file from another path or run
+  # could be edited while training computes and loads a fresh one: start from none.
+  find "$W/rlds/fetch_$TASK/" -name 'dataset_statistics_*.json' -delete 2>/dev/null
   say "stats: first launch until the statistics file exists (log $LOGS/stats.log)"
   # setsid: the launch gets its own process group, which is stopped as a whole below.
   setsid bash -c "$(declare -f train); REPO='$REPO' TASK='$TASK' W='$W' LR='$LR' CKPT='$CKPT' TORCHRUN='$TORCHRUN' train stats 1000000 '$BS'" \
@@ -66,14 +70,20 @@ if [ -z "$(stats_file)" ]; then
   sleep 10; kill -TERM -- "-$STATS_PID" 2>/dev/null; sleep 30; kill -KILL -- "-$STATS_PID" 2>/dev/null
   rm -rf "$W/runs/stats--image_aug"
   [ -n "$(stats_file)" ] || { say "stats: FAILED"; tail -n 30 "$LOGS/stats.log" >> "$REPORT"; exit 1; }
-fi
-"$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$(stats_file)" --check > /dev/null 2>&1 \
-  || "$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$(stats_file)" | tee -a "$REPORT"
-
-RUN=$W/runs/${TASK}_bounds--image_aug
-if [ -z "$(ls "$RUN/checkpoints/"*.pt 2>/dev/null)" ]; then
+  [ "$(find "$W/rlds/fetch_$TASK/" -name 'dataset_statistics_*.json' | wc -l)" -eq 1 ] \
+    || { say "stats: expected exactly one statistics file"; exit 1; }
+  "$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$(stats_file)" | tee -a "$REPORT"
   say "train: ${TASK}_bounds (log $LOGS/train.log)"
-  (train "${TASK}_bounds" "$STEPS" "$BS" "$SAVE_EVERY") > "$LOGS/train.log" 2>&1
+  setsid bash -c "$(declare -f train); REPO='$REPO' TASK='$TASK' W='$W' LR='$LR' CKPT='$CKPT' TORCHRUN='$TORCHRUN' train '${TASK}_bounds' '$STEPS' '$BS' '$SAVE_EVERY'" \
+     > "$LOGS/train.log" 2>&1 &
+  TRAIN_PID=$!
+  # The run writes the statistics it trains with into its run dir at start: stop at once if
+  # they are not ours.
+  for _ in $(seq 1 120); do [ -f "$RUN/dataset_statistics.json" ] && break; kill -0 "$TRAIN_PID" 2>/dev/null || break; sleep 15; done
+  if ! "$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$RUN/dataset_statistics.json" --check > /dev/null 2>&1; then
+    kill -TERM -- "-$TRAIN_PID" 2>/dev/null; say "train: STOPPED, the run's statistics are not the edited ones"; exit 1
+  fi
+  wait "$TRAIN_PID"
   if [ -z "$(ls "$RUN/checkpoints/"*.pt 2>/dev/null)" ] && grep -qi "out of memory" "$LOGS/train.log"; then
     say "train: out of GPU memory at batch $BS; retrying at batch 16"; rm -rf "$RUN"
     (train "${TASK}_bounds" "$STEPS" 16) > "$LOGS/train.log" 2>&1
