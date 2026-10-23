@@ -2236,12 +2236,21 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
 
     # Release on the next policy tick, before withdrawing. Returning home with a
     # fist would disclose which compartments have already been inspected.
-    if physical_close:
-        res = planner.open_gripper()
+    # MIKASA_CLOSE_RETREAT_FIST=1: withdraw with the fist first and open after (the fingers
+    # opened at the panel can close round its bar, and the withdrawal then pulls the leaf).
+    fist_first = physical_close and os.environ.get("MIKASA_CLOSE_RETREAT_FIST", "0") == "1"
+
+    def release(when: str):
+        r = planner.open_gripper()
+        say(env, f"released closed panel {when}", gripper="open",
+            door_rad=round(door_rad_now(task, door), 3))
+        planner.planner.update_from_simulation()
+        return r
+
+    if physical_close and not fist_first:
+        res = release("before retreat")
         if common.stopped_by_horizon(planner):
             return res
-        say(env, "released closed panel before retreat", gripper="open")
-        planner.planner.update_from_simulation()
 
     # Retreat the open hand so the closure dwell reads a free door.
     tcp = task.agent.tcp.pose.sp
@@ -2259,10 +2268,14 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         with common.contact_stroke(planner, [door.stem]):
             back = common.arm_move(env, planner, retreat, who=WHO,
                                    stage="retreat off the panel (from contact)", tries=2)
+    say(env, "retreated off the panel", ok=back != -1, door_rad=round(door_rad_now(task, door), 3))
     if back != -1:
         res = back
         if common.stopped_by_horizon(planner):
             return res
+    if fist_first:
+        r = release("after retreat")
+        res = r if r != -1 else res
     return res
 
 
