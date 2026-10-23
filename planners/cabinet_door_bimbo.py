@@ -86,16 +86,17 @@ HAND_TURN = _f("MIKASA_BD_HAND_TURN", 0.0)
 """Fraction of the door's turn the hand's yaw follows (BIMBO: 1; see the module docstring)."""
 SWING_MAX_STEPS = int(_f("MIKASA_BD_SWING_MAX_STEPS", 600))
 LEAF_CONTACT_N = _f("MIKASA_BD_LEAF_CONTACT_N", 1.0)
-LEAF_CONTACT_STEPS = int(_f("MIKASA_BD_LEAF_CONTACT_STEPS", 2))
-LEAF_CONTACT_FROM = _f("MIKASA_BD_LEAF_CONTACT_FROM", 0.6)
-"""The swing ends where the leaf meets the hand: the hand (`gripper_link`) pressing the leaf with
-more than LEAF_CONTACT_N newtons for LEAF_CONTACT_STEPS controls in a row, once the leaf has
-covered LEAF_CONTACT_FROM of the way (the hand may touch the face at the grasp). With HAND_TURN 0
-the hand keeps its world orientation while the leaf turns ~100 deg, and the bar turns freely in
-the weld, so near the end the face comes round onto the hand. Since assisted grasp keeps the hand
-colliding (2026-10-23) the leaf stops there, ~1.69-1.71 rad, and without this the swing pressed
-it for its whole 60-control stall window (seven of seven openings, seeds 7880000-7880793). Under
-the pre-fix drives the hand passed through the leaf and this never fires."""
+LEAF_STOP_STEPS = int(_f("MIKASA_BD_LEAF_STOP_STEPS", 8))
+LEAF_STOP_EPS = _f("MIKASA_BD_LEAF_STOP_EPS", 0.005)
+"""The swing ends where the leaf stops against the hand: the hand (`gripper_link`) pressing the
+leaf with more than LEAF_CONTACT_N newtons while the leaf moved less than LEAF_STOP_EPS rad over
+the last LEAF_STOP_STEPS controls. With HAND_TURN 0 the hand keeps its world orientation while the
+leaf turns ~100 deg and the bar turns freely in the weld, so the face comes round onto the hand.
+Since assisted grasp keeps the hand colliding (2026-10-23) the face touches it from ~1.0 rad and
+slides along it to ~1.69-1.71 rad, where it stops; without this rule the swing then pressed it for
+its whole 60-control stall window (seven of seven openings, seeds 7880000-7880793). Stopping at the
+first touch instead left the leaf at ~1.0 rad and lost the round (4/4, measured). Under the
+pre-fix drives the hand passed through the leaf and this never fires."""
 STALL_STEPS = 60
 STALL_EPS = 0.01
 "Less door travel than STALL_EPS over STALL_STEPS controls is a stall."
@@ -449,7 +450,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
     than LEAD_MAX ahead of the measured leaf; the hand is servoed to the grasp frame carried to
     `sw` (`door_frames`, its yaw turned by HAND_TURN of the door's); the base creeps so the goal
     stands at a lever going from `lever_a` to `lever_b` by LEVER_LEAD_FRAC of the way, then
-    settles there. Stops on the target, the leaf pressing the hand (LEAF_CONTACT_*), an empty
+    settles there. Stops on the target, the leaf stopped against the hand (LEAF_*), an empty
     hand, a stall, or SWING_MAX_STEPS.
 
     Returns `(res, reason, goal)`; `res` is None when the horizon struck (the caller returns
@@ -517,9 +518,9 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
         press = float(np.linalg.norm(_np(task.scene.get_pairwise_contact_forces(hand_link, leaf))
                                      .reshape(-1, 3), axis=1).max())
         press_max = max(press_max, press)
-        far = direction * (float(crp.door_rad_now(task, door)) - start) >= LEAF_CONTACT_FROM * span
-        pressed = pressed + 1 if (far and press > LEAF_CONTACT_N) else 0
-        if pressed >= LEAF_CONTACT_STEPS:
+        pressed = pressed + 1 if press > LEAF_CONTACT_N else 0
+        if (pressed >= LEAF_STOP_STEPS and len(hist) > LEAF_STOP_STEPS
+                and direction * (hist[-1] - hist[-1 - LEAF_STOP_STEPS]) < LEAF_STOP_EPS):
             reason = "hand-on-leaf"
             break
         if i % 10 == 0:
