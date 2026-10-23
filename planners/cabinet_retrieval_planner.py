@@ -447,8 +447,9 @@ the recording, not a new plan, and it is also what gives the fingers their closi
 steps: 40 steps is 2 s, an order more than the arm needs from 70 mm out."""
 CLOSE_MAX_STEPS = 500
 "W15 measured 293 steps for the full 1.5-rad close, plus ~70% margin."
-CLOSE_BASE_BACK_M = 0.20
-"Metres the base backs off a pushed-shut leaf when the arm cannot withdraw from it."
+CLOSE_BASE_BACK_M = 0.35
+"""Metres the base backs off a pushed-shut leaf when the arm cannot withdraw from it: past the
+closure's hand_far_m (0.25 m from the bar), which 0.20 did not clear."""
 CLOSE_MARGIN_RAD = 0.03
 """Stop the push this far BELOW door_closed_rad: the verdict reads the hinge
 after the fist retreats, and W15's stop-at-threshold left only 1 mrad of
@@ -2236,29 +2237,21 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
     say(env, "door pushed", rad=round(door_rad_now(task, door), 3))
     LAST_PUSH["pushed"] = float(door_rad_now(task, door))
 
-    # Release on the next policy tick, before withdrawing. Returning home with a
-    # fist would disclose which compartments have already been inspected.
-    if physical_close:
-        res = planner.open_gripper()
-        if common.stopped_by_horizon(planner):
-            return res
-        say(env, "released closed panel before retreat", gripper="open",
-            door_rad=round(door_rad_now(task, door), 3))
-        planner.planner.update_from_simulation()
-
-    # Retreat the open hand so the closure dwell reads a free door.
+    # Withdraw, then release: returning home with a fist would disclose which compartments
+    # have already been inspected. A physical close withdraws with the FIST and opens only when
+    # away: fingers opened at the panel stand either side of its bar, and with the hand colliding
+    # with the leaves again (2026-10-23) any withdrawal then pulled the leaf open by the bar
+    # (0.38-0.42 rad, seeds 7880000 and 7880793).
     tcp = task.agent.tcp.pose.sp
     back = common.arm_move(env, planner,
                            sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -.30 if physical_close else -.15]),
                            who=WHO, stage="retreat off the panel", tries=2)
     if back == -1 and physical_close:
         # The push can leave the arm at a joint limit, from which no straight withdrawal and no
-        # IK exist ("joint limit at index [7]"; seeds 7880000, 7880608, 7880793 once the hand
-        # collides with the leaves, 2026-10-23). The closing correction then drove the base off
-        # with the open hand still on the leaf and dragged it open (0.5-0.64 rad). Back the base
-        # straight off instead, the arm held where it is: no plan, so no limit to meet. (An RRT
-        # retreat with the cabinet out of the planning world was tried and swept the hand into
-        # the leaf: 0.44-0.50 rad.)
+        # IK exist ("joint limit at index [7]"; seeds 7880000, 7880608, 7880793). Back the base
+        # straight off instead, the arm held where it is: no plan, so no limit to meet, and far
+        # enough to clear the closure's hand_far_m (0.25 m from the bar). An RRT retreat with the
+        # cabinet out of the planning world was tried and swept the hand into the leaf.
         say(env, "retreat off the panel: the arm cannot withdraw; back the base off",
             back_m=CLOSE_BASE_BACK_M)
         back = planner.drive_straight(-CLOSE_BASE_BACK_M, v=0.10, hold_pose=True)
@@ -2268,6 +2261,14 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         res = back
         if common.stopped_by_horizon(planner):
             return res
+    if physical_close:
+        r = planner.open_gripper()
+        res = r if r != -1 else res
+        if common.stopped_by_horizon(planner):
+            return res
+        say(env, "released the fist off the closed panel", gripper="open",
+            door_rad=round(door_rad_now(task, door), 3))
+        planner.planner.update_from_simulation()
     return res
 
 
