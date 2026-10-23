@@ -2245,9 +2245,20 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
 
     # Retreat the open hand so the closure dwell reads a free door.
     tcp = task.agent.tcp.pose.sp
-    back = common.arm_move(env, planner,
-                           sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -.30 if physical_close else -.15]),
-                           who=WHO, stage="retreat off the panel", tries=2)
+    retreat = sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -.30 if physical_close else -.15])
+    back = common.arm_move(env, planner, retreat, who=WHO, stage="retreat off the panel", tries=2)
+    if back == -1:
+        # The hand rests on the panel it has just pushed shut. Since assisted grasp keeps the
+        # hand colliding with the leaves (2026-10-23) the planning world reads that start as a
+        # collision and refuses, and the closing correction then drove the base away with the
+        # hand still on the leaf and dragged it open again (0.64 rad; seeds 7880000, 7880608,
+        # 7880793). Back straight off along the approach with that cabinet out of the planning
+        # world, as the stroke came in.
+        say(env, "retreat off the panel: from contact, the cabinet out of the planning world")
+        planner.planner.update_from_simulation()
+        with common.contact_stroke(planner, [door.stem]):
+            back = common.arm_move(env, planner, retreat, who=WHO,
+                                   stage="retreat off the panel (from contact)", tries=2)
     if back != -1:
         res = back
         if common.stopped_by_horizon(planner):
