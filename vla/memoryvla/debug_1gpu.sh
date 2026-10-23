@@ -19,6 +19,7 @@ set -uo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=${1:-$HOME/mvla-debug}
 TASK=${TASK:-depthrecall}; EPISODES=${EPISODES:-40}; STEPS=${STEPS:-2500}; LR=${LR:-1e-4}; BS=${BS:-32}
+SAVE_EVERY=${SAVE_EVERY:-$STEPS}   # checkpoints are 32 GB each
 HELD_OUT=${HELD_OUT:-990,991,992,993,994}
 DATA_ROOT=${DATA_ROOT:-$HOME/datasets/memer}
 PY=$HOME/envs/memvla/bin/python; TORCHRUN=$HOME/envs/memvla/bin/torchrun
@@ -36,7 +37,7 @@ train() {  # train RUN_ID MAX_STEPS BATCH -> runs in its own process group
     --vla.expected_world_size 1 --vla.per_device_batch_size "$3" --vla.global_batch_size "$3" \
     --vla.learning_rate "$LR" --vla.max_steps "$2" --vla.freeze_vision_backbone True \
     --vla.freeze_llm_backbone True --vla.shuffle_buffer_size 1000 --data_root_dir "$W/rlds" \
-    --run_root_dir "$W/runs" --run_id "$1" --image_aug True --save_interval "$2" \
+    --run_root_dir "$W/runs" --run_id "$1" --image_aug True --save_interval "${4:-$2}" \
     --repeated_diffusion_steps 4 --future_action_window_size 3 --action_model_type DiT-L \
     --dataloader_type stream --mem_length 256 --is_resume False --hf_token HF_TOKEN --trackers '["jsonl"]' \
     --action_dim 13 --load_bi_wrist True
@@ -72,7 +73,7 @@ fi
 RUN=$W/runs/${TASK}_bounds--image_aug
 if [ -z "$(ls "$RUN/checkpoints/"*.pt 2>/dev/null)" ]; then
   say "train: ${TASK}_bounds (log $LOGS/train.log)"
-  (train "${TASK}_bounds" "$STEPS" "$BS") > "$LOGS/train.log" 2>&1
+  (train "${TASK}_bounds" "$STEPS" "$BS" "$SAVE_EVERY") > "$LOGS/train.log" 2>&1
   if [ -z "$(ls "$RUN/checkpoints/"*.pt 2>/dev/null)" ] && grep -qi "out of memory" "$LOGS/train.log"; then
     say "train: out of GPU memory at batch $BS; retrying at batch 16"; rm -rf "$RUN"
     (train "${TASK}_bounds" "$STEPS" 16) > "$LOGS/train.log" 2>&1

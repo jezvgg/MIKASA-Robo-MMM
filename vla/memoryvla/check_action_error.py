@@ -78,6 +78,7 @@ def main() -> None:
     ap.add_argument("unnorm_key")
     ap.add_argument("--episodes", default="990,991,992,993,994")
     ap.add_argument("--every", type=int, default=4)
+    ap.add_argument("--checkpoint", type=Path, help="a .pt in <run dir>/checkpoints; default the last")
     ap.add_argument("--cfg-scale", type=float, default=1.5, help="deploy.py default 1.5; 1.0 disables CFG")
     ap.add_argument("--ddim-steps", type=int, default=10)
     ap.add_argument("--absolute-joints", dest="joint_deltas", action="store_false",
@@ -85,7 +86,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path)
     args = ap.parse_args()
 
-    ckpt = sorted((args.run_dir / "checkpoints").glob("*.pt"))[-1]
+    ckpt = args.checkpoint or sorted((args.run_dir / "checkpoints").glob("*.pt"))[-1]
     cfg = json.loads((args.run_dir / "config.json").read_text())
     arch = ("action_dim", "future_action_window_size", "action_model_type", "use_ema", "mem_length",
             "load_wrist", "load_bi_wrist", "consolidate_type", "fusion_type", "per_token_size",
