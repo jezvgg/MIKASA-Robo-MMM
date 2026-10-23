@@ -94,6 +94,19 @@ def _report():
           f"steps_press_gt20n={int((f > 20).sum())}", flush=True)
 
 
+if os.environ.get("AGCHECK_RENDER_MODE"):
+    # With --video-dir: record the robot's own cameras (render_mode "sensors") instead of the
+    # third-person render camera that collection_episode.py asks for.
+    import gymnasium
+    _make = gymnasium.make
+
+    def _make_sensors(*args, **kwargs):
+        if kwargs.get("render_mode"):
+            kwargs["render_mode"] = os.environ["AGCHECK_RENDER_MODE"]
+        return _make(*args, **kwargs)
+
+    gymnasium.make = _make_sensors
+
 if __name__ == "__main__":
     import collection_episode
     sys.argv = ["collection_episode.py"] + sys.argv[1:]

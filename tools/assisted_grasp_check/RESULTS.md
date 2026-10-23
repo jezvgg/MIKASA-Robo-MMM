@@ -117,3 +117,15 @@ the failure class of the whole assisted-grasp collection (~20 % of its seeds).
 Open: in the second half of every swing the leaf slides along the hand with up to ~200 N (85-100
 controls above 20 N per swing). The task succeeds, but no real arm presses like that; a partial
 `HAND_TURN` (the hand's yaw following part of the leaf's turn) is the way to remove it.
+
+**Correction to the counts above: one of the 14 "successes" knocks the can over.** Seed 7880257
+(episode 200) ends `success` in both runs with the swing fix, but the can is never pushed: while
+the arm is readied for the touch (`raise the torso` / `level the hand for the touch`, joint lines,
+steps ~780-805) the hand strikes the can and lays it on its side, then every pre-touch plan is
+refused and the planner books `MISSED: the cube was not nudged`; the env still reports success. The
+collection's can-early gate (cube xy <= 0.01 m and tilt <= 20 deg until the push starts) would
+reject it, so the acceptable count is 13/15 (the other 13 push the can 6-8 cm as designed). Before
+the fix the same seed pushed the can: the swing now ends earlier, the stance after it differs, and
+the readying path that followed reaches the can, which the hand now cannot pass through. To fix
+in the planner: check the readying joint lines against the can (or raise and level the hand before
+the hand is inside the compartment).
