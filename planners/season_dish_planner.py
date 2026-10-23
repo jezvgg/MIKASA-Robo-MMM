@@ -35,7 +35,6 @@ from mani_skill.utils.wrappers import RecordEpisode
 from planners.oracle import oracle_common as common
 from planners.oracle import stance_scan
 from planners.season_dish_stance import choose_station_stance
-from planners.oracle.wrist_pour_prepare import prepare_for_wrist_pour
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
 from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase

@@ -15,7 +15,11 @@ def test_moving_push_keeps_enclosing_hand_allowance():
     import my_scenes  # noqa: F401
     from mplib.pymp.collision_detection import AllowedCollision
     from my_scenes.same_drawer import DRAWER_ART_SUFFIX, DRAWER_FIXTURES
-    from planners import same_drawer_approach as approach
+    from planners.same_drawer_planner import (
+        _hand_pairs,
+        hand_contact,
+        moving_drawer_push,
+    )
     from planners.oracle import oracle_common as common
 
     env = gym.make("MikasaSameDrawer-v0", scene_idx=0, sim_backend="cpu",
@@ -28,12 +32,12 @@ def test_moving_push_keeps_enclosing_hand_allowance():
         planner.planner.update_from_simulation()
 
         def entries():
-            acm, pairs = approach._hand_pairs(planner, 0)
+            acm, pairs = _hand_pairs(planner, 0)
             assert pairs
             return {acm.get_entry(a, b) for a, b in pairs}
 
         before = entries()
-        with approach.hand_contact(planner, task, 0):
+        with hand_contact(planner, task, 0):
             with common.contact_stroke(planner, [DRAWER_FIXTURES[0] + DRAWER_ART_SUFFIX]):
                 pass
             # Documents the mplib behaviour the preview must compensate for.
@@ -43,8 +47,8 @@ def test_moving_push_keeps_enclosing_hand_allowance():
         current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
         tcp = task.agent.tcp.pose[0].sp
         push = sapien.Pose(tcp.p + [0, .02, 0], tcp.q)
-        with approach.hand_contact(planner, task, 0):
-            approach.moving_drawer_push(planner, task, current, push, 0)
+        with hand_contact(planner, task, 0):
+            moving_drawer_push(planner, task, current, push, 0)
             assert entries() == {AllowedCollision.ALWAYS}
         assert entries() == before
         assert np.allclose(task.agent.robot.get_qpos()[0].cpu().numpy(), current)

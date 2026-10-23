@@ -241,52 +241,29 @@ crosses now first lower the HAND under the shoulder (extraction: 0, 10, 20 cm be
 carry height; restore: 25-35 cm over the counter, under the closed left door and over the
 standing props); the torso rungs remain as fallbacks.
 
-**Perception mode** reads the pads' colours from the head cameras after the row is
-calibrated (majority hue of the flat band over the counter within 3.5 cm of each slot;
-all four colours must be read once), and closes the gripper only when the prop's own
-points lie between the finger pads over its height (`PropBelief.between_pads`, BIMBO's
-rays-between-pads rule; the band at the pads' own height is hidden from every camera by
-the hand itself, measured on seed 1000).
-
-**First runs** (H100 tree 42ce525 under a full machine): seeds 1000-1003 in both modes
-**8/8**, every prop on its own pad, max tilt 0.1 deg, 3582-3815 steps; pads read right
-4/4; all 28 between-pads checks passed with 218-622 points.
-
 **100 development seeds (1000-1099).** The first sweep (42ce525) gave 97/100 by state and
-79/100 by camera, and showed two defects, both fixed (`68c5f27`):
+showed two defects, both fixed (`68c5f27`):
 
-- after a counter placement the hand rises 6 cm, 7 mm above the released prop's top; a
-  camera estimate is off by more, so the torso raise was refused at knot 0 (13 camera
-  episodes). The raise right after a release now leaves the released prop out of the
-  check: it lifts the hand straight up, away from it;
+- after a counter placement the hand rises 6 cm, 7 mm above the released prop's top. The
+  raise right after a release now leaves the released prop out of the check: it lifts the
+  hand straight up, away from it;
 - the restore's cross ended ~9 cm past the pads' line after a row placement, and the
   grasp posture then passed over the prop, pushing it 7-12 cm or tipping it (4 state
-  episodes, and most of the camera grasp-fit refusals). The cross now ends 15 cm in
-  front of the prop.
+  episodes). The cross now ends 15 cm in front of the prop.
 
-With the fixes (H100, tree `68c5f27`):
+With the fixes (H100, tree `68c5f27`): state **100/100** (Wilson 95 % 0.963-1), steps
+p50 3712 / p90 3774 / max 3969, 0 knocked over, 0 close misses.
 
-| mode | success | steps p50 / p90 / max | notes |
-|---|---|---|---|
-| state | **100/100** (Wilson 95 % 0.963-1) | 3712 / 3774 / 3969 | 0 knocked over, 0 close misses |
-| pointcloud | **100/100** (0.963-1) | 3806 / 3956 / 4221 | pads read right 100/100; between-pads checks 700/700 passed (195-624 points); wrist fits 700/700, error p95 2.3 mm |
+Every final arrangement had the target on its own pad (100/100) and no prop ever stood
+on another colour's pad. The longest episode, 3969 steps, is inside the 5700-step horizon.
 
-Every final arrangement had the target on its own pad (200/200) and no prop ever stood
-on another colour's pad. The between-pads check never had to refuse a close in these
-200 episodes: it is a guard against closing on air, not a source of the success rate.
-The longest episode, 4221 steps, is inside the 5700-step horizon.
-
-Same tree, more seeds and modes:
+Same tree, more seeds:
 
 | run | success | notes |
 |---|---|---|
 | fresh seeds 3000-3199, state | **200/200** (0.981-1) | steps p50 3707, max 3931 |
-| fresh seeds 3000-3199, pointcloud | **199/200** (0.972-0.999) | pads read right 199/199; between-pads 1393/1393; the miss is seed 3011: the measured row shift (10.4 mm) was just over `REDOCK_MIN_M`, and `drive_base` turned the base for a 1 cm sideways re-dock, which the open right door refused (forearm) |
 | seeds 1000-1099, state + assisted grasp | **100/100** | welds 7/7 in every episode |
-| seeds 1000-1099, pointcloud + assisted grasp | **100/100** | welds 7/7; wrist fits 700/700 |
 | seeds 1000-1099, state, cuRobo IK (shared server, no jump filter) | **100/100** | 6302 cuRobo calls over 200 episodes |
-| seeds 1000-1099, pointcloud, cuRobo IK | **100/100** | wall p50 343 s vs 380 s with mplib, same machine load class |
-| validation seeds 200000-200099, all four modes | **400/400** | pads read right 200/200; between-pads 1400/1400; welds 7/7 in all 200 AG episodes; steps max 4238 |
 | seeds 1000-1099, state, **blind** restore | 18/100 (Wilson 0.12-0.27) | the 1/6 guessing reference is 0.167: the pads carry no row order |
 
 Against the previous version on the same 100 seeds the episodes are 1.4 % longer in
@@ -295,14 +272,11 @@ wall clock is ~30 % longer, which is planning, not motion: ~4.8 refused rungs pe
 episode (the far pad's first extraction rung always, the restore's hand-height rungs for
 near pads) before the one that plans.
 
-**`db43115`: rungs ordered by distance, refused re-dock survivable.** Far pads (more than
-45 cm west of the base) start both crosses with the hand-under-the-shoulder rungs, nearer
-ones with the torso rungs; a re-dock refused for a shift up to 2 cm works from the first
-dock. Seeds 1000-1052 by state **53/53**, 1000-1049 by camera **50/50** (the sweep was
-stopped there, on the owner's word, to free the machine); refused IK attempts per episode
-**0.00** (4.7 on the same seeds before); steps p50 3734 / 3879 (3716 / 3834 before: the
-near pads' torso rung adds a short ride). Seed 3011 by camera, the one miss of the 200
-fresh seeds, now succeeds through the re-dock fallback.
+**`db43115`: rungs ordered by distance.** Far pads (more than 45 cm west of the base)
+start both crosses with the hand-under-the-shoulder rungs, nearer ones with the torso
+rungs. Seeds 1000-1052 by state **53/53** (the sweep was stopped there, on the owner's
+word, to free the machine); refused IK attempts per episode **0.00** (4.7 on the same
+seeds before); steps p50 3734 (3716 before: the near pads' torso rung adds a short ride).
 
 ## Assisted grasp (experimental, off by default)
 
@@ -352,74 +326,6 @@ Seven welds per episode are the planner's seven grasps (four extractions, three
 restores); each forms 0.3 s after the fingers close and goes when they open. On this
 task, where friction already holds the 4.5 cm props, the weld neither helps nor hurts
 the oracle.
-
-## Point-cloud perception (experimental, off by default)
-
-`planners/depth_recall_v1_planner.py --perception pointcloud` (or
-`solve(..., perception="pointcloud")`) makes every prop pose the planner acts on an
-estimate from the robot's own cameras, the way BIMBO_EvoX's observation-only planners
-work (`utils/mikasa/point_cloud.py`, `planners/depth_recall_v1_perception.py`):
-
-1. Depth of the two base cameras and the wrist camera is back-projected into the world;
-   points inside the robot's link collision boxes (and the carried prop) are cut out.
-2. Row and counter slot points come from the static map (the cabinet's row centre, the
-   configured slot y's and offsets, shelf and counter heights). The episode shifts the
-   whole row sideways by up to 4 cm (`row_jitter_x`), which no image observation states:
-   the first look from the dock measures that shift (median x of the accepted fits),
-   the base re-docks on the measured row when it is more than 1 cm off, and every row
-   and counter point after it carries the measured x.
-3. A height band over the support within 10 cm of a slot point is clustered on a 2 cm
-   voxel grid; a cluster is named by hue — colour is the prop's identity in this task by
-   design.
-4. A 1500-point model of the prop is fitted by trimmed planar ICP from a 15° yaw grid,
-   started at the cluster's x and the slot's y on the shelf (the cameras look along y, so
-   the seen face's x is the prop's), at the slot point on the counter (where the planner
-   itself put the prop), and accepted only with inliers (8 mm) >= 0.55, RMS <= 1.2 cm and
-   no more than 30 % of the model "seen through" by a camera. A cluster too small to fit
-   keeps that start point as a coarse estimate.
-5. From the dock the base cameras pick the front-most prop and remember the row slot it
-   was seen in; that memory, not the episode's answer, drives the restore. A prop seen
-   behind an unseen front one stops the episode rather than driving into the front one.
-6. At the stand each grasp is made from, the wrist camera re-fits the prop (every rung of
-   the grasp ladder), and the grasp goes ahead only if THAT look accepts a fit — an older
-   estimate is exactly what a missed close may have made wrong. After the grasp the
-   prop's pose is the hand's pose times the transform frozen at the grasp.
-
-7. The planning world is the belief's, BIMBO_EvoX's fair rule (an offline map of the
-   static scene plus the objects as seen): mplib keeps the fixtures and the robot, but
-   after every sync each prop stands where perception put it (one not seen yet is
-   parked out of reach), and a held prop is attached at the transform frozen at the
-   grasp, never re-read from the simulator.
-8. Holding is felt: the gripper commanded shut and both finger encoders stopped apart,
-   not contact forces.
-
-Still read from the simulator in this mode: the static scene map (fixtures, their
-footprints and heights, the props' known size). Every perception step logs its fit and,
-for the log only, its error against the true pose; the row shift logs its error against
-the episode's row x.
-
-Measured 2026-10-15 on an H100 server (GPU rendering, CPU physics), development seeds
-1000–1099, the same planner in three modes:
-
-| prop poses from | success (95 % interval) | control steps (median) |
-|---|---|---|
-| simulator (`state`) | 100/100 (96–100 %) | 3662 |
-| cameras (`pointcloud`) | 100/100 (96–100 %) | 3766 |
-| cameras + `--assisted-grasp` | 100/100 (96–100 %) | 3769 |
-
-The row's sideways shift measured at the dock, against the episode's: error median
-0.4 mm, 95th percentile 4.2 mm, worst 10.6 mm, for shifts up to 4 cm. Wrist-camera
-re-fits before a grasp: 700 of 700 accepted in both camera modes; position error against
-the true pose median 1.0 mm, 95th percentile 2.3 mm, worst 3.6 mm; yaw error median 1.0°,
-worst 7.0°. The camera modes run ~100 steps longer: the re-dock and the extra looks.
-
-The joint lines the planner executes are collision-checked every 0.01 rad
-(`READY_LINE_STEP`). At `plan_qpos_line`'s default 0.1 rad, up to ~8 cm of hand travel on
-an outstretched arm, two camera-mode episodes (seeds 1070, 1092) ran a line that put a
-finger through the counter prop it was reaching for; the prop fell over and the wrist
-camera then refused, rightly, to fit an upright prop to a lying one (traced by replaying
-both seeds with every accepted line re-checked at 0.01 rad). With the dense check all
-four modes pass 100/100.
 
 ## RoboCasa props: spices and sauces (2026-10-16)
 
@@ -480,39 +386,20 @@ from it and no contact of either with it was reported. The 243 g boxes never sho
   hand 4.6 cm onto the prop just released (a 15.8 g shaker slid 4 cm out of its slot).
 - The carry-out uses the prop's own half-width.
 
-**Perception** (`depth_recall_v1_perception.py`, `utils/mikasa/point_cloud.py`):
-
-- the fit model is each prop's own collision mesh: `mesh_model` samples the outer surface
-  of its convex parts (faces inside or on another part dropped), fitted at the prop's own
-  rest height over a full turn of yaw (30° grid); the perceived mesh the planner reads
-  bounds from is the prop's own mesh at the believed pose; the carried prop's cut box is
-  its mesh bounds;
-- colour signatures (`PROP_HUES`) measured on the task's own renders from the three robot
-  cameras (seeds 1000-1004, segmented pixels, props in the row and on their pads): hues
-  0.0 / 120.0 / 224.5 / 55.3°, 99th-percentile spread <= 1.4°; the materials' own hues
-  are 0 / 120 / 229 / 51 — the renderer moves blue and yellow by 4-5°. Bands are 10°;
-  saturation >= 0.35, value >= 0.12 as before. The pads measured the same hues, so
-  `identify_pads` reads them with the same palette. BIMBO's acceptance thresholds
-  (inliers 0.55 at 8 mm, RMS 1.2 cm, see-through 0.3) are unchanged: first-look fits of
-  the row read RMS 1.5-2.6 mm, inliers 1.0, see-through 0.03-0.21, errors 0.2-1.9 mm.
-
 **Tests** (H100, `run_tests.sh`): 68 passed — the evaluation tests with per-prop
 heights (and two new: a prop judged at another prop's height, a lying shaker), validate
-refusing a prop too wide or too short, the measured hue bands, the mesh models against the
-meshes, the lift ladder, the contact offset.
+refusing a prop too wide or too short, the lift ladder, the contact offset.
 
-**Measured** (H100, GPU rendering, CPU physics, tree `9c5ab71`, `sweep100.sh` with
-`MODES="state pointcloud"`, seeds 1000-1009, mplib's random IK restarts as in every
-sweep above):
+**Measured** (H100, GPU rendering, CPU physics, tree `9c5ab71`, `sweep100.sh`, seeds
+1000-1009, mplib's random IK restarts as in every sweep above):
 
-| mode | success | steps min / median / max | notes |
-|---|---|---|---|
-| state | **10/10** | 3595 / 3629 / 3700 | final tilt <= 0.2° in every episode |
-| pointcloud | **10/10** | 3530 / 3725 / 3859 | pads read right 10/10; between-pads checks 70/70 (31-457 points); wrist fits 70/70, error median 0.75 mm, p95 1.6 mm, worst 1.8 mm; row shift error <= 0.2 mm |
+| success | steps min / median / max | notes |
+|---|---|---|
+| **10/10** | 3595 / 3629 / 3700 | final tilt <= 0.2° in every episode |
 
-A prop leans in the fingers right after the grasp, median 0.7°, worst 6.1° (state) /
-7.8° (camera): flat pads hold a round prop on a line (a tapered shaker on a point), not on
-a face as they held the boxes. Ten seeds are a small sample, and with random IK restarts
+A prop leans in the fingers right after the grasp, median 0.7°, worst 6.1°: flat pads
+hold a round prop on a line (a tapered shaker on a point), not on a face as they held the
+boxes. Ten seeds are a small sample, and with random IK restarts
 a seed is not a repeatable outcome: before the contact offset was fixed, the same code
 and seed failed in one run and passed in the next. During development (seeds 1000-1009,
 40 episodes per configuration, same planner): contact offset 2 cm 36/40, 5 mm 39/40.

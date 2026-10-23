@@ -229,12 +229,7 @@ The first version walked up to the cross 20 cm above the pad with the torso at t
 rung. That is out of reach, so every offset was refused. Measured on seed 1000: both
 branches broke on IK; 10 cm held.
 
-The scene check picked −0.04 in all 40 episodes of the stance arm: 30 in state mode (no
-error, 5 cm, 8 cm) and 10 in pointcloud mode.
-
-In pointcloud mode (seeds 1000–1009, no injected error, re-dock at the measured row on 8 of
-10 seeds) the shipped planner and `--ik-chain --stance-scan` both scored 10/10 with 0
-refused postures, at 3843 vs 3837 mean steps.
+The scene check picked −0.04 in all 30 episodes of the stance arm (no error, 5 cm, 8 cm).
 
 ## 3. Seed 1021: the grasp must leave room for the pour
 

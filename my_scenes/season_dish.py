@@ -36,10 +36,12 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import sapien
 import torch
+from transforms3d.euler import euler2quat
 
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import CameraConfig
@@ -51,9 +53,7 @@ from mani_skill.utils.structs import Actor, Pose
 
 from utils.initial_pose import randomize_initial_joints
 from utils.mikasa.assisted_grasp import AssistedGraspTask
-from my_scenes.season_salad import decorate_bowl
 from utils.fridge_picture import FridgePictures
-from pathlib import Path
 from utils.robocasa_utils import (
     parking_pose,
     counter_frame,
@@ -65,6 +65,42 @@ from utils.robocasa_utils import (
     sample_in_regions,
     usable_counter_regions,
 )
+
+
+# Task-level compact posture and deterministic visual salad decoration.
+ASSETS = Path(__file__).with_name("assets") / "season_salad"
+REFERENCE_COMPACT = {"torso_lift_joint": 0.3, "shoulder_pan_joint": -0.233678, "shoulder_lift_joint": 1.338583, "upperarm_roll_joint": 2.997733, "elbow_flex_joint": 2.2, "forearm_roll_joint": -3.0, "wrist_flex_joint": 0.842681, "wrist_roll_joint": -0.059605}
+
+
+def decorate_bowl(builder):
+    rng = np.random.default_rng(4816)  # Independent of task answers and episode RNG.
+    leaf = str(ASSETS / "leaf.obj")
+    tomato = str(ASSETS / "tomato_wedge.obj")
+    for i in range(22):
+        angle = i * math.pi * (3 - math.sqrt(5))
+        radius = 0.082 * math.sqrt((i + 0.5) / 22)
+        pose = sapien.Pose(
+            [radius * math.cos(angle), radius * math.sin(angle), 0.007 + rng.uniform(-0.004, 0.006)],
+            euler2quat(rng.uniform(-0.3, 0.3), rng.uniform(-0.3, 0.3), angle),
+        )
+        builder.add_visual_from_file(leaf, pose=pose, scale=[0.029, 0.029, 0.029],
+            material=[0.12 + rng.uniform(0, 0.08), 0.35 + rng.uniform(0, 0.16), 0.035, 1.0],
+            name=f"salad_leaf_{i}")
+    for i, (x, y, angle) in enumerate([(-0.05, -0.035, 0.4), (0.04, -0.045, 2.2),
+                                        (0.015, 0.048, 4.1), (-0.025, 0.015, 1.5)]):
+        pose = sapien.Pose([x, y, 0.022], euler2quat(0.2, -0.2, angle))
+        builder.add_visual_from_file(tomato, pose=pose, scale=[0.021, 0.021, 0.018],
+            material=[0.78, 0.055, 0.025, 1.0], name=f"salad_tomato_{i}")
+        for j in range(3):
+            seed = pose * sapien.Pose([0.001, 0.004 + j * 0.004, 0.008 - j * 0.003])
+            builder.add_sphere_visual(pose=seed, radius=0.0013, material=[0.92, 0.72, 0.30, 1.0])
+    for i, (x, y, angle) in enumerate([(-0.055, 0.04, 0.2), (0.062, 0.012, -0.15),
+                                        (0.005, -0.01, 0.1)]):
+        pose = sapien.Pose([x, y, 0.020], euler2quat(0, math.pi / 2 + angle, i))
+        builder.add_cylinder_visual(pose=pose, radius=0.019, half_length=0.003,
+            material=[0.045, 0.25, 0.035, 1.0], name=f"salad_cucumber_rind_{i}")
+        builder.add_cylinder_visual(pose=pose, radius=0.0164, half_length=0.0032,
+            material=[0.64, 0.81, 0.35, 1.0], name=f"salad_cucumber_flesh_{i}")
 
 #: The task text a language-conditioned policy is given (the VLA dataset's `task`).
 #: It names the chore, never the answer: which condiment the dish needs is shown by
@@ -1064,7 +1100,6 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
             return
         q = self.agent.keyframes["rest"].qpos.copy()
         if getattr(self, "motion_parameters", {}).get("compact_initial_and_travel", False):
-            from my_scenes.season_postures import REFERENCE_COMPACT
             for name, value in REFERENCE_COMPACT.items():
                 q[int(self.agent.robot.active_joints_map[name].active_index[0])] = value
         self.agent.robot.set_qpos(q)

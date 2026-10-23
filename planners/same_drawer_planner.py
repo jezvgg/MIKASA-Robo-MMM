@@ -3,6 +3,16 @@
 The drawer answer is read once at reset. Blind evaluation replaces only the final
 choice with an independent uniform guess. Every motion is an IK/RRT waypoint or a
 base velocity command; fixture joints and robot state are never written here.
+
+The bottom entry is one scene-checked curve with no intermediate stop. Fixed
+progress coefficients were fitted once to the successful control free-space
+approach (drawer-final-001 native seed 8000000, steps 7..104). Torso and shoulder
+lift are projected to monotone cubic progress; elbow is linear. Runtime inputs are
+only measured current joints, actual-handle IK endpoint, and scene geometry — no
+lookup of seed-specific endpoint positions.
+
+DrawerPathPlanner reserves wrist travel during the first upper-drawer contact
+without touching physical joint limits or measured roll history.
 """
 from __future__ import annotations
 
@@ -12,20 +22,26 @@ import math
 import os
 
 import gymnasium as gym
+import mplib
+from mplib.pymp.collision_detection import AllowedCollision, fcl
 import numpy as np
 import sapien
 
 import my_scenes  # noqa: F401
+from mani_skill.utils.geometry.trimesh_utils import get_component_mesh
 from my_scenes.same_drawer import DRAWER_ART_SUFFIX, DRAWER_FIXTURES
 from planners.oracle import oracle_common as common
+from planners.oracle.path_clearance import dense_samples
 from planners.oracle.rest_paths import curved_rest
+from planners.oracle.roll_paths import RollPathPlanner
 from planners.oracle.settling import ReleaseSettling
-from planners.oracle.straight_paths import straight_plan, execute_straight
-from planners.same_drawer_paths import DrawerPathPlanner
-from planners.same_drawer_approach import direct_bottom_contact, hand_contact, moving_drawer_push
+from planners.oracle.smooth_base import drive_rounded_route
+from planners.oracle.straight_paths import execute_straight, straight_plan
+from robots.fetch.utils import unwrap_toward
+from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
-from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
+
 
 WHO = "same_drawer_planner"
 REACH_N_INIT = 40
@@ -47,26 +63,261 @@ APPLE_REACH_STARTS = (
 )
 
 
-# Standoff arm medoids of the successful closing approaches of each drawer in
-# profile 17 (drawer-final-004): 7, 10 and 10 episodes. Offered only after every
-# random-restart goal fails the contact-and-push lookahead of that approach.
-DRAWER_CLOSE_STARTS = {
-    1: (("close_drawer1_standoff", dict(
-        shoulder_pan_joint=-1.552237, shoulder_lift_joint=0.182986,
-        upperarm_roll_joint=0.933785, elbow_flex_joint=1.767808,
-        forearm_roll_joint=-0.340111, wrist_flex_joint=0.332939,
-        wrist_roll_joint=-1.778397)),),
-    2: (("close_drawer2_standoff", dict(
-        shoulder_pan_joint=-1.505170, shoulder_lift_joint=0.173107,
-        upperarm_roll_joint=1.640604, elbow_flex_joint=1.706350,
-        forearm_roll_joint=-0.906887, wrist_flex_joint=0.983043,
-        wrist_roll_joint=-0.998324)),),
-    3: (("close_drawer3_standoff", dict(
-        shoulder_pan_joint=-1.377302, shoulder_lift_joint=0.911281,
-        upperarm_roll_joint=2.005231, elbow_flex_joint=1.536953,
-        forearm_roll_joint=-1.068235, wrist_flex_joint=1.170071,
-        wrist_roll_joint=-1.310662)),),
+# Bezier progress control values. q(s)=q0+(q1-q0)*B(0,c1,c2,1;s).
+# Pan's necessary excursion provides clearance around the counter; it is reported,
+# not described as monotone. The other overshoots are bounded by URDF screening.
+PROGRESS = {
+    'torso_lift_joint': (.24356265113691844, 1.0),
+    'shoulder_pan_joint': (.7235411583118544, 3.2484893124565657),
+    'shoulder_lift_joint': (.3711874490030574, 1.0),
+    'upperarm_roll_joint': (.28753258941446025, .47784108658036134),
+    'elbow_flex_joint': (1/3, 2/3),
+    'forearm_roll_joint': (.4352533305624711, 1.5414777951332241),
+    'wrist_flex_joint': (.4142209566172384, 1.3592145964309263),
+    'wrist_roll_joint': (.38528795568215, 1.1441944997639484),
 }
+
+
+class DrawerPathPlanner(RollPathPlanner):
+    """Keep the first push from spending the apple grasp's wrist-roll range.
+
+    This narrows planning candidates and checks complete paths. Physical joint
+    limits and measured roll history stay unchanged, including after release.
+    """
+
+    wrist_budget = 1.45
+
+    def accepts(self, qpos, *, move_group=False):
+        if not super().accepts(qpos, move_group=move_group):
+            return False
+        if not getattr(self._owner, "_drawer_initial_wrist_budget", False):
+            return True
+        index = self._owner._roll_indices[2]
+        if move_group:
+            index = list(self.move_group_joint_indices).index(index)
+        return bool(np.all(np.abs(np.atleast_2d(qpos)[:, index]) <= self.wrist_budget))
+
+    @contextmanager
+    def _limits(self):
+        with super()._limits():
+            if getattr(self._owner, "_drawer_initial_wrist_budget", False):
+                limits = self._planner.joint_limits.copy()
+                index = self._owner._roll_indices[2]
+                limits[index, 0] = max(limits[index, 0], -self.wrist_budget)
+                limits[index, 1] = min(limits[index, 1], self.wrist_budget)
+                self._planner.joint_limits = limits
+            yield
+
+
+@contextmanager
+def hand_contact(planner, task, drawer, *, allowed=True):
+    """Permit intentional hand contact only; keep the forearm and all fixtures."""
+    with _kept_hand_entries(planner, drawer):
+        acm,pairs=_hand_pairs(planner, drawer)
+        for a,b in pairs:
+            acm.set_entry(a,b,allowed)
+        yield
+
+
+def moving_drawer_push(planner, task, current, goal, drawer):
+    """Preview the slider at its proposed position, without changing physics."""
+    p = planner.planner
+    selected = DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX
+    # Re-adding the removed model drops its ACM entries; keep the caller's.
+    with _kept_hand_entries(planner, drawer), common.contact_stroke(planner, [selected]):
+        path = straight_plan(planner, goal, current=current)
+    if path is None:
+        return None
+    world = p.planning_world
+    model = next(world.get_articulation(n) for n in world.get_articulation_names() if selected in n)
+    original = model.get_qpos().copy()
+    pin = p.pinocchio_model
+    ee = p.link_name_2_idx[p.move_group]
+    pin.compute_forward_kinematics(p.fold_qpos(current))
+    y0 = float(pin.get_link_pose(ee).p[1])
+    try:
+        # The drawer moves with the pushing hand, not as a frozen open obstacle.
+        with hand_contact(planner, task, drawer):
+            for knot in dense_samples(path['position']):
+                q = current.copy(); q[p.move_group_joint_indices] = knot
+                folded = p.fold_qpos(q)
+                pin.compute_forward_kinematics(folded)
+                travel = max(0.,float(pin.get_link_pose(ee).p[1])-y0)
+                drawer_q = original.copy(); drawer_q[0] = min(0.,float(original[0])+travel)
+                model.set_qpos(drawer_q, True)
+                p.robot.set_qpos(folded, True)
+                if world.is_state_colliding():
+                    planner._straight_failures.append('moving drawer collision: '+str(
+                        [(c.link_name1,c.link_name2) for c in world.check_collision()]))
+                    return None
+    finally:
+        model.set_qpos(original, True)
+    return path
+
+
+def direct_bottom_contact(planner, task, grasp, push, *, drawer):
+    """One continuous arm/torso curve to contact, with no standoff fallback."""
+    p = planner.planner
+    current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
+    torso = int(task.agent.robot.active_joints_map['torso_lift_joint'].active_index[0])
+    reasons = []; planner._bottom_contact_diagnostics = reasons
+    planner._bottom_path_refusals = []
+    with hand_contact(planner, task, drawer):
+        for height in (.01, .10, None):
+            initial = p.fold_qpos(current).copy()
+            if height is not None:
+                initial[torso] = height
+            status, found = p.IK(
+                p._transform_goal_to_wrt_base(mplib.Pose(grasp.p, grasp.q)), initial,
+                [True]*3 + [height is not None] + [False]*11, n_init_qpos=40)
+            reasons.append(dict(stage='contact_ik', torso=height, status=status))
+            if status != 'Success':
+                continue
+            goals = [p.unfold_qpos(unwrap_toward(q, initial, p.joint_limits),
+                                  ref_yaw=float(current[2])) for q in np.atleast_2d(found)]
+            goals.sort(key=lambda q: float(np.linalg.norm(q[3:13] - current[3:13])))
+            for goal in goals[:8]:
+                goal[:3] = current[:3]
+                reasons.append(dict(stage='endpoint', qpos=goal.tolist()))
+                stroke = moving_drawer_push(planner, task, goal, push, drawer)
+                if stroke is None:
+                    reasons.append(dict(stage='push', torso=height,
+                                        reason=list(planner._straight_failures)))
+                    continue
+                # Every contact is inspected geometrically by the curve helper;
+                # disable the broad endpoint-only hand allowance for its sweep.
+                with hand_contact(planner, task, drawer, allowed=False):
+                    path = continuous_lower_curve(planner, task, current, goal, grasp, drawer)
+                if path is None:
+                    planner._bottom_path_refusals.extend(planner._continuous_lower_curve_failures)
+                    continue
+                if not p.accepts(np.vstack([path['position'], stroke['position']]), move_group=True):
+                    reasons.append(dict(stage='complete_path',reason='joint_window'))
+                    continue
+                return path
+    return None
+
+
+def continuous_lower_curve(planner, task, current, goal, grasp, drawer):
+    """Return one checked, retimed curve or None; does not execute physics.
+
+    Check the subsequent moving-drawer push before executing this returned path.
+    Use the existing scene/noise/roll-window policy; this helper relaxes none of
+    its limits. It permits only measured low hand contact with the selected
+    moving drawer wall/handle. No global allowed-collision entry is changed.
+    """
+    p = planner.planner
+    moves = list(p.move_group_joint_indices)
+    idx = lambda name: int(task.agent.robot.active_joints_map[name].active_index[0])
+    alpha = np.linspace(0., 1., 241)
+    full = np.repeat(current[None], len(alpha), axis=0)
+    for name, (c1, c2) in PROGRESS.items():
+        i = idx(name)
+        progress = (3*(1-alpha)**2*alpha*c1
+                    + 3*(1-alpha)*alpha**2*c2 + alpha**3)
+        full[:, i] = current[i] + progress*(goal[i]-current[i])
+
+    selected = DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX
+    model = next(p.planning_world.get_articulation(name)
+                 for name in p.planning_world.get_articulation_names()
+                 if selected in name)
+    selected_links = set(model.get_user_link_names())
+    inner = next(link for link in task._drawer_arts[drawer].get_links()
+                 if link.name == 'inner_box')
+    upper_edge = float(get_component_mesh(inner._objs[0]).bounds[1, 2])
+    request = fcl.CollisionRequest(num_max_contacts=100, enable_contact=True)
+    limits = np.asarray(p.joint_limits)
+    failures = []
+    planner._continuous_lower_curve_failures = failures
+
+    def checked(poses):
+        # RollPathPlanner.accepts checks the collection windows, not every URDF
+        # bound. Explicitly check every folded joint against the unchanged URDF.
+        if not p.accepts(poses):
+            failures.append(dict(reason='collection_joint_window'))
+            return False
+        previous_distance = None
+        for knot, q in enumerate(dense_samples(poses)):
+            folded = p.fold_qpos(q)
+            if (np.any(folded < limits[:, 0]-1e-7)
+                    or np.any(folded > limits[:, 1]+1e-7)):
+                failures.append(dict(reason='URDF_joint_limit', knot=knot))
+                return False
+            p.pinocchio_model.compute_forward_kinematics(folded)
+            tcp = np.asarray(p.pinocchio_model.get_link_pose(
+                p.link_name_2_idx[p.move_group]).p)
+            distance = float(np.linalg.norm(tcp-grasp.p))
+            p.robot.set_qpos(folded, True)
+            for collision in p.planning_world.check_collision(request):
+                pair = (collision.link_name1, collision.link_name2)
+                contacts = collision.res.get_contacts()
+                hand = any('ds_fetch' in name and 'gripper' in name for name in pair)
+                wall = any(name in selected_links and
+                           ('inner_box' in name or 'handle' in name) for name in pair)
+                # Contact is beneath the top edge, approached toward the actual
+                # handle, with bounded geometric overlap. This rejects landing
+                # on the drawer from above while allowing its low front surface.
+                allowed = (hand and wall and bool(contacts)
+                    and all(float(c.pos[2]) < upper_edge-.04
+                            and float(c.penetration_depth) < .025 for c in contacts)
+                    and (previous_distance is None
+                         or distance <= previous_distance+1e-5))
+                if not allowed:
+                    failures.append(dict(reason='collision', knot=knot, pair=pair,
+                                         tcp=tcp.tolist()))
+                    return False
+            previous_distance = distance
+        return True
+
+    if not checked(full):
+        return None
+    old_velocity = p.joint_vel_limits.copy()
+    old_acceleration = p.joint_acc_limits.copy()
+    torso_column = moves.index(idx('torso_lift_joint'))
+    try:
+        speed = old_velocity.copy()
+        acceleration = old_acceleration.copy()
+        speed[torso_column] = min(speed[torso_column], .06)
+        acceleration[torso_column] = min(acceleration[torso_column], .12)
+        p.joint_vel_limits = speed
+        p.joint_acc_limits = acceleration
+        times, pos, vel, acc, duration = p.TOPP(full[:, moves], task.control_timestep)
+    except RuntimeError as error:
+        failures.append(dict(reason='TOPP', error=str(error)))
+        return None
+    finally:
+        p.joint_vel_limits = old_velocity
+        p.joint_acc_limits = old_acceleration
+    timed = np.repeat(current[None], len(pos), axis=0)
+    timed[:, moves] = pos
+    if not checked(timed):
+        return None
+    return dict(status='Success', time=times, position=pos, velocity=vel,
+                acceleration=acc, duration=duration,
+                curve_family='lower_handle_cubic_v1', named_progress=PROGRESS,
+                contact_torso_m=float(goal[idx('torso_lift_joint')]),
+                no_intermediate_pose=True)
+
+
+def _hand_pairs(planner, drawer):
+    world=planner.planner.planning_world
+    hand=[n for n in planner.planner.robot.get_user_link_names() if 'gripper' in n]
+    selected=DRAWER_FIXTURES[drawer]+DRAWER_ART_SUFFIX
+    links=[n for name in world.get_articulation_names() if selected in name
+           for n in world.get_articulation(name).get_user_link_names()]
+    return world.get_allowed_collision_matrix(),[(a,b) for a in hand for b in links]
+
+
+@contextmanager
+def _kept_hand_entries(planner, drawer):
+    """Restore hand/drawer ACM entries that removing the drawer model erases."""
+    acm,pairs=_hand_pairs(planner, drawer)
+    previous=[(a,b,acm.get_entry(a,b)) for a,b in pairs]
+    try:yield
+    finally:
+        for a,b,value in previous:
+            if value is None:acm.remove_entry(a,b)
+            else:acm.set_entry(a,b,value==AllowedCollision.ALWAYS)
 
 
 @contextmanager
@@ -86,7 +337,7 @@ def array(value):
     return value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
 
 
-def bar_poses(task, drawer, amount, *, flip=False, opening=False):
+def bar_poses(task, drawer, amount, *, opening=False):
     home = array(task.handle_home)[0, drawer].astype(float)
     centre = home + [0, -float(amount), 0]
     # Approach diagonally from the right. A horizontal closing axis keeps the
@@ -110,8 +361,6 @@ def bar_poses(task, drawer, amount, *, flip=False, opening=False):
         jaw_angle = math.radians(45)
         closing = (closing * math.cos(jaw_angle)
                    + np.cross(approaching, closing) * math.sin(jaw_angle))
-    if flip:
-        closing = -closing
     # The same centred handle grasp is used in both directions. Leave space
     # for the drawer front behind the pads, and enter along the finger axis.
     centre -= 0.01 * approaching
@@ -122,29 +371,16 @@ def bar_poses(task, drawer, amount, *, flip=False, opening=False):
     return grasp, sapien.Pose(reach, grasp.q)
 
 
+@common.planning_budget(4.0)
 def solve(env, seed=None, debug=False, vis=False, blind=False, *,
           waypoint_noise_seed=None, waypoint_noise_m=0.005,
           planner_factory=common.collection_planner_factory,
           execution_noise_seed=None, action_noise=0.003, noise_hold=10):
-    with common.planning_budget(4.0):
-        return _solve(env, seed, debug, vis, blind, waypoint_noise_seed,
-                      waypoint_noise_m, planner_factory, execution_noise_seed, action_noise, noise_hold)
-
-
-def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
-           execution_noise_seed, action_noise, noise_hold):
     env.reset(seed=seed)
     seed_everything(seed)
     task = env.unwrapped
     assert task.control_mode == "pd_joint_pos", task.control_mode
     cfg = task.cfg
-    # The new bottom approach is explicit; withdrawn distance variants stay off.
-    selected = dict(closing_approach="bottom_continuous", drawer_backoff_m=0.,
-                    apple_backoff_m=0., plate_backoff_m=0.,
-                    skip_plate_step_if_reachable=False)
-    for name, value in getattr(task, "motion_parameters", {}).items():
-        if name not in selected or value != selected[name]:
-            raise ValueError(f"SameDrawer motion option was not selected: {name}={value}")
     planner = planner_factory(env, debug, vis)
     planner.prefer_low_roll_ik()
     reserved = np.asarray(task.agent.keyframes["rest"].qpos)[planner._roll_indices]
@@ -157,14 +393,21 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         planner, env, int(seed or 0) + 300007 if execution_noise_seed is None else execution_noise_seed,
         action_noise=action_noise, noise_hold=noise_hold)
     log = lambda stage, **kw: common.say(env, WHO, stage, **kw)
-    noise = WaypointNoise((0 if seed is None else seed) + 200003 if noise_seed is None
-                          else noise_seed, noise_m, log)
+    noise = WaypointNoise((0 if seed is None else seed) + 200003 if waypoint_noise_seed is None
+                          else waypoint_noise_seed, waypoint_noise_m, log)
     target = int(array(task.target_drawer).item())
     reopen = int(np.random.default_rng((0 if seed is None else seed) + 900019).choice(cfg.drawer_choices)) if blind else target
     log("remember open drawer", target=target, reopen=reopen, blind=bool(blind))
 
     def stopped(result):
         return isinstance(result, (int, np.integer)) and result == -1 or common.stopped_by_horizon(planner)
+
+    def open_amount(drawer):
+        return float(array(task.drawer_open_amounts())[0, drawer])
+
+    def dock_offset(drawer):
+        # Lower drawers sit back from the column dock; upper ones come forward.
+        return 0.10 if array(task.handle_home)[0, drawer, 2] < 0.5 else -0.10
 
     def wait_for_state(label, condition, max_steps, result):
         waited = 0
@@ -176,23 +419,21 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         log(label, waited_steps=waited, reached=bool(condition()))
         return result
 
-    def move(label, pose, *, noisy=True, axes=(True, True, True), sync=True, contact=False, freeze_lift=False, stop_on_touch=None, contact_stretch=2):
+    def move(label, pose, *, noisy=True, axes=(True, True, True), sync=True, stop_on_touch=None, stretch=1):
         if noisy:
             pose = noise.pose(label, pose, axes)
         log(label, goal=pose.p.tolist())
         if sync:
             planner.planner.update_from_simulation()
-        fixed_lift = freeze_lift
-        if contact:
-            # Contact must follow a Cartesian line, not a joint-space/RRT detour.
-            # Freeze the lift first: a lowered torso otherwise jams the Jacobian
-            # solver at its lower limit despite a feasible arm-only stroke.
-            fixed_lift = common.screw_plans(planner, pose, disable_lift_joint=True)
-            if not fixed_lift and not common.screw_plans(planner, pose):
-                return common.fail(env, WHO, "no straight contact path", waypoint=label)
+        # Contact must follow a Cartesian line, not a joint-space/RRT detour.
+        # Freeze the lift first: a lowered torso otherwise jams the Jacobian
+        # solver at its lower limit despite a feasible arm-only stroke.
+        fixed_lift = common.screw_plans(planner, pose, disable_lift_joint=True)
+        if not fixed_lift and not common.screw_plans(planner, pose):
+            return common.fail(env, WHO, "no straight contact path", waypoint=label)
         return planner.static_manipulation(pose, disable_lift_joint=fixed_lift,
             n_init_qpos=REACH_N_INIT, max_knots=160, knot_draws=1, knot_refuse=True,
-            by_line=not contact, stretch=contact_stretch if contact else 1, stop_on_touch=stop_on_touch)
+            by_line=False, stretch=stretch, stop_on_touch=stop_on_touch)
 
     def drive(label, point, yaw=math.pi/2, *, already_at_station=False):
         p = noise.point(label, [float(point[0]), float(point[1]), 0.], (True, True, False))
@@ -216,16 +457,27 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         planner.set_grasp_branch(elbow=1, wrist=1)
         return planner.approach_for_contact(*args, **kwargs)
 
-    def open_gripper(t=6):
+    def open_gripper():
         aperture = float(array(task.agent.robot.get_qpos())[0, -2:].sum())
         if planner.gripper_state > 0 and aperture >= 0.095:
             return planner._guard.last_step
-        return planner.open_gripper(t=t)
+        return planner.open_gripper(t=6)
 
     def close_gripper(*args, **kwargs):
         result = planner.close_gripper(*args, **kwargs)
         planner._grasp_branch = {}
         return result
+
+    @contextmanager
+    def refine_steps_capped(enabled=True):
+        # A pad-edge first contact otherwise keeps refining into the handle.
+        limit = planner.max_refine_steps
+        try:
+            if enabled:
+                planner.max_refine_steps = min(limit, 8)
+            yield
+        finally:
+            planner.max_refine_steps = limit
 
     def stow(*, from_handle=False, from_apple=False):
         planner._grasp_branch = {}
@@ -238,7 +490,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         # The selected hand withdrawal must clear the entire rest trajectory,
         # not just the handle. Extend that same straight retreat in bounded
         # increments if the countertop still obstructs the fold.
-        attempts = 4 if from_handle else 3 if from_apple else 1
+        attempts = 4 if from_handle else 3
         for attempt in range(attempts):
             result = common.plan_joints(env, planner, task, targets,
                                        label="fold to canonical rest", tries=1,
@@ -256,21 +508,18 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                 result = execute_straight(planner, straight_plan(planner, clearance))
             else:
                 result = move("extend handle withdrawal for rest clearance", clearance,
-                              noisy=False, contact=True, contact_stretch=1)
+                              noisy=False, stretch=1)
             if stopped(result):
                 return result
             planner.planner.update_from_simulation()
 
     def drawer_stroke(drawer, opening):
-        amount = float(array(task.drawer_open_amounts())[0, drawer])
-        # Preserve the camera-up jaw assignment for both closing and opening.
-        flip = False
-        grasp, reach = bar_poses(task, drawer, amount, flip=flip, opening=opening)
+        amount = open_amount(drawer)
+        grasp, reach = bar_poses(task, drawer, amount, opening=opening)
         bottom_pull = opening and grasp.p[2] < 0.25
         # Physically close the empty fingers for the free approach past adjacent
         # fronts, then open at the standoff before entering the selected handle.
-        result = (close_gripper(t=6) if bottom_pull
-                  else open_gripper(t=6))
+        result = close_gripper(t=6) if bottom_pull else open_gripper()
         if stopped(result):
             return result, False
         planner.planner.update_from_simulation()
@@ -278,32 +527,13 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         # otherwise a feasible arm path can sweep the bar before the grasp.
         low_handle = grasp.p[2] < 0.5
         middle_handle = 0.5 <= grasp.p[2] < 0.65
+        # The bottom drawer of a closing stroke is entered by its contact curve,
+        # not by a free standoff approach.
+        direct_contact = not opening and drawer == 0
         # A non-bottom closing push follows contact from the chosen approach;
         # pick an approach from which that push also plans (same goal as below).
         push_preview = (None if opening or drawer == 0 else
                         sapien.Pose(grasp.p + [0, amount + .04, 0], grasp.q))
-        close_starts = () if opening else DRAWER_CLOSE_STARTS.get(drawer, ())
-        if (not opening and not low_handle) or middle_handle:
-            # Start at the already reachable upper handle, and reserve enough
-            # wrist roll for the later apple grasp before committing the arm.
-            planner._drawer_initial_wrist_budget = not opening
-            if middle_handle:
-                approach = grasp.to_transformation_matrix()[:3, 2]
-                reach = sapien.Pose(grasp.p - 0.25 * approach, grasp.q)
-            reach = noise.pose("approach drawer", reach)
-            log("approach drawer", goal=reach.p.tolist())
-            with reference_ik_starts(planner, task, close_starts) as reference_used:
-                result = approach_for_contact(
-                    reach, grasp, 120, torso_height=(0.10 if middle_handle else
-                                                    0.20 if not opening else None),
-                    contact_context=lambda: common.contact_stroke(
-                        planner, [DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX]),
-                    follow_through=push_preview)
-            if reference_used:
-                log("drawer approach IK from fixed reference start", starts=list(reference_used))
-            if stopped(result):
-                return result, False
-        direct_contact = not opening and drawer == 0
         if direct_contact:
             planner.set_grasp_branch(elbow=1, wrist=1)
             planner._drawer_initial_wrist_budget = False
@@ -329,75 +559,72 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         contact_context = (hand_contact(planner, task, drawer) if direct_contact else
                            common.contact_stroke(planner, [DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX]))
         with contact_context:
-            if (opening or low_handle) and not middle_handle and not direct_contact:
-                if low_handle:
-                    # Lower outside the worktop before reaching under it. Check
-                    # both legs before leaving the compact travel posture.
+            if not direct_contact:
+                # The upper closing handle keeps the bar_poses reach; the low and
+                # middle handles and every opening approach enter from 0.25 m out.
+                if opening or low_handle or middle_handle:
                     approach = grasp.to_transformation_matrix()[:3, 2]
                     reach = sapien.Pose(grasp.p - 0.25 * approach, grasp.q)
-                    reach = noise.pose("approach drawer", reach)
-                    torso = 0.01 if grasp.p[2] < 0.25 else 0.10
-                    log("approach drawer", goal=reach.p.tolist(), standoff_m=0.25, torso_height_m=torso)
-                    with reference_ik_starts(planner, task, close_starts) as reference_used:
-                        result = approach_for_contact(
-                            reach, grasp, REACH_N_INIT, torso_height=torso,
-                            follow_through=push_preview)
-                        if (not opening and torso == 0.10 and isinstance(result, (int, np.integer))
-                                and result == -1):
-                            # At 0.10 m some lower-middle handles need wrist_flex below
-                            # the grasp-branch margin at contact. Nothing has moved yet;
-                            # plan the same approach at the bottom-handle torso height.
-                            torso = 0.01
-                            log("lower torso for closing approach", torso_height_m=torso)
-                            result = approach_for_contact(
-                                reach, grasp, REACH_N_INIT, torso_height=torso,
-                                follow_through=push_preview)
-                    if reference_used:
-                        log("drawer approach IK from fixed reference start", starts=list(reference_used))
-                    if opening and isinstance(result, (int, np.integer)) and result == -1:
-                        # Unfold the upper arm before lowering through the
-                        # countertop edge. The direct diagonal joint line from
-                        # the travel posture can sweep the sink at the bottom
-                        # handle even when both endpoint poses are reachable.
-                        result = common.plan_joints(
-                            env, planner, task,
-                            {"shoulder_lift_joint": 0.0, "elbow_flex_joint": 1.8,
-                             "wrist_flex_joint": 1.7},
-                            label="clear counter for low handle", who=WHO,
-                            line_only=True, tries=1)
-                        if stopped(result):
-                            return result, False
-                        result = approach_for_contact(
-                            reach, grasp, 120, torso_height=torso)
+                reach = noise.pose("approach drawer", reach)
+                # Check a reachable straight final stroke before leaving the compact
+                # travel posture: a free-space approach alone can exhaust the reach,
+                # and a low handle has to be lowered outside the worktop.
+                if middle_handle or (not opening and not low_handle):
+                    torso, n_init = (0.10 if middle_handle else 0.20), 120
+                elif low_handle:
+                    torso, n_init = (0.01 if grasp.p[2] < 0.25 else 0.10), REACH_N_INIT
                 else:
-                    # Upper handles also need a reachable straight final stroke;
-                    # a free-space approach alone can exhaust the remaining reach.
-                    result = approach_for_contact(reach, grasp, 80)
+                    torso, n_init = None, 80
+                # Reserve enough wrist roll for the later apple grasp before
+                # committing the arm.
+                planner._drawer_initial_wrist_budget = not opening
+                log("approach drawer", goal=reach.p.tolist(), torso_height_m=torso)
+                result = approach_for_contact(
+                    reach, grasp, n_init, torso_height=torso,
+                    contact_context=lambda: common.contact_stroke(
+                        planner, [DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX]),
+                    follow_through=push_preview)
+                if (not opening and low_handle and torso == 0.10
+                        and isinstance(result, (int, np.integer)) and result == -1):
+                    # At 0.10 m some lower-middle handles need wrist_flex below the
+                    # grasp-branch margin at contact. Nothing has moved yet; plan the
+                    # same approach at the bottom-handle torso height.
+                    torso = 0.01
+                    log("lower torso for closing approach", torso_height_m=torso)
+                    result = approach_for_contact(reach, grasp, n_init, torso_height=torso,
+                                                  follow_through=push_preview)
+                if opening and low_handle and isinstance(result, (int, np.integer)) and result == -1:
+                    # Unfold the upper arm before lowering through the countertop
+                    # edge. The direct diagonal joint line from the travel posture
+                    # can sweep the sink at the bottom handle even when both endpoint
+                    # poses are reachable.
+                    result = common.plan_joints(
+                        env, planner, task,
+                        {"shoulder_lift_joint": 0.0, "elbow_flex_joint": 1.8,
+                         "wrist_flex_joint": 1.7},
+                        label="clear counter for low handle", who=WHO,
+                        line_only=True, tries=1)
+                    if stopped(result):
+                        return result, False
+                    result = approach_for_contact(reach, grasp, 120, torso_height=torso)
                 if stopped(result):
                     return result, False
             if bottom_pull:
-                result = open_gripper(t=6)
+                result = open_gripper()
                 if stopped(result):
                     return result, False
-            grasp, _ = bar_poses(task, drawer, float(array(task.drawer_open_amounts())[0, drawer]),
-                                 flip=flip, opening=opening)
+            grasp, _ = bar_poses(task, drawer, open_amount(drawer), opening=opening)
             # Execute the full approach: first contact can be the edge of a pad,
             # before the handle is between the fingers. Once at a closed drawer,
             # bound the settling hold instead of pressing into it for seconds.
-            previous_refine_limit = planner.max_refine_steps
-            try:
-                if opening:
-                    planner.max_refine_steps = min(previous_refine_limit, 8)
+            with refine_steps_capped(opening):
                 if not direct_contact:
-                    result = move("grasp drawer handle", grasp, noisy=False, sync=False, contact=True,
-                                  contact_stretch=1 if opening else 2,
-                                  freeze_lift=bottom_pull)
-            finally:
-                planner.max_refine_steps = previous_refine_limit
+                    result = move("grasp drawer handle", grasp, noisy=False, sync=False,
+                                  stretch=1 if opening else 2)
             if stopped(result):
                 return result, False
             planner._drawer_initial_wrist_budget = False
-            result = close_gripper(t=6) if opening else open_gripper(t=6)
+            result = close_gripper(t=6) if opening else open_gripper()
             if stopped(result):
                 return result, False
             aperture = float(array(task.agent.robot.get_qpos())[0, -2:].sum())
@@ -406,8 +633,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                 # Re-aim from the measured state if compliant contact was lost
                 # during settling. Stop at hand contact and keep fingers open.
                 result = move("establish open-hand push contact", grasp,
-                              noisy=False, sync=False, contact=True,
-                              contact_stretch=1, stop_on_touch=task._drawer_arts[drawer])
+                              noisy=False, sync=False,
+                              stop_on_touch=task._drawer_arts[drawer])
                 if stopped(result):
                     return result, False
                 touching = planner.gripper_touching(task._drawer_arts[drawer])
@@ -424,7 +651,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                 return result, False
             # Contact can move the drawer. Use its remaining travel now, and
             # stop at closed rather than loading the grasp past the hard stop.
-            amount = float(array(task.drawer_open_amounts())[0, drawer])
+            amount = open_amount(drawer)
             if opening:
                 # Pull along the drawer's slider with the arm. This brings the
                 # hand nearer the body without reversing the whole mobile base.
@@ -441,13 +668,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                             or common.screw_plans(planner, candidate)):
                         goal = candidate
                         break
-                previous_refine_limit = planner.max_refine_steps
-                try:
-                    planner.max_refine_steps = min(previous_refine_limit, 8)
-                    result = move("pull drawer with arm", goal, noisy=False,
-                                  sync=False, contact=True, contact_stretch=1)
-                finally:
-                    planner.max_refine_steps = previous_refine_limit
+                with refine_steps_capped():
+                    result = move("pull drawer with arm", goal, noisy=False, sync=False)
             else:
                 # Extend the hand along the physical slider. The open palm
                 # pushes through contact; the base and finger command stay still.
@@ -455,9 +677,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                 travel = max(0., amount) if direct_contact else amount + .04
                 goal = sapien.Pose(tcp.p + [0, travel, 0], tcp.q)
                 log("close drawer with arm", max_travel_m=travel)
-                if amount <= cfg.closed_tol:
-                    result = planner._guard.last_step
-                else:
+                result = planner._guard.last_step
+                if amount > cfg.closed_tol:
                     if direct_contact:
                         planner.planner.update_from_simulation()
                         current = array(task.agent.robot.get_qpos())[0].astype(float)
@@ -467,27 +688,26 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                     else:
                         stroke = straight_plan(planner, goal)
                     result = execute_straight(planner, stroke,
-                        stop_when=lambda: float(array(task.drawer_open_amounts())[0, drawer]) <= cfg.closed_tol)
+                        stop_when=lambda: open_amount(drawer) <= cfg.closed_tol)
                 if direct_contact and result != -1 and not stopped(result):
                     result = wait_for_state("physical bottom closure",
-                        lambda: float(array(task.drawer_open_amounts())[0, drawer]) <= cfg.closed_tol,
-                        6, result)
+                        lambda: open_amount(drawer) <= cfg.closed_tol, 6, result)
             if stopped(result):
                 return result, False
-            amount = float(array(task.drawer_open_amounts())[0, drawer])
+            amount = open_amount(drawer)
             ok = amount >= cfg.open_success if opening else amount <= cfg.closed_tol
             log("drawer stroke ended", drawer=drawer, opening=opening, open_amount=amount,
                 reached=bool(ok), tcp=task.agent.tcp.pose[0].sp.p.tolist())
             if not ok or stopped(result):
                 return result, False
             if opening:
-                result = open_gripper(t=6)
+                result = open_gripper()
             else:
                 # Keep observing the handle until release and withdrawal finish.
                 # Fully open, then withdraw far enough that the canonical rest
                 # transition clears the countertop (6 cm leaves a collision). The
                 # next primitive folds the arm with all drawer obstacles restored.
-                result = open_gripper(t=6)
+                result = open_gripper()
                 if stopped(result):
                     return result, False
                 tcp = task.agent.tcp.pose[0].sp
@@ -496,10 +716,10 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
                 # The diagonal exit includes lateral motion, so move the arm;
                 # a forward-only base cannot execute that Cartesian translation.
                 result = move("clear handle with arm", clearance,
-                              noisy=False, sync=direct_contact, contact=True, contact_stretch=1)
+                              noisy=False, sync=direct_contact)
                 if stopped(result):
                     return result, False
-                amount = float(array(task.drawer_open_amounts())[0, drawer])
+                amount = open_amount(drawer)
                 if amount > cfg.closed_tol or bool(array(task.sequence_violated).item()):
                     log("drawer reopened during withdrawal", open_amount=amount)
                     return result, False
@@ -511,15 +731,15 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     if stopped(result):
         return result
     home = task._robot_start_np[0]
-    extension = float(array(task.drawer_open_amounts())[0, target])
-    dock_offset = 0.10 if array(task.handle_home)[0, target, 2] < 0.5 else -0.10
+    extension = open_amount(target)
+    offset = dock_offset(target)
     # Keep the sampled initial heading while the hand is in its initial pose.
     # The contact approach plans from this measured pose; floor travel follows
     # the fixed stow below, after the first drawer has been closed.
     initial_forward = task.agent.base_link.pose[0].sp.to_transformation_matrix()[:3, 0]
     initial_yaw = math.atan2(float(initial_forward[1]), float(initial_forward[0]))
-    result = drive("approach column dock", [home[0], home[1] + dock_offset - extension],
-                   yaw=initial_yaw, already_at_station=dock_offset < 0)
+    result = drive("approach column dock", [home[0], home[1] + offset - extension],
+                   yaw=initial_yaw, already_at_station=offset < 0)
     if stopped(result):
         return result
     result, closed = drawer_stroke(target, False)
@@ -539,16 +759,16 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         return result
     apple_p = task.apple.pose[0].sp.p
     base = task.agent.base_link.pose[0].sp
-    if abs(float(apple_p[0] - base.p[0])) > 0.04:
-        result = drive("align with apple", [apple_p[0], base.p[1]])
-        if stopped(result):
-            return result
+    # The apple dock already holds the hand within the 4 cm alignment band; a
+    # violation is reported rather than corrected by an extra base drive.
+    x_offset = float(apple_p[0] - base.p[0])
+    if abs(x_offset) > 0.04:
+        log("apple off the dock alignment band", x_offset_m=x_offset)
     result = open_gripper()
     if stopped(result):
         return result
     mesh = task.apple.get_first_collision_mesh(to_world_frame=True)
-    if mesh is None:
-        raise RuntimeError("The apple has no collision mesh")
+    assert mesh is not None, "The apple has no collision mesh"
     centre = np.asarray(mesh.bounding_box_oriented.center_mass)
     # A nearly spherical apple has an unstable OBB axis. Use the counter-facing
     # approach and pinch across it, keeping the wrist above the countertop.
@@ -572,7 +792,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     common.hold_object_in_planner(env, planner, task, task.apple, True, who=WHO)
     tcp = task.agent.tcp.pose[0].sp
     result = move("lift apple", sapien.Pose(tcp.p + [0, 0, 0.07], tcp.q),
-                  axes=(False, False, True), contact=True, contact_stretch=1)
+                  axes=(False, False, True))
     if stopped(result):
         return result
     if not bool(array(task.agent.is_grasping(task.apple)).item()):
@@ -595,7 +815,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     planner.planner.update_from_simulation()
     with transfer_phase(planner, "carry apple over plate"):
         log("transfer apple over plate", goal=hover.p.tolist())
-        result = planner.approach_for_contact(
+        result = approach_for_contact(
             hover, placement_preview, 160,
             contact_context=lambda: common.touchable(planner, "plate"))
     planner.planner.update_from_simulation()
@@ -612,10 +832,8 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     apple = task.apple.pose[0].sp
     placement = (sapien.Pose(task.plate.pose[0].sp.p + [0, 0, 0.035], apple.q)
                  * (tcp.inv() * apple).inv())
-    planner.planner.update_from_simulation()
     with common.touchable(planner, "plate"):
-        result = move("lower apple onto plate", placement, noisy=False, sync=False,
-                      contact=True, contact_stretch=1)
+        result = move("lower apple onto plate", placement, noisy=False, sync=False)
     if stopped(result):
         return result
     # Enforce settling before release. The prior six-step wait ignored failure
@@ -639,7 +857,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         return result
     if not settle.ready:
         return common.fail(env, WHO, "apple or arm did not settle before release")
-    result = open_gripper(t=6)
+    result = open_gripper()
     common.hold_object_in_planner(env, planner, task, task.apple, False, who=WHO)
     if stopped(result):
         return result
@@ -676,14 +894,12 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     # This nearer corner keeps clearance without the old deep southern detour.
     home = task._robot_start_np[0]
     aisle = np.array([home[0] + 0.30, home[1] - 0.70])
-    dock_offset = 0.10 if array(task.handle_home)[0, reopen, 2] < 0.5 else -0.10
-    dock = np.array([home[0], home[1] + dock_offset])
+    dock = np.array([home[0], home[1] + dock_offset(reopen)])
     # Observe the whole column; head aiming does not encode the remembered drawer.
     planner.track_target(lambda: array(task.handle_home)[0].mean(0))
     aisle = noise.point("return via open aisle", [*aisle, 0.], (True, True, False))
     dock = noise.point("return to drawer column", [*dock, 0.], (True, True, False))
     yaw = 2 * math.atan2(float(home[6]), float(home[3]))
-    from planners.oracle.smooth_base import drive_rounded_route
     result = drive_rounded_route(env, planner, task, aisle, dock, yaw)
     if stopped(result):
         return result
@@ -702,11 +918,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--blind", action="store_true")
-    parser.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None, help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
+    parser.add_argument("--curobo", action="store_true", help="propose IK goals from cuRobo instead of the mplib default (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
     parser.add_argument("--assisted-grasp", action=argparse.BooleanOptionalAction, default=True, help="weld the picked object to the hand by OmniGibson's rule (utils/mikasa/assisted_grasp.py; changes the physics)")
     args = parser.parse_args()
-    if args.ik_backend is not None:
-        os.environ["MIKASA_IK_BACKEND"] = args.ik_backend
+    if args.curobo:
+        os.environ["MIKASA_IK_BACKEND"] = "curobo"
     env = gym.make("MikasaSameDrawer-v0", scene_idx=0, sim_backend="cpu",
                    obs_mode="state", control_mode="pd_joint_pos",
                    sim_config={"control_freq":20, "sim_freq":100},

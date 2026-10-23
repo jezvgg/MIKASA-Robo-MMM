@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from planners.same_drawer_paths import DrawerPathPlanner
+from planners.same_drawer_planner import DrawerPathPlanner
 
 
 def guard():

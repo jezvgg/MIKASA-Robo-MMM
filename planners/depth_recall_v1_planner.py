@@ -16,9 +16,8 @@ docked at the object's own x, the arm reaches sideways far enough that NO transf
 carries a prop while the base moves (measured 2026-09-10: onto the counter 36 cm toward
 smaller x, into the shelf 36 cm toward larger x, both 5/5).
 
-**Where each prop is staged** is the pad of its own colour: read off the task in simulator
-mode (scenery, like the slot points), by colour from the head cameras in perception mode
-(`PropBelief.identify_pads`).
+**Where each prop is staged** is the pad of its own colour, read off the task (scenery,
+like the slot points).
 
 **Where the answer is read, and it is one line.** The extraction order is taken from the
 props' own poses — front first, which physics enforces anyway — so it needs no
@@ -41,7 +40,6 @@ import numpy as np
 import sapien
 
 from planners import cabinet_retrieval_planner as retr
-from planners import depth_recall_v1_perception as perc
 from planners.oracle import cabinet_place as sp
 from planners.oracle import ik_chain, stance_scan
 from planners.oracle import oracle_common as common
@@ -50,10 +48,6 @@ from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
 
 WHO = "depth_recall_v1_planner"
-
-#: Set by `solve(..., perception="pointcloud")`: the planner's belief about the props,
-#: built from its own cameras (`depth_recall_v1_perception`). None = read the simulator.
-_BELIEF = None
 
 #: Joint-space step (move-group norm, rad) at which every joint line this planner executes
 #: is collision-checked. `plan_qpos_line`'s 0.1 is up to ~8 cm of hand travel on an
@@ -131,35 +125,20 @@ GRASP_CLOSE_STEPS = 8
 #: still steps, and the wait now ends at the success instead of always 30 steps.
 FINAL_SETTLE_MAX = 30
 
-#: Perception mode re-docks when the measured row is further than this from the map's
-#: row: the dock's own waypoint noise is 5 mm, the row shift up to 4 cm.
-REDOCK_MIN_M = 0.01
-
-#: A refused re-dock is survivable up to this shift: the episode then works from the
-#: first dock. `drive_base` turns the base even for a sideways centimetre, and measured
-#: 2026-10-16 (seed 3011, shift 10.4 mm) that turn's sweep hit the open right door with
-#: the forearm; 2 cm aside is well inside the pads' 18 cm pitch.
-REDOCK_SKIP_MAX_M = 0.02
-
 
 def _grasping(task, prop) -> bool:
-    """Is ``prop`` in the hand? Contact forces in simulator mode; in perception mode the
-    finger encoders (`PropBelief.fingers_holding`), as a robot would tell."""
-    if _BELIEF is None:
-        return bool(task.agent.is_grasping(prop).any())
-    return _BELIEF.fingers_holding()
+    """Is ``prop`` in the hand? Contact forces, as the simulator reports them."""
+    return bool(task.agent.is_grasping(prop).any())
 
 
 def _hold(env, planner, task, prop, held: bool) -> None:
-    """`common.hold_object_in_planner`; in perception mode the prop is attached at the
-    transform the belief has (the grasp's estimate), not the simulator's."""
-    pose = _BELIEF.link_to_prop(_index(task, prop)) if (_BELIEF is not None and held) else None
-    common.hold_object_in_planner(env, planner, task, prop, held=held, who=WHO, pose=pose)
+    """`common.hold_object_in_planner` at the simulator's own pose."""
+    common.hold_object_in_planner(env, planner, task, prop, held=held, who=WHO)
 
 
 def _seen(prop):
-    """What a pose is computed from: the prop itself, or its perceived stand-in."""
-    return prop if _BELIEF is None else _BELIEF.proxy(prop)
+    """What a pose is computed from: the prop itself."""
+    return prop
 
 
 def _index(task, prop) -> int:
@@ -488,12 +467,8 @@ def row_neighbours(task, prop):
         ...     res = _straight(env, planner, up, stage="unshelve")
     """
     out = []
-    for i, other in enumerate(task.props):
+    for other in task.props:
         if other is prop:
-            continue
-        if _BELIEF is not None and not _BELIEF.has(i):
-            # Never seen yet: still standing in the row, behind what the camera sees.
-            out.append(other)
             continue
         q = _np(_seen(other).pose.p).reshape(-1)
         # In the cabinet at all: above the shelf plane and north of its front face.
@@ -588,9 +563,9 @@ def choose_dock_dx(env, planner, task, row_pts, slot_pts) -> float:
     deeper = sapien.Pose(p=np.asarray(grasp.p) + np.array([0.0, retr.READY_GRASP_SLACK, 0.0]), q=grasp.q)
     far = min(slot_pts, key=lambda q: float(q[0]))
     z_top = float(_np(task._counter_top_z).reshape(-1)[0])
-    # Any prop may own the far pad (it is not read yet in camera mode), and going UP over
-    # it is what the arm runs out of: check the highest place TCP of the four (the boxes
-    # were one size, 6 cm half-height at their first lift).
+    # Any prop may own the far pad, and going UP over it is what the arm runs out of:
+    # check the highest place TCP of the four (the boxes were one size, 6 cm half-height
+    # at their first lift).
     top = max(spec.height / 2.0 + grasp_lifts(task, o)[0] for spec, o in zip(task.cfg.props, task.props))
     place = sapien.Pose(p=[float(far[0]), float(far[1]), z_top + top + 0.005], q=grasp.q)
     lifted = sapien.Pose(p=np.asarray(place.p) + np.array([0.0, 0.0, sp.RELEASE_LIFT_RUNGS[0]]), q=grasp.q)
@@ -781,16 +756,6 @@ def grasp_ladder(env, planner, task, prop, *, where: str, lift: float = None):
     res = -1
     lift = retr.GRASP_LIFT if lift is None else float(lift)
     for depth in retr.SIDE_GRASP_DEPTHS:
-        if _BELIEF is not None:
-            # Re-fit from the stand the grasp is made from, wrist camera first: every
-            # rung, because a refused close can have moved the prop.
-            i = _index(task, prop)
-            fit = _BELIEF.look(where, (perc.HAND_CAM,) + perc.BASE_CAMS, only=[i]).get(i, {})
-            # THIS look must accept a fit: an older estimate (a dock fit, a release) is
-            # exactly what a refused close may have made wrong.
-            if not fit.get("accepted"):
-                return fail(env, f"{where}: {prop.name} not fitted from the grasp stand",
-                            why=fit.get("reasons")), False
         grasp, _pre = retr.side_grasp_pose(task, depth, lift=lift, obj=_seen(prop))
         if grasp is None:
             return fail(env, f"{where}: {prop.name} has no collision mesh"), False
@@ -813,23 +778,12 @@ def grasp_ladder(env, planner, task, prop, *, where: str, lift: float = None):
         if res == -1:
             planner.planner.update_from_simulation()
             continue
-        if _BELIEF is not None:
-            # Close only on something: the prop's own points have to be between the
-            # pads (BIMBO_EvoX's rays-between-the-pads rule, from the cameras). A
-            # close on air is a wasted rung that also nudges the prop.
-            chk = _BELIEF.between_pads(_index(task, prop))
-            say(env, f"{where}: between the pads", prop=prop.name, depth=depth, **chk)
-            if not chk["ok"]:
-                planner.planner.update_from_simulation()
-                continue
         res = planner.close_gripper(t=GRASP_CLOSE_STEPS)
         if res != -1 and common.stopped_by_horizon(planner):
             return res, False
         if _grasping(task, prop):
             say(env, f"{where}: in the gripper", prop=prop.name, depth=depth,
                 tilt=round(common._tilt_deg(prop.pose.sp.q), 1))
-            if _BELIEF is not None:
-                _BELIEF.attach(_index(task, prop))
             planner.planner.update_from_simulation()
             return res, True
         say(env, f"{where}: close missed", prop=prop.name, depth=depth)
@@ -856,8 +810,6 @@ def release_and_clear(env, planner, task, prop, place):
     # Collection gripper commands are binary (BIBLE 3, checklist B3): one open command,
     # held `RELEASE_OPEN_STEPS`; the fingers open at the unchanged PD controller's speed.
     res = planner.open_gripper(t=RELEASE_OPEN_STEPS)
-    if _BELIEF is not None:
-        _BELIEF.release(_index(task, prop), where="released")
     if res != -1 and common.stopped_by_horizon(planner):
         return res
     _hold(env, planner, task, prop, held=False)
@@ -900,15 +852,13 @@ def release_and_clear(env, planner, task, prop, place):
     #
     # The prop just released is out of this check: the torso only lifts the hand straight
     # up, away from it. The rise above leaves 7 mm between the finger pads and a 12 cm
-    # prop's top, which is less than what a camera estimate of it may be off by: measured
-    # 2026-10-16, 13 of 100 perception episodes had this raise refused at knot 0
-    # (`gripper_link <-> prop`), and once the base no longer backs away from a pad after a
-    # counter placement, nothing else separated the two before the next transfer.
+    # prop's top, and once the base no longer backs away from a pad after a counter
+    # placement, nothing else separated the two before the next transfer.
     #
     # UP only. After a row placement the torso is already at its 0.386 stop, and the
     # first rung's line is then empty, which `plan_joints` books as a refusal: the ladder
     # went on to 0.34 and LOWERED the open hand 4.6 cm back onto the prop just released.
-    # Measured 2026-10-16 (seed 1001, both modes): a finger or the palm caught a 15.8 g
+    # Measured 2026-10-16 (seed 1001): a finger or the palm caught a 15.8 g
     # shaker's top (0.15-0.22 N) and slid it 4 cm, out of its slot or into the next one.
     # The 243 g box never moved for it.
     here = _torso_now(task)
@@ -1132,16 +1082,6 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     # TIPPED OVER during the approach, and the grasp that followed aimed at a mid-height
     # of 0.942 — a lying prop — and drove the palm into it. The extraction already
     # crosses high and descends; this is the same move on the way back.
-    if _BELIEF is not None:
-        # Refresh the counter estimates from here; a prop this look misses keeps the
-        # estimate its release left (dead reckoning), and the grasp ladder still demands
-        # a fresh wrist fit before closing on it.
-        i = _index(task, prop)
-        fit = _BELIEF.look("counter", perc.BASE_CAMS + (perc.HAND_CAM,),
-                           anchors=_BELIEF.slot_pts).get(i, {})
-        say(env, "counter estimate", prop=prop.name,
-            source="fit" if fit.get("accepted") else "cluster" if "coarse_xy" in fit
-            else "release")
     p0 = _np(_seen(prop).pose.p).reshape(-1)[:3]
     z0 = float(_np(task._counter_top_z).reshape(-1)[0])
     moved = -1
@@ -1411,11 +1351,7 @@ def choose_assignment(task, blind: bool, rng):
     Example:
         >>> plan = choose_assignment(task, blind=False, rng=rng)   # doctest: +SKIP
     """
-    if _BELIEF is not None:
-        # The planner's own memory: the row slot each prop was SEEN in before it moved.
-        slots = np.array([_BELIEF.row_slot[i] for i in range(task.cfg.n_props)])
-    else:
-        slots = _np(task.original_slots).reshape(-1)
+    slots = _np(task.original_slots).reshape(-1)
     deep = int(task.cfg.n_props - 1)
     movables = [i for i in range(len(slots)) if int(slots[i]) != deep]
     targets = sorted((int(slots[i]) for i in movables), reverse=True)
@@ -1427,23 +1363,19 @@ def choose_assignment(task, blind: bool, rng):
 
 def solve(env, seed=None, debug=False, vis=False, blind=False, *,
           waypoint_noise_seed=None, waypoint_noise_m=0.005,
-          planner_factory=common.collection_planner_factory, perception: str = "state",
+          planner_factory=common.collection_planner_factory,
           execution_noise_seed=None, action_noise=0.003, noise_hold=10):
-    """``perception="pointcloud"`` makes every prop pose the planner acts on an estimate
-    from its own cameras (`depth_recall_v1_perception`); ``"state"`` reads the simulator.
-
-    The collection planner (`oracle_common.collection_planner_factory`) is the default, as
-    for the other collected tasks: binary gripper commands switching on even 20 Hz steps,
-    10 Hz action pairs, and C3 execution noise on the extraction carry."""
-    assert perception in ("state", "pointcloud"), perception
+    """The collection planner (`oracle_common.collection_planner_factory`) is the default,
+    as for the other collected tasks: binary gripper commands switching on even 20 Hz
+    steps, 10 Hz action pairs, and C3 execution noise on the extraction carry."""
     with common.planning_budget(4.0):
         return _solve(env, seed, debug, vis, blind, waypoint_noise_seed,
-                      waypoint_noise_m, planner_factory, perception,
+                      waypoint_noise_m, planner_factory,
                       execution_noise_seed, action_noise, noise_hold)
 
 
 def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
-           perception="state", execution_noise_seed=None, action_noise=0.003, noise_hold=10):
+           execution_noise_seed=None, action_noise=0.003, noise_hold=10):
     """Clear the row onto the counter, keep the deepest prop, put the rest back.
 
     Example:
@@ -1454,9 +1386,6 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         seed_everything(seed)
     assert env.unwrapped.control_mode == "pd_joint_pos", env.unwrapped.control_mode
     task = env.unwrapped
-    global _BELIEF
-    _BELIEF = (perc.PropBelief(task, lambda message, **data: say(env, message, **data))
-               if perception == "pointcloud" else None)
     planner = planner_factory(env, debug, vis)
     planner._dock_err = dock_error_rng(seed)
     if hasattr(planner, "prefer_low_roll_ik"):
@@ -1471,8 +1400,6 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
             planner, env, (0 if seed is None else int(seed)) + 300007
             if execution_noise_seed is None else execution_noise_seed,
             action_noise=action_noise, noise_hold=noise_hold)
-    if _BELIEF is not None:
-        _BELIEF.bind_world(planner)
     noise = WaypointNoise((0 if seed is None else int(seed)) + 200003
                           if noise_seed is None else noise_seed, noise_m,
                           lambda message, **data: say(env, message, **data))
@@ -1487,11 +1414,6 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     props = list(task.props)
     slot_pts = _np(task._slot_points).reshape(-1, 4, 3)[0]
     row_pts = _np(task._row_points).reshape(-1, task.cfg.n_props, 3)[0]
-    if _BELIEF is not None:
-        # The episode's row and slot points carry a per-episode sideways shift that no
-        # image shows; start from the static map, measure the shift at the dock.
-        row_pts, slot_pts = _BELIEF.map_points()
-        _BELIEF.slot_pts = slot_pts
     say(env, "episode", blind=bool(blind),
         slots=[round(float(v), 3) for v in slot_pts[:, 0]],
         row_x=round(float(row_pts[0][0]), 3))
@@ -1527,73 +1449,14 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         return fail(env, "dock at the row")
 
     # --- take the row apart, front first (read off the poses, not the answer) ---
-    # Each prop goes onto its own colour's pad. Simulator mode reads which slot that is
-    # off the task; perception mode reads the pads' colours after the row is calibrated.
-    pad_of = (None if _BELIEF is not None else
-              {i: int(k) for i, k in enumerate(_np(task.pad_slots).reshape(-1, len(props))[0])})
+    # Each prop goes onto its own colour's pad, read off the task.
+    pad_of = {i: int(k) for i, k in enumerate(_np(task.pad_slots).reshape(-1, len(props))[0])}
     staged = {}
-    # Simulator mode keeps its original rule exactly: one ordering read at the start.
-    # Perception mode orders by what it sees, below; no true pose enters.
-    remaining = (sorted(range(len(props)), key=lambda i: float(_np(props[i].pose.p).reshape(-1)[1]))
-                 if _BELIEF is None else list(range(len(props))))
+    # One ordering read at the start.
+    remaining = sorted(range(len(props)),
+                       key=lambda i: float(_np(props[i].pose.p).reshape(-1)[1]))
     while remaining:
-        if _BELIEF is None:
-            prop_i = remaining[0]
-        else:
-            # Look at the row from the dock and take the front-most prop SEEN; the slot it
-            # was seen in is what the restore will remember.
-            res = gaze(row_pts, -.20)
-            if res == -1 or common.stopped_by_horizon(planner):
-                return res
-            fits = _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts, trust_anchor_x=False)
-            if _BELIEF.row_dx is None:
-                # First look from the dock: measure the row's sideways shift, move the base
-                # onto the measured row when the map's dock is off by more than
-                # `REDOCK_MIN_M`, then look again so every estimate is tied to the
-                # corrected points. Without the move the arm reaches the counter from up
-                # to 4 cm aside of where the simulator mode stands; measured 2026-10-15 on
-                # 100 seeds, that path knocked a neighbouring counter prop over on 2.
-                row_pts, slot_pts = _BELIEF.calibrate_row(fits, row_pts, slot_pts)
-                if abs(_BELIEF.row_dx) > REDOCK_MIN_M:
-                    res = dock_at(env, planner, task, float(row_pts[0][0]) + dock_dx,
-                                  stage="re-dock at the measured row", noise=noise)
-                    if res != -1 and common.stopped_by_horizon(planner):
-                        return res
-                    if res == -1 and abs(_BELIEF.row_dx) > REDOCK_SKIP_MAX_M:
-                        return fail(env, "re-dock at the measured row")
-                    if res == -1:
-                        say(env, "re-dock refused; working from the first dock",
-                            dx=round(float(_BELIEF.row_dx), 4))
-                        planner.planner.update_from_simulation()
-                    else:
-                        res = gaze(row_pts, -.20)
-                        if res == -1 or common.stopped_by_horizon(planner):
-                            return res
-                _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts, trust_anchor_x=False)
-            if pad_of is None:
-                res = gaze(slot_pts, .35)
-                if res == -1 or common.stopped_by_horizon(planner):
-                    return res
-                pad_of = _BELIEF.identify_pads(slot_pts)
-                if pad_of is None:
-                    return fail(env, "read the pads' colours")
-                res = gaze(row_pts, -.20)
-                if res == -1 or common.stopped_by_horizon(planner):
-                    return res
-                _BELIEF.look("shelf", perc.BASE_CAMS, anchors=row_pts, trust_anchor_x=False)
-            seen = [i for i in remaining if _BELIEF.has(i)]
-            if not seen:
-                return fail(env, "perceive the row", remaining=[props[i].name for i in remaining])
-            prop_i = min(seen, key=lambda i: (_BELIEF.est[i]["y"], i))
-            slot_seen = _BELIEF.remember_row_slot(prop_i, row_pts)
-            # The row is emptied front first, so the front-most OCCUPIED slot is known; a
-            # prop seen behind it means the one in front was missed, and taking the deeper
-            # one would drive the hand into it.
-            front = len(props) - len(remaining)
-            if slot_seen != front:
-                return fail(env, "the front prop was not seen", seen=props[prop_i].name,
-                            seen_slot=slot_seen, front_slot=front)
-            say(env, "front-most seen", prop=props[prop_i].name, row_slot=slot_seen)
+        prop_i = remaining[0]
         remaining.remove(prop_i)
         slot_k = int(pad_of[prop_i])
         staged[prop_i] = slot_k
@@ -1658,8 +1521,6 @@ if __name__ == "__main__":
     ap.add_argument("--no-video", action="store_true")
     ap.add_argument("--assisted-grasp", action=argparse.BooleanOptionalAction, default=True,
                     help="weld props to the hand by OmniGibson's rule (changes the physics)")
-    ap.add_argument("--perception", choices=("state", "pointcloud"), default="state",
-                    help="where prop poses come from: the simulator, or the robot's cameras")
     ap.add_argument("--ik-starts", choices=("random", "fixed"), default=None,
                     help="IK restarts: mplib's random draws, or a fixed table (robots/fetch/ik_backend.py)")
     ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None,
@@ -1688,10 +1549,10 @@ if __name__ == "__main__":
 
         e = RecordEpisode(e, args.video_dir, save_trajectory=False, save_video=True,
                           video_fps=30, max_steps_per_video=None)
-    out = solve(e, seed=args.seed, blind=args.blind, perception=args.perception)
+    out = solve(e, seed=args.seed, blind=args.blind)
     print("no_plan" if isinstance(out, int) else f"success={_b(out[-1], 'success')}")
     if not args.no_video:
-        e.flush_video(name=f"seed{args.seed}_{args.perception}"
+        e.flush_video(name=f"seed{args.seed}"
                            f"{'_ag' if args.assisted_grasp else ''}{'_blind' if args.blind else ''}")
     ag = getattr(e.unwrapped, "_ag", None)
     if ag is not None:

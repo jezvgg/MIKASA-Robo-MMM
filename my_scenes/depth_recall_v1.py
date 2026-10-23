@@ -88,8 +88,8 @@ PAD_HALF = (0.045, 0.045, 0.002)
 
 #: The pads' fixed palette: pad c belongs to prop c (`PAD_MAP` names the pairs in the
 #: instruction), and the episode's ticket permutes which SLOT each pad occupies. These
-#: four hues are the ones the coloured-box version of this task measured its pads and its
-#: perception on. The props are no longer drawn in them (`PROPS`).
+#: four hues are the ones the coloured-box version of this task measured its pads on.
+#: The props are no longer drawn in them (`PROPS`).
 PROP_COLORS = (
     (1.0, 0.1, 0.1, 1.0),   # red
     (0.1, 0.8, 0.1, 1.0),   # green
@@ -107,8 +107,8 @@ PROP_COLORS = (
 #: control step and no contact of either with it reported (seed 1004, traced step by
 #: step: geometry, contact list, video). The 243 g boxes never showed it. At 0.005 the
 #: band is 1 cm, under the clearances the oracle keeps in the row: seeds 1000-1009 went
-#: from 36/40 (0.02) to 39/40 over two grasp-depth ladders x both perception modes, and
-#: the knock-overs that were most of the failures at 0.02 did not occur.
+#: from 36/40 (0.02) to 39/40 over two grasp-depth ladders, and the knock-overs that were
+#: most of the failures at 0.02 did not occur.
 SCENE_CONTACT_OFFSET = 0.005
 
 
@@ -147,9 +147,8 @@ class PropSpec:
 #: squeeze bottle (ketchup_8, a different shape from the ketchup's) is drawn in the
 #: yellow pad's colour and called mustard: as its own flat orange-red «hot sauce» it was a
 #: second red bottle beside the ketchup (the owner's call 2026-10-19; mayonnaise was
-#: passed over, it would be white like the salt). Telling them apart is by object: the planner's
-#: state mode reads the simulator; the camera mode (`planners/depth_recall_v1_perception`)
-#: still names props by the old hues and does not support this look yet.
+#: passed over, it would be white like the salt). Telling them apart is by object: the
+#: planner reads the simulator.
 #:
 #: Measured sizes (collision mesh, RoboCasa scale), all 2026-10-16:
 #: ketchup_7 4.20 x 4.33 x 16.50 cm 19.3 g; shaker_0 / shaker_1 5.17 x 5.09 x 9.45 cm
