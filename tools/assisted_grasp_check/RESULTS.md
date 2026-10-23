@@ -92,3 +92,28 @@ weld lets the bar rotate freely in the hand, so near the end the leaf face meets
    stance, LEVER_END): push from here, tuck, touch-dock drive. The four runs above passed them.
 Then validate on 20-40 seeds (success, motion audit, clearance gates, `hand_overlap_replay.py` = 0 on
 the new episodes, a look at the hand camera) before re-collecting 1000.
+
+## BIMBO swing fix, validated (2026-10-23, commits c08887b, 5ad0c8e, debe78b)
+
+The swing now ends when the hand presses the leaf (> 1 N) and the leaf moved < 0.005 rad over the
+last 8 controls (`LEAF_CONTACT_N`, `LEAF_STOP_STEPS`, `LEAF_STOP_EPS`). A first version stopped at the
+first touch: the face touches the hand from ~1.0 rad and slides along it to ~1.7, so the leaves were
+left at ~1.0 rad and 4/4 rounds were lost.
+
+`episode_check.py` (the collection episode, measured every control), fixed assisted grasp:
+
+| Seeds (dataset episodes) | Success | Swings | Swing end | Hand in a leaf, max | Hand on leaf, max force |
+|---|---|---|---|---|---|
+| 5: eps 0, 200, 400, 600, 800 | 5/5 | 8, all `hand-on-leaf`, 106-108 controls | 1.683-1.709 rad | 0.9 mm | 193-215 N |
+| 10: eps 50, 100, 150, 250, 300, 350, 450, 500, 650, 900 | 9/10 | 19: 17 `hand-on-leaf`, 2 `target` | 1.686-1.723 rad | 1.0 mm | 185-216 N |
+
+Before the fix the hand went 36-57 mm into the leaf; before the swing fix every swing pressed the
+leaf for its 60-control stall window (157-159 controls). The one miss (seed 7880608, episode 450,
+a success in the dataset) is in the close, not the opening: the fist pushed the leaf shut (rad 0.0),
+the retreat off the panel found no plan, the closing correction could not re-grasp the handle
+(`finger <-> hingerightdoor` in the screw), and the round was booked "the door did not close" -
+the failure class of the whole assisted-grasp collection (~20 % of its seeds).
+
+Open: in the second half of every swing the leaf slides along the hand with up to ~200 N (85-100
+controls above 20 N per swing). The task succeeds, but no real arm presses like that; a partial
+`HAND_TURN` (the hand's yaw following part of the leaf's turn) is the way to remove it.
