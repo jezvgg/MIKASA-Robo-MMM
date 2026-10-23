@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # MemoryVLA on ONE H100: does it learn our base commands with the normalization bounds of
-# set_norm_bounds.py (base +-1, joints min/max), and does it hold the arm without joint state?
+# set_norm_bounds.py (per-task min/max), and does it hold the arm without joint state?
 # A check, not the paper's recipe: one task, $EPISODES episodes, the authors' train.py with the
 # vision and LLM backbones frozen (their "align" stage; the full 7B fine-tune does not fit one
 # card), batch $BS, $STEPS steps at LR $LR; everything else as script/train/mikasa/train_mikasa.sh
@@ -20,7 +20,7 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=${1:-$HOME/mvla-debug}
 TASK=${TASK:-depthrecall}; EPISODES=${EPISODES:-40}; STEPS=${STEPS:-2500}; LR=${LR:-1e-4}; BS=${BS:-32}
 SAVE_EVERY=${SAVE_EVERY:-$STEPS}   # checkpoints are 32 GB each
-BASE_BOUNDS=${BASE_BOUNDS:-pm1}   # set_norm_bounds.py --base: pm1 or minmax
+BASE_BOUNDS=${BASE_BOUNDS:-minmax}   # set_norm_bounds.py --base: minmax (default) or pm1
 HELD_OUT=${HELD_OUT:-990,991,992,993,994}
 DATA_ROOT=${DATA_ROOT:-$HOME/datasets/memer}
 PY=$HOME/envs/memvla/bin/python; TORCHRUN=$HOME/envs/memvla/bin/torchrun

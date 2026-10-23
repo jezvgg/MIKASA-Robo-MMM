@@ -7,12 +7,13 @@ produced. The authors' code reads q01/q99 from `dataset_statistics_<hash>.json` 
 the RLDS on the first run) for normalization, the neutral action after an episode's end and
 un-normalization, so the bounds are changed there and the code is left alone:
 
-  base (channels 11, 12): q01 = -1, q99 = +1, the action contract's limits (fixed bounds, as the
-      BEHAVIOR baselines, BRS and RoboCasa treat a wheeled base; stop stays 0), or with
-      --base minmax the task's min/max like the joints (no clipping either, a finer scale for a
-      task that turns or drives in a narrow range);
-  arm, head, torso (0-6, 8-10): q01 = min, q99 = max of the task (as OpenVLA-OFT for absolute
-      joints); the gripper (7) is not normalized and is left as is.
+  every normalized channel, base (11, 12) and arm/head/torso (0-6, 8-10): q01 = min, q99 = max
+      of the task, so nothing is clipped. As GR00T N1.5 does for a mobile base (action.base_motion:
+      min_max) and OpenVLA-OFT for joints and base (ALOHA; R1Pro in BEHAVIOR). Decision 2026-10-23:
+      on a 10k-step check the contract's fixed -1/+1 for the base (--base pm1, the BEHAVIOR
+      baselines' way) turned the model's residual noise into large base commands, and min/max
+      scales a narrow-range channel (DepthRecall's turn, -0.14..+0.17) finer at no clipping cost.
+      The gripper (7) is not normalized and is left as is.
 
 usage: set_norm_bounds.py <dataset_statistics_*.json> [--check]   (--check only verifies)
 """
@@ -30,7 +31,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("stats", type=Path)
     ap.add_argument("--check", action="store_true")
-    ap.add_argument("--base", choices=("pm1", "minmax"), default="pm1",
+    ap.add_argument("--base", choices=("minmax", "pm1"), default="minmax",
                     help="base bounds: the contract's -1/+1, or the task's min/max like the joints")
     args = ap.parse_args()
     data = json.loads(args.stats.read_text())
