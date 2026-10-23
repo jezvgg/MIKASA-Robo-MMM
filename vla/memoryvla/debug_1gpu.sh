@@ -20,6 +20,7 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=${1:-$HOME/mvla-debug}
 TASK=${TASK:-depthrecall}; EPISODES=${EPISODES:-40}; STEPS=${STEPS:-2500}; LR=${LR:-1e-4}; BS=${BS:-32}
 SAVE_EVERY=${SAVE_EVERY:-$STEPS}   # checkpoints are 32 GB each
+BASE_BOUNDS=${BASE_BOUNDS:-pm1}   # set_norm_bounds.py --base: pm1 or minmax
 HELD_OUT=${HELD_OUT:-990,991,992,993,994}
 DATA_ROOT=${DATA_ROOT:-$HOME/datasets/memer}
 PY=$HOME/envs/memvla/bin/python; TORCHRUN=$HOME/envs/memvla/bin/torchrun
@@ -72,7 +73,7 @@ if [ -z "$(ls "$RUN/checkpoints/"*.pt 2>/dev/null)" ]; then
   [ -n "$(stats_file)" ] || { say "stats: FAILED"; tail -n 30 "$LOGS/stats.log" >> "$REPORT"; exit 1; }
   [ "$(find "$W/rlds/fetch_$TASK/" -name 'dataset_statistics_*.json' | wc -l)" -eq 1 ] \
     || { say "stats: expected exactly one statistics file"; exit 1; }
-  "$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$(stats_file)" | tee -a "$REPORT"
+  "$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$(stats_file)" --base "$BASE_BOUNDS" | tee -a "$REPORT"
   say "train: ${TASK}_bounds (log $LOGS/train.log)"
   setsid bash -c "$(declare -f train); REPO='$REPO' TASK='$TASK' W='$W' LR='$LR' CKPT='$CKPT' TORCHRUN='$TORCHRUN' train '${TASK}_bounds' '$STEPS' '$BS' '$SAVE_EVERY'" \
      > "$LOGS/train.log" 2>&1 &
@@ -80,7 +81,7 @@ if [ -z "$(ls "$RUN/checkpoints/"*.pt 2>/dev/null)" ]; then
   # The run writes the statistics it trains with into its run dir at start: stop at once if
   # they are not ours.
   for _ in $(seq 1 120); do [ -f "$RUN/dataset_statistics.json" ] && break; kill -0 "$TRAIN_PID" 2>/dev/null || break; sleep 15; done
-  if ! "$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$RUN/dataset_statistics.json" --check > /dev/null 2>&1; then
+  if ! "$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$RUN/dataset_statistics.json" --base "$BASE_BOUNDS" --check > /dev/null 2>&1; then
     kill -TERM -- "-$TRAIN_PID" 2>/dev/null; say "train: STOPPED, the run's statistics are not the edited ones"; exit 1
   fi
   wait "$TRAIN_PID"
@@ -90,7 +91,7 @@ if [ -z "$(ls "$RUN/checkpoints/"*.pt 2>/dev/null)" ]; then
   fi
   [ -n "$(ls "$RUN/checkpoints/"*.pt 2>/dev/null)" ] || { say "train: FAILED"; tail -n 30 "$LOGS/train.log" >> "$REPORT"; exit 1; }
 fi
-"$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$RUN/dataset_statistics.json" --check | sed 's/^/  run dir statistics: /' | tee -a "$REPORT"
+"$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$RUN/dataset_statistics.json" --base "$BASE_BOUNDS" --check | sed 's/^/  run dir statistics: /' | tee -a "$REPORT"
 "$PY" - "$RUN/${TASK}_bounds--image_aug.jsonl" <<'EOF' | tee -a "$REPORT"
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1]) if '"VLA Train/Loss"' in l]

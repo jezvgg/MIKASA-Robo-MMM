@@ -8,7 +8,9 @@ the RLDS on the first run) for normalization, the neutral action after an episod
 un-normalization, so the bounds are changed there and the code is left alone:
 
   base (channels 11, 12): q01 = -1, q99 = +1, the action contract's limits (fixed bounds, as the
-      BEHAVIOR baselines, BRS and RoboCasa treat a wheeled base); stop stays 0;
+      BEHAVIOR baselines, BRS and RoboCasa treat a wheeled base; stop stays 0), or with
+      --base minmax the task's min/max like the joints (no clipping either, a finer scale for a
+      task that turns or drives in a narrow range);
   arm, head, torso (0-6, 8-10): q01 = min, q99 = max of the task (as OpenVLA-OFT for absolute
       joints); the gripper (7) is not normalized and is left as is.
 
@@ -28,6 +30,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("stats", type=Path)
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--base", choices=("pm1", "minmax"), default="pm1",
+                    help="base bounds: the contract's -1/+1, or the task's min/max like the joints")
     args = ap.parse_args()
     data = json.loads(args.stats.read_text())
     keys = [k for k in data if isinstance(data[k], dict) and "action" in data[k]] or [None]
@@ -35,7 +39,7 @@ def main() -> None:
         act = data[key]["action"] if key else data["action"]
         want_lo = list(act["q01"]); want_hi = list(act["q99"])
         for i in BASE:
-            want_lo[i], want_hi[i] = -1.0, 1.0
+            want_lo[i], want_hi[i] = (-1.0, 1.0) if args.base == "pm1" else (act["min"][i], act["max"][i])
         for i in JOINTS:
             want_lo[i], want_hi[i] = act["min"][i], act["max"][i]
         if args.check:
