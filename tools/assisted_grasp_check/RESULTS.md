@@ -159,3 +159,25 @@ here is back to the validated 2512dd2 closing code.
 `train/vla` (main code); the policy branch can merge it afterwards. Profile-16 data (the published
 `cabinetsearch-ag-1000ep`) replays bit-exactly only with `MIKASA_AG_LEGACY_DRIVE=1`; so do SameDrawer,
 SeasonDish and DepthRecall, whose recorded actions also succeed under the fix (15/15, <= 31 mrad).
+
+## Checklist motion items, profile 16 vs profile 17 (2026-10-23)
+
+Same five seeds, `scripts/collection_episode.py --trajectory-out` with the code of 071d05a, once with
+`MIKASA_AG_LEGACY_DRIVE=1` (profile-16 behaviour: the episode lengths equal the published episodes',
+1307/445/399/880/437 frames) and once without (profile 17); `motion_items.py` applies the checklist's
+own `motion_metrics` and `pause_check` on the 10 Hz view and D7's parity on the 20 Hz original:
+
+| Item | Profile 16 | Profile 17 |
+|---|---|---|
+| success | 5/5 | 5/5 |
+| D2 rolls within +-pi, span <= pi | 5/5 | 5/5 |
+| D3 close sign combinations | [-1,1] handle grasps, one [1,1] | the same per seed |
+| D4 longest continuous turn | 1.07-3.09 rad, all <= pi | 1.08-3.03 rad, all <= pi |
+| D5 reverse frames / direction changes | 18-72 / 2-16 | 20-76 / 4-18 (the task's known open item, recorded not gated) |
+| D6 identical pairs / longest pause | 3.0-3.8 % / 5-7 frames, 5/5 pass | 3.1-3.4 % / 5-6 frames, 5/5 pass |
+| D7 gripper switches on odd 20 Hz steps | 0 | 0 |
+
+The fix leaves the checklist's motion items where they were. Not measured here: E1 (target in view)
+and the format, volume and seed items (F-H); the collection's gates and finalize check them.
+(An earlier run of this comparison used a server tree still on the reverted closing experiments and
+failed 2 of 5 under profile 17; it is discarded.)
