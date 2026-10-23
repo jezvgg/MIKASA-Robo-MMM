@@ -181,3 +181,44 @@ The fix leaves the checklist's motion items where they were. Not measured here: 
 and the format, volume and seed items (F-H); the collection's gates and finalize check them.
 (An earlier run of this comparison used a server tree still on the reverted closing experiments and
 failed 2 of 5 under profile 17; it is discarded.)
+
+## The can struck before the push, and profile 19 (2026-10-23)
+
+Under profile 17/18 seed 7880257 (episode 200) ends `success` with the can laid on its side before
+the push; the can-early gate rejects it. Cause, measured three ways:
+
+- `can_touch_probe.py` (the episode with every robot-link <-> can contact and the can's first move
+  recorded): the left fingertip strikes the can at step 795, inside the joint line to
+  `NUDGE_LEVEL_POSTURE` ("level the hand for the touch"); the can is 4.6 cm off and tilted 37 deg
+  within that one control step, 6.1 cm and 86 deg a step later.
+- `can_clearance_fk.py` (FK of the hand's collision vertices on the saved trajectories against the
+  can as a cylinder): mid-line the elbow flips and the fingertips swing ~10 cm past the line's ends,
+  into the open compartment (y -0.30 against -0.40 at the end). Clearance to the can in that phase
+  on five seeds: 0.7 / 3.0 / 1.8 / 2.2 / 3.5 cm; 7880257 has the can at the shelf's front (y -0.28)
+  and 4 cm off the dock's x.
+- The planner took the can out of its planning world for that line (`common.touchable`, written for
+  the 6 cm cube: "a brush of the cube here is the touch itself"). Under profile 16 the hand passed
+  through the can, so a brush cost nothing; since profile 17 it collides.
+
+The fix (`NUDGE_LEVEL_ROOM_M`, planners/cabinet_search_planner.py): the arm is readied - the ready
+posture, the torso raise, the level hand - 0.10 m short of the touch dock, the can in the planning
+world, and the base rolls in to the dock with the arm frozen. A first version backed the base off
+between the raise and the level hand instead: the can was spared, but the torso sagged 3 mm during
+the drive, the line's refinement then held the arm ~15 steps, and D6 (identical actions <= 5 %)
+failed on 3 of 15 short episodes (5.05-5.12 %). Readied short, it does not.
+
+Same 15 seeds as the BIMBO validation (5 + 10), physics only (`fix19/run.sh`):
+
+| | Profile 17/18 | Profile 19 |
+|---|---|---|
+| success | 14/15 | 14/15 (7880608: the door did not close, step 1174, identical events to profile 17's) |
+| can-early gate | 13/14 successes (7880257 struck) | 14/14 (can xy <= 0.2 mm, tilt 0 until the push) |
+| push | first attempt, 6-8 cm | first attempt on all 14, 6-7 cm |
+| hand in the leaves, max | <= 1.0 mm | <= 1.0 mm |
+| level-hand clearance to the can (FK) | 0.7-3.5 cm (five seeds) | 8.9-12.9 cm; the roll-in 6.1-8.5 cm |
+| combined ready + raise line | refused on 3 of 15 (sequential fallback) | never refused |
+| D6 identical pairs / longest pause | 3.1-3.4 % / 5-6 | 3.0-3.7 % / 5-7, 15/15 pass |
+| D2, D4, D7 | pass | pass |
+| episode length | | +10-25 frames at 10 Hz |
+
+`MIKASA_NUDGE_LEVEL_ROOM_M=0` is the profile-18 preparation at the dock.

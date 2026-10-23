@@ -385,6 +385,19 @@ wrist 0.26 from their limits)."""
 NUDGE_ROOM_M = 0.20
 """How far the base backs off when the ready posture's joint line is blocked at the
 dock (the forearm under the cabinet's bottom edge after the look)."""
+NUDGE_LEVEL_ROOM_M = float(os.environ.get("MIKASA_NUDGE_LEVEL_ROOM_M", "0.10"))
+"""How far short of the touch dock the arm is readied (the ready posture, the raise, the
+level hand); the base rolls in after, arm frozen (profile 19, 2026-10-23). Mid-line to
+`NUDGE_LEVEL_POSTURE` the elbow flips and the fingertips swing ~10 cm past both ends of the
+line, into the open compartment: y -0.30 at the dock against -0.40 at the end, on all five
+seeds measured by FK on the saved trajectories (tools/assisted_grasp_check/
+can_clearance_fk.py), 0.7-3.5 cm from the can. Under profile 16 the hand passed through the
+can; since profile 17 it collides, and on 7880257 (the can at the front of the shelf, 4 cm
+off the dock's x) the fingers laid it on its side before the push. 0.10 m short keeps the
+swing 11-15 cm from the can. Readied short, not backed off between the raise and the level
+hand: a back-off there let the torso sag 3 mm, the line's refinement then held the arm
+~15 steps, and D6 (identical actions <= 5 %) failed on 3 of 15 short episodes. 0 is the
+old preparation at the dock."""
 NUDGE_REACH_MAX_KNOTS = 60
 """The RRT cap on the pre-touch reach (K59's `max_knots`, refusing over it): the reach
 from the ready posture is a screw of a few knots; a long RRT path there is the arm
@@ -946,6 +959,9 @@ def nudge_the_cube(env, planner, task, res, cab=None):
     # IK there and one attempt took pinocchio down (log3 assertion) on 2102-2104.
     docked = False
     view = np.array([0.0, 1.0, 0.0])
+    # The arm is readied NUDGE_LEVEL_ROOM_M short of the dock, and the base rolls in after
+    # the level hand (profile 19): the swing to the level hand reaches into the compartment.
+    prep = dock - view * NUDGE_LEVEL_ROOM_M
     # BIMBO door mode only: the servoed swing leaves the base turned a few degrees and the
     # arm in another configuration than the arc pull, and from there the short turn to the
     # touch dock collides, so `drive_base` turned the LONG way round, ~306 deg, on 9 of 10
@@ -953,7 +969,7 @@ def nudge_the_cube(env, planner, task, res, cab=None):
     # the leaf, and only then accept a long turn, logged.
     if door_mode(task) == "bimbo":
         planner.planner.update_from_simulation()
-        short, turn = _touch_turn_is_short(planner, dock, view)
+        short, turn = _touch_turn_is_short(planner, prep, view)
         if not short:
             say(env, "touch-dock turn would go the long way; folding first",
                 turn_deg=None if turn is None else round(math.degrees(turn), 1))
@@ -963,7 +979,7 @@ def nudge_the_cube(env, planner, task, res, cab=None):
                 if common.stopped_by_horizon(planner):
                     return res
             planner.planner.update_from_simulation()
-            short, turn = _touch_turn_is_short(planner, dock, view)
+            short, turn = _touch_turn_is_short(planner, prep, view)
         if not short and TOUCH_BACKOFF_M > 0:
             say(env, "touch-dock turn still long; backing off the leaf", m=TOUCH_BACKOFF_M,
                 turn_deg=None if turn is None else round(math.degrees(turn), 1))
@@ -973,7 +989,7 @@ def nudge_the_cube(env, planner, task, res, cab=None):
                 if common.stopped_by_horizon(planner):
                     return res
             planner.planner.update_from_simulation()
-            short, turn = _touch_turn_is_short(planner, dock, view)
+            short, turn = _touch_turn_is_short(planner, prep, view)
         say(env, "touch-dock turn", short=short,
             turn_deg=None if turn is None else round(math.degrees(turn), 1))
     for posture in ("as-is", "drive"):
@@ -983,8 +999,8 @@ def nudge_the_cube(env, planner, task, res, cab=None):
                 res = r
                 if common.stopped_by_horizon(planner):
                     return res
-        say(env, "drive to the touch dock", dock=[round(float(v), 3) for v in dock[:2]], posture=posture)
-        r = planner.drive_base(target_pos=dock, target_view_vec=view, freeze_arm=True)
+        say(env, "drive to the touch dock", dock=[round(float(v), 3) for v in prep[:2]], posture=posture)
+        r = planner.drive_base(target_pos=prep, target_view_vec=view, freeze_arm=True)
         if r != -1:
             res = r
             if common.stopped_by_horizon(planner):
@@ -1035,7 +1051,7 @@ def nudge_the_cube(env, planner, task, res, cab=None):
                 if r != -1 and common.stopped_by_horizon(planner):
                     return r
                 planner.planner.update_from_simulation()
-                r2 = planner.drive_base(target_pos=dock, target_view_vec=np.array([0.0, 1.0, 0.0]), freeze_arm=True)
+                r2 = planner.drive_base(target_pos=prep, target_view_vec=np.array([0.0, 1.0, 0.0]), freeze_arm=True)
                 if r2 != -1:
                     r = r2
                     if common.stopped_by_horizon(planner):
@@ -1056,20 +1072,35 @@ def nudge_the_cube(env, planner, task, res, cab=None):
                 say(env, "the torso raise refused; reaching from where it stands")
             planner.planner.update_from_simulation()
         # The level hand (the elbow-down family) as a joint line; a blocked line is
-        # left to the screw from the ready posture, never an RRT draw (K111). The cube
-        # is out of the planning world for it: the swing's fingertips stay 8 cm short
-        # of its near face by the numbers, but the planner booked `finger <-> cube` at
-        # knot 7/21 on 2144 (cube 6 cm off the dock's x) and refused the whole line —
-        # and a brush of the cube here is the touch itself, not a loss.
-        with common.touchable(planner, "cube"):
+        # left to the screw from the ready posture, never an RRT draw (K111). At `prep`,
+        # NUDGE_LEVEL_ROOM_M short of the dock, the cube stays in the planning world: the
+        # swing reaches into the compartment, and the hand collides with the can since
+        # profile 17. With no room (0) the old line at the dock, the cube out of the
+        # world: the planner booked `finger <-> cube` at knot 7/21 on 2144 and refused
+        # the whole line.
+        if NUDGE_LEVEL_ROOM_M > 0:
             r = plan_joints(env, planner, task, dict(NUDGE_LEVEL_POSTURE),
                             label="level the hand for the touch", line_only=True)
+        else:
+            with common.touchable(planner, "cube"):
+                r = plan_joints(env, planner, task, dict(NUDGE_LEVEL_POSTURE),
+                                label="level the hand for the touch", line_only=True)
         if r != -1:
             res = r
             if common.stopped_by_horizon(planner):
                 return res
         else:
             say(env, "the level posture refused; the screw from the ready posture")
+        planner.planner.update_from_simulation()
+    if NUDGE_LEVEL_ROOM_M > 0:
+        say(env, "roll in to the touch dock", dock=[round(float(v), 3) for v in dock[:2]])
+        r = planner.drive_base(target_pos=dock, target_view_vec=view, freeze_arm=True)
+        if r != -1:
+            res = r
+            if common.stopped_by_horizon(planner):
+                return res
+        else:
+            say(env, "the roll-in to the touch dock refused; reaching from here")
         planner.planner.update_from_simulation()
     amplitude = float(getattr(task, "motion_parameters", {}).get("grasp_noise_m", 0.0))
     noise = getattr(planner, "cabinet_waypoint_noise", None)
