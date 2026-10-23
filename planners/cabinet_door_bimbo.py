@@ -85,6 +85,17 @@ centimetres of the bar however the door moves)."""
 HAND_TURN = _f("MIKASA_BD_HAND_TURN", 0.0)
 """Fraction of the door's turn the hand's yaw follows (BIMBO: 1; see the module docstring)."""
 SWING_MAX_STEPS = int(_f("MIKASA_BD_SWING_MAX_STEPS", 600))
+LEAF_CONTACT_N = _f("MIKASA_BD_LEAF_CONTACT_N", 1.0)
+LEAF_CONTACT_STEPS = int(_f("MIKASA_BD_LEAF_CONTACT_STEPS", 2))
+LEAF_CONTACT_FROM = _f("MIKASA_BD_LEAF_CONTACT_FROM", 0.6)
+"""The swing ends where the leaf meets the hand: the hand (`gripper_link`) pressing the leaf with
+more than LEAF_CONTACT_N newtons for LEAF_CONTACT_STEPS controls in a row, once the leaf has
+covered LEAF_CONTACT_FROM of the way (the hand may touch the face at the grasp). With HAND_TURN 0
+the hand keeps its world orientation while the leaf turns ~100 deg, and the bar turns freely in
+the weld, so near the end the face comes round onto the hand. Since assisted grasp keeps the hand
+colliding (2026-10-23) the leaf stops there, ~1.69-1.71 rad, and without this the swing pressed
+it for its whole 60-control stall window (seven of seven openings, seeds 7880000-7880793). Under
+the pre-fix drives the hand passed through the leaf and this never fires."""
 STALL_STEPS = 60
 STALL_EPS = 0.01
 "Less door travel than STALL_EPS over STALL_STEPS controls is a stall."
@@ -438,7 +449,8 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
     than LEAD_MAX ahead of the measured leaf; the hand is servoed to the grasp frame carried to
     `sw` (`door_frames`, its yaw turned by HAND_TURN of the door's); the base creeps so the goal
     stands at a lever going from `lever_a` to `lever_b` by LEVER_LEAD_FRAC of the way, then
-    settles there. Stops on the target, an empty hand, a stall, or SWING_MAX_STEPS.
+    settles there. Stops on the target, the leaf pressing the hand (LEAF_CONTACT_*), an empty
+    hand, a stall, or SWING_MAX_STEPS.
 
     Returns `(res, reason, goal)`; `res` is None when the horizon struck (the caller returns
     the solver's last step).
@@ -465,6 +477,11 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
     goal = frame(sw)
     q = _qpos(task)
     q_arm0, q_base0 = q[servo.idx].copy(), q[:3].copy()
+    art = task.scene.articulations[crp._art_key(task, door)]
+    joints = art.get_active_joints()
+    leaf = joints[[j.name for j in joints].index(door.hinge)].child_link
+    hand = task.agent.robot.links_map["gripper_link"]
+    pressed, press_max = 0, 0.0
     hist: list = []
     trace: list = []
     reason = "max-steps"
@@ -497,6 +514,14 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
         if fresh:
             perr_max = max(perr_max, float(np.linalg.norm(dp)))
             rerr_max = max(rerr_max, float(np.linalg.norm(dr)))
+        press = float(np.linalg.norm(_np(task.scene.get_pairwise_contact_forces(hand, leaf))
+                                     .reshape(-1, 3), axis=1).max())
+        press_max = max(press_max, press)
+        far = direction * (float(crp.door_rad_now(task, door)) - start) >= LEAF_CONTACT_FROM * span
+        pressed = pressed + 1 if (far and press > LEAF_CONTACT_N) else 0
+        if pressed >= LEAF_CONTACT_STEPS:
+            reason = "hand-on-leaf"
+            break
         if i % 10 == 0:
             hand = ds.angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
             trace.append([i, round(sw, 3), round(rad, 3), round(hand, 3),
@@ -506,7 +531,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
             return None, "horizon", goal
     # -- the stance settles: the goal held on the bar, the creep runs on to lever_b -----------
     settle, lever_err = 0, 0.0
-    if reason == "target" and LEVER_END[0] > 0:
+    if reason in ("target", "hand-on-leaf") and LEVER_END[0] > 0:
         for settle in range(1, SETTLE_STEPS + 1):
             q = _qpos(task)
             v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], np.zeros(2), q[:2], float(q[2]),
@@ -526,7 +551,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
         arm_moved=[round(float(v), 3) for v in q_end[servo.idx] - q_arm0],
         base_moved=[round(float(v), 3) for v in q_end[:3] - q_base0],
         base_end=[round(float(v), 3) for v in q_end[:3]], settle=settle,
-        lever_err=round(lever_err, 3),
+        lever_err=round(lever_err, 3), hand_on_leaf_n_max=round(press_max, 2),
         trace="[i, sw, rad, hand, perr, rerr, v, w, a_x, a_y] " + str(trace[-16:]),
         **({"door_tail": [round(v, 3) for v in hist[-20:]]} if reason != "target" else {}))
     return res, reason, goal
