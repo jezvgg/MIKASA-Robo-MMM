@@ -45,7 +45,7 @@ Not measured: the visual meshes (the dataset videos show the visual leaf, which 
 collision box), and jezv's TakeItBack and Veggie, which use the same assisted grasp code in this tree
 but were collected with his copy of it.
 
-## The fix and what it changes (2026-10-23, commit 8b3b8c8)
+## The fix and what it changes (2026-10-23, commit b98cee0)
 
 `utils/mikasa/assisted_grasp.py` now starts every object's drive at one shapeless, gravity-free proxy
 that one more drive locks to the hand while something is held; the hand is in no drive. The test
@@ -93,7 +93,7 @@ weld lets the bar rotate freely in the hand, so near the end the leaf face meets
 Then validate on 20-40 seeds (success, motion audit, clearance gates, `hand_overlap_replay.py` = 0 on
 the new episodes, a look at the hand camera) before re-collecting 1000.
 
-## BIMBO swing fix, validated (2026-10-23, commits c08887b, 5ad0c8e, debe78b)
+## BIMBO swing fix, validated (2026-10-23, commits 457051f, 5c21a3c, 2512dd2)
 
 The swing now ends when the hand presses the leaf (> 1 N) and the leaf moved < 0.005 rad over the
 last 8 controls (`LEAF_CONTACT_N`, `LEAF_STOP_STEPS`, `LEAF_STOP_EPS`). A first version stopped at the
@@ -135,7 +135,7 @@ the hand is inside the compartment).
 `MIKASA_BD_HAND_TURN=0.25` (the hand's yaw follows a quarter of the leaf's turn), seeds of episodes
 0, 200, 400, 600, 800:
 
-| | HAND_TURN 0 (debe78b) | HAND_TURN 0.25 |
+| | HAND_TURN 0 (2512dd2) | HAND_TURN 0.25 |
 |---|---|---|
 | success | 5/5 (one knocks the can: 4 acceptable) | 3/5, all acceptable |
 | swing end | 1.68-1.71 rad, all `hand-on-leaf` | 1.73-1.75 rad, 3 of 5 on the target |
@@ -150,4 +150,12 @@ an RRT retreat with the cabinet out of the planning world (swept the hand into t
 a 0.20 m and a 0.35 m straight base back-off with the arm held (0.38-0.71), withdrawing with the fist
 and opening when away (0.44, 0.71), and `MIKASA_CLOSE_R_PUSH=0.25` (no effect: the push from here does
 not use that radius). The same miss class appeared once with HAND_TURN 0 (seed 7880608). The planner
-here is back to the validated debe78b closing code.
+here is back to the validated 2512dd2 closing code.
+
+## For the re-collection (owner 2026-10-23: no HAND_TURN, new HF repo)
+
+`utils/collection/cabinet_search_profile.json` is profile 17: the profile-16 settings on this code
+(proxy-held assisted grasp, the swing that ends on the stall, HAND_TURN 0). The branch sits on
+`train/vla` (main code); the policy branch can merge it afterwards. Profile-16 data (the published
+`cabinetsearch-ag-1000ep`) replays bit-exactly only with `MIKASA_AG_LEGACY_DRIVE=1`; so do SameDrawer,
+SeasonDish and DepthRecall, whose recorded actions also succeed under the fix (15/15, <= 31 mrad).
