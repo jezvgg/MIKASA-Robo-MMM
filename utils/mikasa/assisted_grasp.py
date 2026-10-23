@@ -20,7 +20,17 @@ Here the joint is a ``PhysxDriveComponent`` created once per object when the tas
 built and toggled with ``enable``/``disable``: its x/y/z and twist limits at zero lock
 the position and one axis of rotation, and a stiff slerp drive to the identity locks the
 other two (a zero cone limit does NOT: with it alone a hand turned 76.6 deg and the
-welded prop did not turn at all). Measured on mani_skill 3.0.0b22, CPU: a welded prop
+welded prop did not turn at all).
+
+The drives do not join the hand to the objects directly. A SAPIEN drive switches collision
+between its two bodies off for as long as it exists, enabled or not, and SAPIEN 3.0.3 cannot
+switch it back on (``tools/assisted_grasp_check/drive_collision_test.py``). Built hand -> object,
+the hand never collided with any graspable object, held or not: in CabinetSearch it went
+through the door leaves (``tools/assisted_grasp_check/RESULTS.md``, 2026-10-23). So every object's
+drive starts at one shapeless, gravity-free proxy body, and one more drive locks the proxy to the
+hand while something is held; the hand itself is in no drive and collides with everything.
+``AssistedGraspConfig.hand_collides=False`` (or ``MIKASA_AG_LEGACY_DRIVE=1``) rebuilds the old
+direct drives, to replay datasets collected before the fix. Measured on mani_skill 3.0.0b22, CPU: a welded prop
 follows the hand in position and orientation and falls when the drive is disabled
 (``test_assisted_grasp.py``). CPU simulation only (one env): under GPU
 simulation the drives would have to exist before ``gpu_init`` and toggling them there is
@@ -69,6 +79,12 @@ class AssistedGraspConfig:
     "N m/rad of the slerp drive that holds the welded orientation."
     weld_damping: float = 1e4
     "N m s/rad of the same drive."
+    hand_collides: bool = True
+    """Drives start at a shapeless proxy locked to the hand, so the hand keeps colliding with
+    the graspable objects. False: the pre-2026-10-23 direct hand -> object drives, under which
+    the hand passes through them (for replaying data collected that way)."""
+    proxy_mass: float = 0.01
+    "Kilograms of the proxy; carried by the hand only while something is held."
 
 
 class GraspWindow:
@@ -220,19 +236,33 @@ class AssistedGrasp:
                 continue
             body = obj._objs[0].find_component_by_type(sapien.physx.PhysxRigidDynamicComponent)
             self._masses.append(float(body.mass) if body is not None else float("inf"))
-        # One drive per object, hand -> object, made now and switched later.
+        # One drive per object, made now and switched later: from the proxy (see the module
+        # docstring), or straight from the hand in the legacy mode.
+        legacy = (not self.cfg.hand_collides) or os.environ.get("MIKASA_AG_LEGACY_DRIVE") == "1"
+        sub = env.scene.sub_scenes[0]
+        hand_entity = self.hand._objs[0].entity
+        self._proxy = self._hand_drive = None
+        if not legacy:
+            builder = sub.create_actor_builder()
+            builder.set_mass_and_inertia(self.cfg.proxy_mass, sapien.Pose(), [1e-5, 1e-5, 1e-5])
+            self._proxy = builder.build(name="assisted_grasp_proxy")
+            body = self._proxy.find_component_by_type(sapien.physx.PhysxRigidDynamicComponent)
+            body.set_disable_gravity(True)
+            self._proxy_body = body
+            self._hand_drive = sub.create_drive(hand_entity, sapien.Pose(), self._proxy, sapien.Pose())
+            self._lock(self._hand_drive)
+            self._hand_drive.set_drive_target(sapien.Pose())
+            self._hand_drive.disable()
         self._drives = []
         for obj in self.objects:
-            drive = env.scene.create_drive(self.hand, sapien.Pose(), obj, sapien.Pose())
-            component = drive._objs[0]
-            for set_limit in (component.set_limit_x, component.set_limit_y, component.set_limit_z):
-                set_limit(0, 0)
+            entity = obj._objs[0].entity if _is_link(obj) else obj._objs[0]
+            component = sub.create_drive(hand_entity if legacy else self._proxy, sapien.Pose(),
+                                         entity, sapien.Pose())
             if not _is_link(obj):
-                component.set_limit_twist(0, 0)
-                # The swing axes: a cone limit does not lock them on a drive, a stiff
-                # slerp drive to the identity does.
-                component.set_drive_property_slerp(self.cfg.weld_stiffness, self.cfg.weld_damping)
+                self._lock(component)
             else:
+                for set_limit in (component.set_limit_x, component.set_limit_y, component.set_limit_z):
+                    set_limit(0, 0)
                 # Free rotation for a link. NOT the default: a fresh drive limits twist to
                 # +-90 deg and the cone to 90 deg (SAPIEN 3.0.3), and a CabinetSearch door
                 # pulled ~100 deg open hit that stop and dragged the hand round with it
@@ -247,11 +277,24 @@ class AssistedGrasp:
         self.anchor = np.zeros(3, dtype=np.float32)   # grasp point in the hand frame (links)
         self.events: list = []
 
+    def _lock(self, component) -> None:
+        """Position and rotation locked: x/y/z and twist limits at zero, and a stiff slerp
+        drive to the identity for the swing axes (a cone limit does not lock them)."""
+        for set_limit in (component.set_limit_x, component.set_limit_y, component.set_limit_z):
+            set_limit(0, 0)
+        component.set_limit_twist(0, 0)
+        component.set_drive_property_slerp(self.cfg.weld_stiffness, self.cfg.weld_damping)
+
+    def _release_all(self) -> None:
+        for component in self._drives:
+            component.disable()
+        if self._hand_drive is not None:
+            self._hand_drive.disable()
+
     # ------------------------------------------------------------------ state --
 
     def reset(self) -> None:
-        for component in self._drives:
-            component.disable()
+        self._release_all()
         self.window.reset()
         self.rel_pose[:] = 0.0
         self.anchor[:] = 0.0
@@ -276,8 +319,7 @@ class AssistedGrasp:
             # A state saved without the rule (e.g. `env.set_state` of actors and
             # articulations only): no weld survives it, or the old one would yank the
             # restored prop to the hand on the next step.
-            for component in self._drives:
-                component.disable()
+            self._release_all()
             self.window.reset()
             self.rel_pose[:] = 0.0
             return
@@ -286,8 +328,7 @@ class AssistedGrasp:
         self.rel_pose[:] = np.asarray(state["ag_rel_pose"], dtype=np.float32).reshape(-1)[:7]
         if "ag_anchor" in state:
             self.anchor[:] = np.asarray(state["ag_anchor"], dtype=np.float32).reshape(-1)[:3]
-        for component in self._drives:
-            component.disable()
+        self._release_all()
         if self.window.attached:
             self._weld(self.window.held, sapien.Pose(self.rel_pose[:3], self.rel_pose[3:]))
 
@@ -367,7 +408,7 @@ class AssistedGrasp:
         if kind == "establish":
             self._attach_here(i)
         else:
-            self._drives[i].disable()
+            self._release_all()
         step = int(np.asarray(self.env.elapsed_steps).reshape(-1)[0])
         self.events.append((step, kind, self.objects[i].name))
         if os.environ.get("MIKASA_AG_LOG") == "1":
@@ -378,8 +419,7 @@ class AssistedGrasp:
 
         The rule still governs the release: with the gripper commanded open, the next
         physics step lets go."""
-        for component in self._drives:
-            component.disable()
+        self._release_all()
         self.window.reset()
         self.window.held = int(i)
         self._attach_here(int(i))
@@ -398,6 +438,13 @@ class AssistedGrasp:
         rotation free."""
         import sapien
 
+        if self._proxy is not None:
+            # The proxy stands in the hand frame: put it there, at the hand's velocity, and lock it.
+            hand = self.hand._objs[0]
+            self._proxy.set_pose(hand.entity_pose)
+            self._proxy_body.set_linear_velocity(hand.linear_velocity)
+            self._proxy_body.set_angular_velocity(hand.angular_velocity)
+            self._hand_drive.enable()
         component = self._drives[i]
         if _is_link(self.objects[i]):
             at = sapien.Pose(np.asarray(self.anchor, dtype=np.float64))
