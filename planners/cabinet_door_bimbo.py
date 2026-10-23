@@ -480,7 +480,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
     art = task.scene.articulations[crp._art_key(task, door)]
     joints = art.get_active_joints()
     leaf = joints[[j.name for j in joints].index(door.hinge)].child_link
-    hand = task.agent.robot.links_map["gripper_link"]
+    hand_link = task.agent.robot.links_map["gripper_link"]
     pressed, press_max = 0, 0.0
     hist: list = []
     trace: list = []
@@ -514,7 +514,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
         if fresh:
             perr_max = max(perr_max, float(np.linalg.norm(dp)))
             rerr_max = max(rerr_max, float(np.linalg.norm(dr)))
-        press = float(np.linalg.norm(_np(task.scene.get_pairwise_contact_forces(hand, leaf))
+        press = float(np.linalg.norm(_np(task.scene.get_pairwise_contact_forces(hand_link, leaf))
                                      .reshape(-1, 3), axis=1).max())
         press_max = max(press_max, press)
         far = direction * (float(crp.door_rad_now(task, door)) - start) >= LEAF_CONTACT_FROM * span
