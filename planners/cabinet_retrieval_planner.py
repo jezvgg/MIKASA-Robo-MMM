@@ -219,6 +219,18 @@ FIST_WRIST_FIRST = os.environ.get("MIKASA_FIST_WRIST_FIRST", "1") == "1"
 fingers stand vertical, the nearer way up: the owner's «можно было просто повернуть сам гриппер». The
 pre-contact move then has (almost) no turn about the hand's axis left to spread over the forearm and
 upper-arm rolls."""
+FIST_RETREAT_SERVO = os.environ.get("MIKASA_FIST_RETREAT_SERVO", "1") == "1"
+"""After the closing push and the release, the hand backs off the shut leaf the way its stroke came in
+(the face's outward normal), orientation held, under the hand servo; the base reverses for what the arm
+cannot give. Nothing is planned next to the leaf. The shipped retreat, a screw back along the hand's
+axis with RRT behind it, jammed on shoulder_lift (`joint limit at index [7]`: 8 refusals on eight
+four-compartment seeds with FIST_WRIST_FIRST, 2026-10-24) and the RRT path that replaced it dragged the
+leaf open (7991201: to 0.114 rad, the episode lost)."""
+FIST_WRIST_BACK = os.environ.get("MIKASA_FIST_WRIST_BACK", "1") == "1"
+"""Once the hand is off the leaf, undo FIST_WRIST_FIRST's turn: the wrist roll alone, back to where it
+stood before the close."""
+RETREAT_SERVO_STEPS = 80
+RETREAT_BASE_MAX_M = 0.30
 NEAR_IK_W_WRIST_ROLL = 0.3
 NEAR_IK_SEEDS = 120
 """The closing fist's fingers stay vertical but either way up, whichever is nearer the hand's present
@@ -2035,10 +2047,14 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         exactly as the drive left it and the next rung starts clean."""
         if fist and FIST_WRIST_FIRST and not push.get("wrist_turned"):
             push["wrist_turned"] = True
+            j = int(A.robot.active_joints_map["wrist_roll_joint"].active_index[0])
+            before = float(_np(A.robot.get_qpos()).reshape(-1)[j])
             r = _turn_wrist_for_fist(env, planner, task)
-            if r != -1 and common.stopped_by_horizon(planner):
-                push["stop"] = r
-                return -1
+            if r != -1:
+                push["wrist_from"] = before
+                if common.stopped_by_horizon(planner):
+                    push["stop"] = r
+                    return -1
         if not push.get("fisted"):
             if fist:
                 r = planner.close_gripper(t=12)  # the fist is the tool, not a failed grasp
@@ -2293,14 +2309,30 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         planner.planner.update_from_simulation()
 
     # Retreat the open hand so the closure dwell reads a free door.
-    tcp = task.agent.tcp.pose.sp
-    back = common.arm_move(env, planner,
-                           sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -.30 if physical_close else -.15]),
-                           who=WHO, stage="retreat off the panel", tries=2)
+    dist = .30 if physical_close else .15
+    back = -1
+    if fist and FIST_RETREAT_SERVO:
+        _, n_shut = push_frame(anchor_xy, sense, _hinge_qpos(task, door), door)
+        away = np.array([float(n_shut[0]), float(n_shut[1]), 0.0])
+        back = _retreat_by_servo(env, planner, task, away=away / max(float(np.linalg.norm(away)), 1e-6),
+                                 dist=dist)
+        if back is None:
+            return planner._guard.last_step
+    if back == -1:
+        tcp = task.agent.tcp.pose.sp
+        back = common.arm_move(env, planner, sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -dist]),
+                               who=WHO, stage="retreat off the panel", tries=2)
     if back != -1:
         res = back
         if common.stopped_by_horizon(planner):
             return res
+    if push.get("wrist_from") is not None and FIST_WRIST_BACK:
+        planner.planner.update_from_simulation()
+        r = common.plan_joints(env, planner, task, {"wrist_roll_joint": push["wrist_from"]},
+                               label="turn the wrist back", who=WHO, line_only=True, tries=1)
+        if r != -1:
+            res = r
+            planner.planner.update_from_simulation()
     return res
 
 
@@ -2803,3 +2835,68 @@ def _turn_wrist_for_fist(env, planner, task):
     if r != -1:
         planner.planner.update_from_simulation()
     return r
+
+
+def _retreat_by_servo(env, planner, task, *, away, dist: float):
+    """Back the TCP `dist` metres along the horizontal unit `away`, orientation held (FIST_RETREAT_SERVO).
+
+    The hand servo moves the arm alone (rolls held where they stand, joint limits and the episode's roll
+    window clipped), and stops at the goal or when the error stops shrinking (a joint at its stop). The
+    rest is a straight base reverse, arm held, when reversing takes the hand away at all. Returns the
+    last 5-tuple, -1 when nothing stepped (no servo), or None at the horizon."""
+    from planners import cabinet_door_bimbo as _bimbo
+
+    try:
+        servo = _bimbo.HandServo(task, planner)
+        drv = _bimbo._Driver(planner, task, servo, _bimbo._torso(task))
+    except Exception as exc:  # a stub planner, or no kinematic model
+        say(env, "retreat by servo: no hand servo", why=f"{type(exc).__name__}: {exc}"[:120])
+        return -1
+
+    def tcp_xyz():
+        return _np(task.agent.tcp.pose.sp.p).reshape(-1)[:3].astype(np.float64)
+
+    servo.hold_rolls_here()
+    drv.reset_command()
+    p0 = tcp_xyz()
+    goal = _np(task.agent.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4).astype(np.float64)
+    goal[:3, 3] = p0 + dist * np.asarray(away, dtype=np.float64)
+    res, best, still = -1, np.inf, 0
+    for _ in range(RETREAT_SERVO_STEPS):
+        res, dp, _, fresh = drv.step(goal)
+        if common.stopped_by_horizon(planner):
+            return None
+        if not fresh:
+            continue
+        err = float(np.linalg.norm(dp))
+        if err < 0.02:
+            break
+        if err < best - 0.002:
+            best, still = err, 0
+        else:
+            still += 1
+            if still >= 8:
+                break
+    planner.planner.update_from_simulation()
+    gone = float((tcp_xyz() - p0) @ away)
+    say(env, "retreat by servo: the arm", backed_m=round(gone, 3), asked_m=round(dist, 3))
+    left = dist - gone
+    if left > 0.03:
+        bx = _np(task.agent.base_link.pose.sp.to_transformation_matrix()).reshape(4, 4)[:3, 0].copy()
+        bx[2] = 0.0
+        bx = bx / max(float(np.linalg.norm(bx)), 1e-6)
+        along = float(-bx @ away)
+        if along > 0.3:
+            d = min(left / along, RETREAT_BASE_MAX_M)
+            r = planner.drive_straight(-d)
+            if r != -1:
+                res = r
+            if common.stopped_by_horizon(planner):
+                return None
+            planner.planner.update_from_simulation()
+            say(env, "retreat by servo: the base reversed", base_m=round(d, 3),
+                backed_m=round(float((tcp_xyz() - p0) @ away), 3))
+        else:
+            say(env, "retreat by servo: reversing would not take the hand off the leaf",
+                along=round(along, 2))
+    return res
