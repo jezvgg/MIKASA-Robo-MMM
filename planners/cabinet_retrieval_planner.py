@@ -233,9 +233,11 @@ cannot give. Nothing is planned next to the leaf. The shipped retreat, a screw b
 axis with RRT behind it, jammed on shoulder_lift (`joint limit at index [7]`: 8 refusals on eight
 four-compartment seeds with FIST_WRIST_FIRST, 2026-10-24) and the RRT path that replaced it dragged the
 leaf open (7991201: to 0.114 rad, the episode lost)."""
-FIST_WRIST_BACK = os.environ.get("MIKASA_FIST_WRIST_BACK", "1") == "1"
+FIST_WRIST_BACK = os.environ.get("MIKASA_FIST_WRIST_BACK", "0") == "1"
 """Once the hand is off the leaf, undo FIST_WRIST_FIRST's turn: the wrist roll alone, back to where it
-stood before the close."""
+stood before the close. Off: the fold to the drive posture that follows sets every arm joint, the wrist
+roll among them, so the gripper turns back while the arm returns to rest (the owner, 2026-10-25: «После
+закрытия тоже можно одновременно поворачивать гриппер и возвращаться в rest позу»)."""
 FIST_OPEN_OFF_PANEL = os.environ.get("MIKASA_FIST_OPEN_OFF_PANEL", "1") == "1"
 """With the servo retreat, the fist backs off the shut leaf closed and opens only there. Opened on the
 panel, the fingers spread 10 cm beside the bar and the retreat pulled the leaf open by them (trial-002,
