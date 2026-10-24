@@ -245,6 +245,10 @@ still on the bar ~1 s in all). The owner (2026-10-24) asked first for a longer p
 the other leaves' 7-8 s from the opening to the push), then «Сделай паузу меньше, секунд 4-5» (70), then,
 told that the other leaves' arm is still only 0.5 s of those 8 s (the look; the rest is release, clear,
 wrist turn, reach, stroke): «нужно меньше времени ... 4.5 секунды против 0.5»."""
+FOLD_BEFORE_VERIFY = os.environ.get("MIKASA_FOLD_BEFORE_VERIFY", "1") == "1"
+"""After a fist close with the hand open and off the leaf, fold to the drive posture before reading the
+closure: the release dwell (close_dwell_steps, hand far and leaf still) runs during the fold instead of as
+a standstill. A refused fold leaves the order as it was (dwell, then go_home's fold)."""
 HEAD_START_ON_HOME = os.environ.get("MIKASA_HEAD_START_ON_HOME", "1") == "1"
 """Aim the head at the rug from the episode's first step (the first drive goes there) instead of at the
 cabinets' middle."""
@@ -816,14 +820,20 @@ def close_and_verify(env, planner, task, door: DoorSpec, res, record=None):
     `cabinet_door_bimbo.CLOSE_BY_BAR`), a push from here that finds no plan (it steps nothing)
     hands over to `cabinet_door_bimbo.close_by_the_bar` — the opening reversed on the bar the
     hand has just let go of — before the corrections; `record` is the round's opening record."""
+    def closed_now() -> bool:
+        idx = int(_np(task.last_opened).reshape(-1)[0])
+        return idx >= 0 and not bool(_np(task.is_open)[0, idx])
+
     def verify(result):
-        # The environment independently checks all leaves and the hand distance.
+        # The environment independently checks all leaves and the hand distance. The dwell may
+        # already have run (FOLD_BEFORE_VERIFY: during the fold); then nothing is idled.
         for _ in range(int(task.cfg.close_dwell_steps)):
+            if FOLD_BEFORE_VERIFY and closed_now():
+                break
             result = planner.idle_steps(t=1)
             if common.stopped_by_horizon(planner):
                 return result, False
-        idx = int(_np(task.last_opened).reshape(-1)[0])
-        closed = idx >= 0 and not bool(_np(task.is_open)[0, idx])
+        closed = closed_now()
         if closed:
             say(env, "physical compartment closed after release",
                 door_rad=door_rad_now(task, door), dwell_steps=task.cfg.close_dwell_steps)
@@ -848,6 +858,17 @@ def close_and_verify(env, planner, task, door: DoorSpec, res, record=None):
         res, _ = _bimbo.close_by_the_bar(env, planner, task, door=door, record=record, res=res)
         if common.stopped_by_horizon(planner):
             return res, False
+    if (FOLD_BEFORE_VERIFY and r != -1 and _crp.LAST_PUSH.get("pushed") is not None
+            and float(getattr(planner, "gripper_state", -1)) > 0):
+        # The hand is open and off the leaf: fold to the drive posture now, and let the release
+        # dwell run during the fold instead of standing still for it (go_home's fold is then a no-op).
+        planner.planner.update_from_simulation()
+        rf = plan_joints(env, planner, task, drive_posture_targets(task),
+                         label="fold to the drive posture", tries=1, line_only=True)
+        if rf != -1:
+            res = rf
+            if common.stopped_by_horizon(planner):
+                return res, False
     res, closed = verify(res)
     if closed:
         return res, True

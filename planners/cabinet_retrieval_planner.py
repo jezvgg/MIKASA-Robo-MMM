@@ -244,6 +244,12 @@ panel, the fingers spread 10 cm beside the bar and the retreat pulled the leaf o
 7991314: r_gripper_finger on cab_main's right leaf, 0 -> 0.58 rad). The close latch needs the hand 0.25 m
 off the bar, not an open hand; the hand still goes home open."""
 RETREAT_DRAG_RAD = 0.02
+FIST_OPEN_WHILE_BACKING = os.environ.get("MIKASA_FIST_OPEN_WHILE_BACKING", "1") == "1"
+FIST_OPEN_BACKING_M = 0.20
+"""The fist opens during its back-off, once 0.20 m off the shut leaf (no bar within reach of the fingers),
+instead of standing still to open after it (the owner, 2026-10-25: «И гриппер закрывать тоже одновременно
+можно»). The servo is not an execution-noise path and switches on a sampled (even) step, so the collection's
+gripper rules hold; a back-off that stops short opens after it, as before."""
 RETREAT_SLIDE_M = float(os.environ.get("MIKASA_RETREAT_SLIDE_M", "0.06"))
 RETREAT_SLIDE_KEEP_M = 0.15
 """Before backing off the shut leaf the fist slides this far along it toward the hinge (never nearer
@@ -2354,6 +2360,7 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
     # servo retreat the fist withdraws first and opens off the panel (FIST_OPEN_OFF_PANEL).
     servo_back = fist and FIST_RETREAT_SERVO
     open_late = physical_close and servo_back and FIST_OPEN_OFF_PANEL
+    retreat_state: dict = {}
     if physical_close and not open_late:
         res = planner.open_gripper()
         if common.stopped_by_horizon(planner):
@@ -2376,10 +2383,12 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         if RETREAT_SLIDE_M > 0 and r_hand > RETREAT_SLIDE_M + RETREAT_SLIDE_KEEP_M:
             slide = RETREAT_SLIDE_M * np.array([to_hinge[0] / r_hand, to_hinge[1] / r_hand, 0.0])
         back = _retreat_by_servo(env, planner, task, away=away, dist=dist,
-                                 leaf_rad=lambda: door_rad_now(task, door), slide=slide)
+                                 leaf_rad=lambda: door_rad_now(task, door), slide=slide,
+                                 open_at=FIST_OPEN_BACKING_M if (open_late and FIST_OPEN_WHILE_BACKING) else None,
+                                 state=retreat_state)
         if back is None:
             return planner._guard.last_step
-    if open_late:
+    if open_late and not retreat_state.get("opened"):
         r = planner.open_gripper()
         if r != -1:
             back = r
@@ -2997,7 +3006,8 @@ def _reach_turning(env, planner, task, pre, turn, *, stage: str):
     return out
 
 
-def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None, slide=None):
+def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None, slide=None, open_at=None,
+                      state=None):
     """Back the TCP `dist` metres along the horizontal unit `away`, orientation held (FIST_RETREAT_SERVO).
 
     The hand servo moves the arm alone (rolls held where they stand, joint limits and the episode's roll
@@ -3007,8 +3017,9 @@ def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None, s
     behind it, so it slides clear before it backs off. `leaf_rad` (how open the pushed leaf is) stops a
     leg once the hand drags the leaf RETREAT_DRAG_RAD open; the hand then slides clear once more and
     backs off again (once). The rest is a straight base reverse, arm held, when reversing takes the
-    hand away at all. Returns the last 5-tuple, -1 when nothing stepped (no servo), or None at the
-    horizon."""
+    hand away at all. `open_at` (metres): the gripper command opens on the first sampled step of the
+    back-off with the hand that far back (`state["opened"]` then True). Returns the last 5-tuple, -1 when
+    nothing stepped (no servo), or None at the horizon."""
     from planners import cabinet_door_bimbo as _bimbo
 
     try:
@@ -3050,16 +3061,30 @@ def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None, s
     T0 = _np(task.agent.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4).astype(np.float64)
     servo.hold_rolls_here()
 
-    def leg(target):
+    state = {} if state is None else state
+
+    def leg(target, opening_from=None):
         """Servo the TCP to `target` (orientation T0's); `(res, why)`, why in goal/stall/contact/drag,
-        res None at the horizon and -1 when nothing stepped."""
+        res None at the horizon and -1 when nothing stepped. With `opening_from` (the leg's start) the
+        gripper opens once the hand is `open_at` back from it along `away`."""
+        from robots.fetch.extand import OPEN
+
         drv.reset_command()
         goal = T0.copy()
         goal[:3, 3] = target
         rad_start = float(leaf_rad()) if leaf_rad is not None else None
         out, best, still, why = -1, np.inf, 0, "steps"
         for _ in range(RETREAT_SERVO_STEPS):
-            if drv.sampled():
+            sampled = drv.sampled()
+            if (sampled and opening_from is not None and open_at is not None and not state.get("opened")
+                    and float((tcp_xyz() - opening_from) @ away) >= float(open_at)
+                    and getattr(getattr(planner, "execution_noise", None), "stage", None) is None):
+                # A sampled step is an even one: the collection's gripper rule holds (CollectionMotionPlanner._step).
+                planner.gripper_state = OPEN
+                state["opened"] = True
+                say(env, "retreat by servo: the hand opens on the way back",
+                    backed_m=round(float((tcp_xyz() - opening_from) @ away), 3))
+            if sampled:
                 cand, _, _ = servo.step(_bimbo._qpos(task), goal, drv.q_cmd)
                 hit = blocked(cand)
                 if hit is not None:
@@ -3110,7 +3135,7 @@ def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None, s
                 dragged = True
                 break
         p1 = tcp_xyz()
-        r, why = leg(p1 + dist * away)
+        r, why = leg(p1 + dist * away, opening_from=p1)
         if r is None:
             return None
         if r != -1:
