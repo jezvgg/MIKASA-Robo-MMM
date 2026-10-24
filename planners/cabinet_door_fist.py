@@ -299,6 +299,8 @@ def _servo_to(env, planner, task, drv, goal, *, steps: int, tol: float = 0.01):
 def open_the_door(env, planner, task, *, door, crack_rad: float = CRACK_RAD,
                   open_rad: float = OPEN_RAD, record: dict | None = None):
     """Crack the leaf on the bar, then open it from inside with the fist (module docstring)."""
+    if MODE == "into":
+        return open_into(env, planner, task, door=door, record=record)
     res = _bimbo.open_the_door(env, planner, task, door=door, record=record, target_rad=crack_rad)
     if res == -1 or common.stopped_by_horizon(planner):
         return res
@@ -506,6 +508,8 @@ def _closed_by_state(planner, task):
 
 def close_the_leaf(env, planner, task, *, door, res):
     """Sweep the leaf shut with the fist on its outer face; `(res, closed)` judged by state."""
+    if MODE == "into":
+        return close_into(env, planner, task, door=door, res=res)
     leaf = Leaf(task, door)
     rad0 = leaf.rad()
     say(env, "close the leaf with the fist", door_rad=round(rad0, 3),
@@ -627,6 +631,323 @@ def close_the_leaf(env, planner, task, *, door, res):
         return planner._guard.last_step, False
     res = out
     planner.planner.update_from_simulation()
+    res, closed = _closed_by_state(planner, task)
+    say(env, "fist withdrawn from the shut leaf", door_rad=round(leaf.rad(), 4), closed=closed,
+        touching=planner.touching_now())
+    return res, closed
+
+
+# -- the "into" mode: the fist square to the face, as the family's closing push holds it ------------
+#
+# The owner (2026-10-24): «Что-то неестественно с вертикальной рукой. Может открыть дверцу побольше? И
+# кулаком открыть той же позой руки, как и при закрытии кулаком?». So the bar swing cracks the leaf
+# wider (INTO_CRACK_RAD), and the fist meets the inner face knuckles first, the way the closing push
+# (`cabinet_retrieval_planner.close_the_door`) meets the outer face: pointing into the face, the fingers
+# closing vertically, tilted up INTO_PITCH and turned INTO_YAW_* toward the robot. The reach scan of
+# that pose (`tools/cab5/reach_scan.py --into`): from the stances below it reaches the inner face at
+# 0.9-1.3 rad from 78-94 % of 32 stances (roll growth 1.07-1.26 rad) and the outer face at 1.3-0.1 rad
+# from 11 of 24 (1.57-1.69 rad); upright it was 0.63-0.87.
+
+MODE = os.environ.get("MIKASA_FD_MODE", "into")
+""""into" (default): the fist square to the face; "up": the upright fist from under the leaf."""
+INTO_CRACK_RAD = _f("MIKASA_FD_INTO_CRACK_RAD", 0.90)
+INTO_R = _f("MIKASA_FD_INTO_R", 0.38)
+"""The press point's distance from the hinge along the leaf (its free edge is at 0.483)."""
+INTO_STAND = _f("MIKASA_FD_INTO_STAND", 0.09)
+"""The pre-contact pose's TCP off the hinge line (at 0.06 the palm met the leaf in IK)."""
+INTO_TOUCH = _f("MIKASA_FD_INTO_TOUCH", 0.035)
+"""The contact stroke's goal off the hinge line: about the face; it stops at the first touch."""
+INTO_BACK_M = _f("MIKASA_FD_INTO_BACK_M", 0.10)
+"""The pre-contact pose stands this far back along the fist's axis."""
+INTO_PITCH = _f("MIKASA_FD_INTO_PITCH", 0.6)
+INTO_Z = _f("MIKASA_FD_INTO_Z", 1.59)
+"""The family's closing push height (CLOSE_PUSH_Z / PUSH_HERE_Z)."""
+INTO_YAW_OPEN = (-0.6, -0.9)
+INTO_YAW_CLOSE = (0.6, 0.9)
+"""The fist's turn about z off the face's normal, tried in order (the scan's lowest roll first)."""
+INTO_STANCE_OPEN = (_f("MIKASA_FD_INTO_OPEN_X", 0.85), _f("MIKASA_FD_INTO_OPEN_Y", -1.35))
+INTO_STANCE_CLOSE = (_f("MIKASA_FD_INTO_CLOSE_X", 0.80), _f("MIKASA_FD_INTO_CLOSE_Y", -1.35))
+"""The along-the-leaf scan's lowest-roll stance for the inner face (0.85, -1.35; 0.81 rad) and the
+outer-face scan's (0.80, -1.35; 1.58): 5 cm apart, so the closing needs no drive."""
+INTO_TORSO = 0.386
+"""The scan's best torso for both stances (the drive posture's is ~0.2)."""
+INTO_LEAD_MAX = 0.12
+TOUCH_N = 1.0
+INTO_OPEN_RAD = _f("MIKASA_FD_INTO_OPEN_RAD", 1.45)
+"""How open the horizontal fist leaves the leaf (the owner: wider at the end too). The horizontal
+fist reaches the inner face to 1.55; the closing push's start is the limit: from 1.45 the outer face
+is reachable from 3-6 of 24 stances (roll growth 1.6-2.0), from 1.55 from almost none."""
+ALONG_YAW = _f("MIKASA_FD_ALONG_YAW", -0.3)
+ALONG_FROM_EDGE = _f("MIKASA_FD_ALONG_FROM_EDGE", 0.15)
+ALONG_STAND = _f("MIKASA_FD_ALONG_STAND", 0.12)
+ALONG_Z = _f("MIKASA_FD_ALONG_Z", 1.55)
+ALONG_LEAD_MAX = 0.28
+HAND_TURN_INTO = _f("MIKASA_FD_HAND_TURN_INTO", 0.5)
+"""The fraction of the leaf's turn the horizontal fist's yaw follows in both sweeps. At 1 the closing
+sweep (1.36 rad of leaf) turned the wrist roll 1.4 rad and left the episode's roll window at 3.04 of
+pi (two seeds), with nothing for the later rounds."""
+"""The fist rides ALONG_STAND off the hinge line; its side meets the face ~0.07 m on (~0.2 rad at the
+press radius), the rest is the press."""
+CLOSE_POSES = ((1.2, 0.35, 0.38), (0.9, 0.35, 0.30), (1.2, 0.6, 0.30), (0.9, 0.6, 0.38))
+"""(yaw off the outer face's normal, pitch, radius) tried in order for the closing push: the outer-face
+scan from 1.35/1.45 rad, lowest roll growth first."""
+
+
+def into_pose(task, leaf, rad: float, *, inner: bool, yaw_off: float, stand: float,
+              pitch: float = INTO_PITCH, r: float = INTO_R) -> np.ndarray:
+    """The fist square to the inner (`inner`) or outer face at `rad`: `r` out along the leaf,
+    `stand` off the hinge line, pointing into the face turned `yaw_off` and pitched `pitch`."""
+    sign = 1.0 if inner else -1.0
+    xy = leaf.point(rad, leaf.L - r, sign * stand)
+    n_side = sign * leaf.inner(rad)
+    a2 = ds.rot2(yaw_off) @ (-n_side)
+    a = np.array([math.cos(pitch) * a2[0], math.cos(pitch) * a2[1], math.sin(pitch)])
+    c = np.array([0.0, 0.0, 1.0]) - math.sin(pitch) * a
+    c = c / np.linalg.norm(c)
+    return _T(task.agent.build_grasp_pose(a, c, np.array([xy[0], xy[1], INTO_Z])))
+
+
+def along_pose(task, leaf, rad: float, *, stand: float = ALONG_STAND) -> np.ndarray:
+    """The horizontal fist in the gap: pointing along the leaf toward the hinge (turned ALONG_YAW
+    toward the room) as from the rest pose with the arm straightened, `stand` off the inner face's
+    hinge line, ALONG_FROM_EDGE in from the free edge, the fingers closing across the leaf."""
+    xy = leaf.point(rad, ALONG_FROM_EDGE, stand)
+    u, nin = leaf.u(rad), leaf.inner(rad)
+    a2 = ds.rot2(leaf.s * ALONG_YAW) @ (-u)
+    a = np.array([a2[0], a2[1], 0.0])
+    c = np.array([nin[0], nin[1], 0.0])
+    c = c - (c @ a) * a
+    c = c / np.linalg.norm(c)
+    return _T(task.agent.build_grasp_pose(a, c, np.array([xy[0], xy[1], ALONG_Z])))
+
+
+def _hand_on_leaf_n(task, door) -> float:
+    hand = task.agent.robot.links_map["gripper_link"]
+    art = task.scene.articulations[crp._art_key(task, door)]
+    joints = art.get_active_joints()
+    link = joints[[j.name for j in joints].index(door.hinge)].child_link
+    f = _bimbo._np(task.scene.get_pairwise_contact_forces(hand, link)).reshape(-1, 3)
+    return float(np.linalg.norm(f, axis=1).max())
+
+
+def _stance(env, planner, task, leaf, xy, look_xy, *, label: str):
+    """Fold, drive to `xy` facing `look_xy` (skipped when within 8 cm), raise the torso; a 5-tuple,
+    None if the drive refused."""
+    res = None
+    r = _fold(env, planner, task, f"fold the fist for the {label}")
+    if r != -1:
+        res = r
+    if common.stopped_by_horizon(planner):
+        return res
+    planner.planner.update_from_simulation()
+    base = _bimbo._qpos(task)[:2]
+    xy = np.asarray(xy, dtype=np.float64)
+    if float(np.linalg.norm(base - xy)) > 0.08:
+        look = np.asarray(look_xy, dtype=np.float64) - xy
+        say(env, f"drive to the {label}", stance=[round(float(v), 3) for v in xy],
+            heading_deg=round(math.degrees(math.atan2(look[1], look[0])), 1))
+        got = planner.drive_base(target_pos=np.array([xy[0], xy[1], 0.0]),
+                                 target_view_vec=np.array([look[0], look[1], 0.0]), freeze_arm=True,
+                                 arrive_tol=0.05)
+        if got == -1:
+            return None
+        res = got
+        if common.stopped_by_horizon(planner):
+            return res
+        planner.planner.update_from_simulation()
+    r = common.plan_joints(env, planner, task, {"torso_lift_joint": INTO_TORSO},
+                           label=f"torso up for the {label}", who=WHO)
+    if r != -1:
+        res = r
+    planner.planner.update_from_simulation()
+    if int(getattr(planner, "gripper_state", 1)) != -1:
+        r = planner.close_gripper(t=12)
+        if r != -1:
+            res = r
+    return res if res is not None else planner.idle_steps(t=1)
+
+
+def _contact(env, planner, task, leaf, door, *, cands, label: str):
+    """Pre-contact by a low-roll joint target, then the stroke along the fist's axis to its goal (to the
+    first touch). `cands`: (tag, pose(rad, stand) -> 4x4, stand_pre, stand_goal). Returns
+    `(res, drv, G0, ref, tag)` or None."""
+    rad = leaf.rad()
+    for yaw_off, pose_of, stand_pre, stand_goal in cands:
+        pre = pose_of(rad, stand_pre)
+        pre[:3, 3] -= INTO_BACK_M * pre[:3, 2]
+        got = _low_roll_joints(planner, task, pre)
+        if got is None:
+            say(env, f"{label}: no IK for the pre-contact", yaw_off=yaw_off, door_rad=round(rad, 3))
+            continue
+        targets, grow = got
+        r = common.plan_joints(env, planner, task, targets, label=f"{label}: pre-contact", who=WHO)
+        say(env, f"{label}: pre-contact", yaw_off=yaw_off, roll_window_growth=round(grow, 3),
+            planned=r != -1)
+        if r == -1:
+            continue
+        if common.stopped_by_horizon(planner):
+            return r, None, None, None, yaw_off
+        planner.planner.update_from_simulation()
+        try:
+            servo = _bimbo.HandServo(task, planner)
+        except Exception as exc:
+            say(env, "MISSED: no kinematic model for the hand servo", why=f"{type(exc).__name__}: {exc}"[:160])
+            return r, None, None, None, yaw_off
+        drv = _bimbo._Driver(planner, task, servo, _bimbo._torso(task))
+        servo.hold_rolls_here()
+        drv.reset_command()
+        rad = leaf.rad()
+        goal = pose_of(rad, stand_goal)
+        res, touched, i = r, False, -1
+        for i in range(INSERT_MAX_STEPS):
+            res, dp, _, fresh = drv.step(goal)
+            if common.stopped_by_horizon(planner):
+                return res, None, None, None, yaw_off
+            if _hand_on_leaf_n(task, door) > TOUCH_N:
+                touched = True
+                break
+            if fresh and float(np.linalg.norm(dp)) < 0.005:
+                break
+        G0 = _T(task.agent.tcp.pose.sp)
+        say(env, f"{label}: stroke to the face", touched=touched, steps=i + 1, door_rad=round(leaf.rad(), 3),
+            tcp=[round(float(v), 3) for v in G0[:3, 3]])
+        return res, drv, G0, leaf.rad(), yaw_off
+    return None
+
+
+def _sweep(env, planner, task, leaf, door, drv, G0, ref, *, target: float, floor: float | None,
+           label: str, lead_max: float = INTO_LEAD_MAX, hand_turn: float = 1.0):
+    """Carry the fist (square to the face) round the hinge toward `target`, the commanded angle at
+    most INTO_LEAD_MAX ahead of the leaf; the base turns in place to keep its bearing. `(res, why)`."""
+    direction = 1.0 if target >= leaf.rad() else -1.0
+    dt = float(planner.base_env.control_timestep)
+    q = _bimbo._qpos(task)
+    d0 = G0[:2, 3] - q[:2]
+    bearing0 = float(np.arctan2(d0[1], d0[0])) - float(q[2])
+    sw, hist, reason, i, perr_max, press_max, res = leaf.rad(), [], "max-steps", -1, 0.0, 0.0, None
+    end = target if floor is None else floor
+    drv.reset_command()
+    for i in range(CLOSE_MAX_STEPS):
+        rad = leaf.rad()
+        hist.append(rad)
+        if direction * (rad - target) >= 0:
+            reason = "target"
+            break
+        if len(hist) > STALL_STEPS and direction * (hist[-1] - hist[-1 - STALL_STEPS]) < STALL_EPS:
+            reason = "stalled"
+            break
+        if direction > 0:
+            sw = min(end + 0.02, sw + LEAD_RATE * dt, max(sw, rad + lead_max))
+        else:
+            sw = max(end, sw - LEAD_RATE * dt, min(sw, rad - lead_max))
+        turn = leaf.s * (sw - ref)
+        goal = ds.door_frames(G0, leaf.anchor, turn, hand_turn=hand_turn * turn)[1]
+        q = _bimbo._qpos(task)
+        d = goal[:2, 3] - q[:2]
+        err_yaw = (float(np.arctan2(d[1], d[0])) - float(q[2]) - bearing0 + np.pi) % (2 * np.pi) - np.pi
+        res, dp, _, fresh = drv.step(goal, (0.0, float(np.clip(YAW_GAIN * err_yaw, -YAW_W_MAX, YAW_W_MAX))))
+        if fresh:
+            perr_max = max(perr_max, float(np.linalg.norm(dp)))
+        press_max = max(press_max, _hand_on_leaf_n(task, door))
+        if common.stopped_by_horizon(planner):
+            return res, "horizon"
+    say(env, f"{label} done", door_rad=round(leaf.rad(), 4), why=reason, steps=i + 1, cmd_rad=round(sw, 3),
+        perr_max=round(perr_max, 3), press_max_n=round(press_max, 1),
+        **({"door_tail": [round(v, 3) for v in hist[-12:]]} if reason != "target" else {}))
+    return res, reason
+
+
+def _withdraw(env, planner, task, drv):
+    """Back along the fist's axis, then toward the base; the 5-tuple or None at the horizon."""
+    res = None
+    for leg in ("axis", "base"):
+        T = _T(task.agent.tcp.pose.sp)
+        g = T.copy()
+        if leg == "axis":
+            g[:3, 3] = T[:3, 3] - 0.15 * T[:3, 2]
+        else:
+            q = _bimbo._qpos(task)
+            back = q[:2] - T[:2, 3]
+            back = back / max(float(np.linalg.norm(back)), 1e-6)
+            g[:3, 3] = T[:3, 3] + 0.15 * np.array([back[0], back[1], 0.0])
+        out, _ = _servo_to(env, planner, task, drv, g, steps=50, tol=0.02)
+        if out is None:
+            return None
+        res = out
+    planner.planner.update_from_simulation()
+    return res
+
+
+def open_into(env, planner, task, *, door, record=None):
+    res = _bimbo.open_the_door(env, planner, task, door=door, record=record, target_rad=INTO_CRACK_RAD)
+    if res == -1 or common.stopped_by_horizon(planner):
+        return res
+    leaf = Leaf(task, door)
+    say(env, "cracked by the bar", door_rad=round(leaf.rad(), 3), crack_rad=INTO_CRACK_RAD, mode="into")
+    look = leaf.point(leaf.rad(), ALONG_FROM_EDGE, ALONG_STAND)
+    r = _stance(env, planner, task, leaf, INTO_STANCE_OPEN, look, label="opening stance")
+    if r is None:
+        say(env, "MISSED: the opening stance drive refused", door_rad=round(leaf.rad(), 3))
+        return res
+    res = r
+    if common.stopped_by_horizon(planner):
+        return res
+    cands = [("along", lambda rad, st: along_pose(task, leaf, rad, stand=st), ALONG_STAND, ALONG_STAND)]
+    got = _contact(env, planner, task, leaf, door, cands=cands, label="fist into the gap")
+    if got is None:
+        say(env, "MISSED: no pre-contact for the inner face", door_rad=round(leaf.rad(), 3))
+        return res
+    res, drv, G0, ref, _ = got
+    if drv is None or common.stopped_by_horizon(planner):
+        return res
+    res, _why = _sweep(env, planner, task, leaf, door, drv, G0, ref, target=INTO_OPEN_RAD, floor=None,
+                       label="fist push (horizontal)", lead_max=ALONG_LEAD_MAX, hand_turn=HAND_TURN_INTO)
+    if common.stopped_by_horizon(planner):
+        return res
+    out = _withdraw(env, planner, task, drv)
+    if out is None:
+        return planner._guard.last_step
+    say(env, "fist withdrawn", door_rad=round(leaf.rad(), 3), touching=planner.touching_now())
+    return out
+
+
+def close_into(env, planner, task, *, door, res):
+    leaf = Leaf(task, door)
+    say(env, "close the leaf with the fist", door_rad=round(leaf.rad(), 3), mode="into")
+    look = leaf.point(leaf.rad(), leaf.L - INTO_R, -INTO_STAND)
+    r = _stance(env, planner, task, leaf, INTO_STANCE_CLOSE, look, label="closing stance")
+    cands = [((y, p, rr), (lambda rad, st, y=y, p=p, rr=rr:
+                           into_pose(task, leaf, rad, inner=False, yaw_off=y, stand=st, pitch=p, r=rr)),
+              INTO_STAND, INTO_TOUCH) for y, p, rr in CLOSE_POSES]
+    if r is None:
+        say(env, "MISSED: the closing stance drive refused", door_rad=round(leaf.rad(), 3))
+        return res, False
+    res = r
+    if common.stopped_by_horizon(planner):
+        return res, False
+    got = _contact(env, planner, task, leaf, door, cands=cands, label="fist to the outer face")
+    if got is None:
+        say(env, "MISSED: no pre-contact for the outer face", door_rad=round(leaf.rad(), 3))
+        return res, False
+    res, drv, G0, ref, _ = got
+    if drv is None or common.stopped_by_horizon(planner):
+        return res, False
+    res, why = _sweep(env, planner, task, leaf, door, drv, G0, ref, target=CLOSE_TARGET_RAD,
+                      floor=CLOSE_CMD_FLOOR, label="fist sweep (into)", hand_turn=HAND_TURN_INTO)
+    if common.stopped_by_horizon(planner):
+        return res, False
+    if why != "target" and leaf.rad() < 0.15:
+        T = _T(task.agent.tcp.pose.sp)
+        g = T.copy()
+        g[:3, 3] = T[:3, 3] + PRESS_IN_M * T[:3, 2]
+        out, _ = _servo_to(env, planner, task, drv, g, steps=30, tol=0.005)
+        if out is None:
+            return planner._guard.last_step, False
+        res = out
+        say(env, "pressed the leaf in", door_rad=round(leaf.rad(), 4))
+    out = _withdraw(env, planner, task, drv)
+    if out is None:
+        return planner._guard.last_step, False
     res, closed = _closed_by_state(planner, task)
     say(env, "fist withdrawn from the shut leaf", door_rad=round(leaf.rad(), 4), closed=closed,
         touching=planner.touching_now())

@@ -25,6 +25,17 @@ def main():
     ap.add_argument("--n-init", type=int, default=20)
     ap.add_argument("--side", choices=("inner", "outer"), default="inner",
                     help="inner: the opening press; outer: the closing push on the outer face")
+    ap.add_argument("--open-rad", type=float, default=None,
+                    help="--into: the leaf's open angle to scan (default OPEN_RAD)")
+    ap.add_argument("--rads", default=None, help="comma list of leaf angles (overrides the mode's)")
+    ap.add_argument("--along", action="store_true",
+                    help="inner face: a horizontal fist pointing along the leaf toward the hinge (into the "
+                         "gap), as from the rest pose with the arm straightened; pushes with its side")
+    ap.add_argument("--yaws", default=None, help="comma list of yaw offsets (rad)")
+    ap.add_argument("--stances", default=None, help="x1:x2:dx,y1:y2:dy grid")
+    ap.add_argument("--into", action="store_true",
+                    help="the family's closing-push fist: pointing INTO the face (horizontal-ish), "
+                         "fingers closing vertically, the TCP 3 cm off the face")
     args = ap.parse_args()
 
     import gymnasium as gym
@@ -122,6 +133,113 @@ def main():
         c = c - (c @ a) * a
         c = c / np.linalg.norm(c)
         return fd._T(task.agent.build_grasp_pose(a, c, np.array([xy[0], xy[1], z])))
+
+    def into_pose(rad, r_hinge, yaw_off, pitch, stand=0.06):
+        """The fist pointing into the side's face (turned yaw_off about z, pitched), r_hinge out
+        along the leaf, 3 cm off the face, fingers closing as near vertical as allowed."""
+        sign = 1.0 if args.side == "inner" else -1.0
+        xy = leaf.point(rad, leaf.L - r_hinge, sign * stand)
+        n_side = sign * leaf.inner(rad)
+        a2 = ds.rot2(yaw_off) @ (-n_side)
+        a = np.array([math.cos(pitch) * a2[0], math.cos(pitch) * a2[1], math.sin(pitch)])
+        c = np.array([0.0, 0.0, 1.0]) - math.sin(pitch) * a
+        c = c / np.linalg.norm(c)
+        return fd._T(task.agent.build_grasp_pose(a, c, np.array([xy[0], xy[1], 1.59])))
+
+    def grid(spec):
+        xs, ys = spec.split(",")
+        a = [float(v) for v in xs.split(":")]
+        b = [float(v) for v in ys.split(":")]
+        return list(itertools.product(np.arange(a[0], a[1] + 1e-6, a[2]).round(3),
+                                      np.arange(b[0], b[1] + 1e-6, b[2]).round(3)))
+
+    if args.along:
+        rads = tuple(float(v) for v in args.rads.split(",")) if args.rads else (0.9, 1.2, 1.55)
+        stances = grid(args.stances) if args.stances else list(itertools.product(
+            (0.85, 0.95, 1.05, 1.15), (-1.35, -1.2, -1.05, -0.95)))
+        yaws = tuple(float(v) for v in args.yaws.split(",")) if args.yaws else (-0.3, 0.0, 0.3)
+        rows = []
+        for (x, y), torso in itertools.product(stances, (0.20, 0.386)):
+            for yaw_off, closing, stand, along, z in itertools.product(yaws, ("vertical", "across"), (0.09, 0.12),
+                                                                     (0.08, 0.15), (1.55,)):
+                ok, needs = [], []
+                for rad in rads:
+                    set_door(rad)
+                    T = pose_for(rad, along, stand, z, yaw_off, 0.0, closing)
+                    yaw = math.atan2(T[1, 3] - y, T[0, 3] - x)
+                    set_base(x, y, yaw, torso)
+                    planner.planner.update_from_simulation()
+                    need = ik_need(T)
+                    ok.append(need is not None)
+                    needs.append(need)
+                rows.append(dict(x=float(x), y=float(y), torso=torso, yaw_off=yaw_off, closing=closing,
+                                 stand=stand, along=along, ok=ok, all=all(ok),
+                                 roll_need=(max(needs) if all(ok) else None)))
+            good = [r for r in rows if r["x"] == x and r["y"] == y and r["torso"] == torso and r["all"]]
+            print(f"stance ({x}, {y}) torso {torso}: {len(good)} along-the-leaf poses reachable at every angle",
+                  flush=True)
+        by = {}
+        for r in rows:
+            by.setdefault((r["yaw_off"], r["closing"], r["stand"], r["along"]), []).append(r)
+        print(f"rads {rads}; per (yaw_off, closing, stand, along): reachable fraction per angle | stances at all | min roll")
+        for k, v in sorted(by.items()):
+            a = np.array([r["ok"] for r in v], dtype=float).mean(axis=0)
+            n = [r["roll_need"] for r in v if r["roll_need"] is not None]
+            print(f"  {k}: {np.round(a, 2).tolist()} | {len(n)} | {round(min(n), 2) if n else '-'}")
+        best = sorted((r for r in rows if r["roll_need"] is not None), key=lambda r: r["roll_need"])[:10]
+        print("lowest roll:")
+        for r in best:
+            print("  ", r)
+        env.close()
+        return
+
+    if args.into:
+        top = fd.OPEN_RAD if args.open_rad is None else args.open_rad
+        if args.side == "inner":
+            rads = (0.9, 0.5 * (0.9 + top), top)
+            stances = list(itertools.product((0.95, 1.05, 1.15, 1.25), (-0.95, -1.05, -1.20, -1.35)))
+        else:
+            rads = (top, 0.9, 0.5, 0.1)
+            stances = list(itertools.product((0.45, 0.60, 0.75, 0.90), (-1.15, -1.30, -1.45)))
+        if args.rads:
+            rads = tuple(float(v) for v in args.rads.split(","))
+        if args.stances:
+            stances = grid(args.stances)
+        rows = []
+        for (x, y), torso in itertools.product(stances, (0.20, 0.386)):
+            yaws = (tuple(float(v) for v in args.yaws.split(",")) if args.yaws else
+                    ((-0.9, -0.6, -0.3) if args.side == "inner" else (0.3, 0.6, 0.9)))
+            for yaw_off, pitch, r_h, stand in itertools.product(yaws, (0.35, 0.6), (0.30, 0.38), (0.09,)):
+                ok, needs = [], []
+                for rad in rads:
+                    set_door(rad)
+                    T = into_pose(rad, r_h, yaw_off, pitch, stand)
+                    yaw = math.atan2(T[1, 3] - y, T[0, 3] - x)
+                    set_base(x, y, yaw, torso)
+                    planner.planner.update_from_simulation()
+                    need = ik_need(T)
+                    ok.append(need is not None)
+                    needs.append(need)
+                rows.append(dict(x=x, y=y, torso=torso, yaw_off=yaw_off, pitch=pitch, r=r_h, stand=stand, ok=ok,
+                                 all=all(ok), roll_need=(max(needs) if all(ok) else None)))
+            good = [r for r in rows if r["x"] == x and r["y"] == y and r["torso"] == torso and r["all"]]
+            print(f"stance ({x}, {y}) torso {torso}: {len(good)} into-face poses reachable at every angle "
+                  f"{[(r['yaw_off'], r['pitch'], r['r'], round(r['roll_need'], 2)) for r in good][:6]}", flush=True)
+        by = {}
+        for r in rows:
+            by.setdefault((r["yaw_off"], r["pitch"], r["r"], r["stand"]), []).append(r)
+        print("per (yaw_off, pitch, r): reachable fraction per angle | stances at all | min roll need")
+        for k, v in sorted(by.items()):
+            a = np.array([r["ok"] for r in v], dtype=float).mean(axis=0)
+            n = [r["roll_need"] for r in v if r["roll_need"] is not None]
+            print(f"  {k}: {np.round(a, 2).tolist()} | {len(n)} | {round(min(n), 2) if n else '-'}")
+        best = sorted((r for r in rows if r["roll_need"] is not None), key=lambda r: r["roll_need"])[:10]
+        print("lowest roll:")
+        for r in best:
+            print("  ", {k: r[k] for k in ("x", "y", "torso", "yaw_off", "pitch", "r", "stand", "roll_need")})
+        Path(f"reach_into_{args.side}.json").write_text(json.dumps(rows))
+        env.close()
+        return
 
     if args.side == "inner":
         rads = (fd.CRACK_RAD, 0.9, fd.OPEN_RAD)
