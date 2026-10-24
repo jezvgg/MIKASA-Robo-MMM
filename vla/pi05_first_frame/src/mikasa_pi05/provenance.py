@@ -102,12 +102,18 @@ def run_meta(config, *, argv: list[str], checkpoints: dict) -> dict:
     from mikasa_pi05 import configs
 
     openpi_dir = pathlib.Path(openpi.__file__).resolve().parents[2]
-    data_dir = pathlib.Path(config.data.dataset_dir or configs.dataset_dir())
-    info = json.loads((data_dir / "meta/info.json").read_text()) if (data_dir / "meta/info.json").is_file() else {}
+    if isinstance(config.data, configs.MemerLowLevelDataConfig):   # several datasets, one per task
+        root = pathlib.Path(config.data.data_root or configs.memer_data_root())
+        data_dirs = [root / task for task in config.data.tasks]
+    else:
+        data_dirs = [pathlib.Path(config.data.dataset_dir or configs.dataset_dir())]
+    infos = [json.loads((d / "meta/info.json").read_text()) if (d / "meta/info.json").is_file() else {}
+             for d in data_dirs]
+    data_dir, info = data_dirs[0], infos[0]
     norm_stats = pathlib.Path(config.data.assets.assets_dir) / config.data.repo_id / "norm_stats.json"
     devices = jax.devices()
-    frames = info.get("total_frames")
-    episodes = list(config.data.episodes) if config.data.episodes else None
+    frames = sum(i.get("total_frames") or 0 for i in infos) or None
+    episodes = list(config.data.episodes) if getattr(config.data, "episodes", None) else None
     patch = REPO / "vla/pi05_first_frame/openpi.patch"
     return {
         "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -135,13 +141,18 @@ def run_meta(config, *, argv: list[str], checkpoints: dict) -> dict:
             "fps": info.get("fps"),
             "total_episodes": info.get("total_episodes"),
             "total_frames": frames,
+            "datasets": [{"dir": str(d), "info_json_sha256": sha256(d / "meta/info.json"),
+                          "total_episodes": i.get("total_episodes"), "total_frames": i.get("total_frames")}
+                         for d, i in zip(data_dirs, infos)],
             "train_episodes": episodes or "all",
             "norm_stats": str(norm_stats),
             "norm_stats_sha256": sha256(norm_stats),
             "validation_seeds_sha256": sha256(data_dir / "validation_seeds.json"),
         },
         "weights": {
-            "base": configs.BASE_WEIGHTS,
+            # The weights this run starts from (was the constant BASE_WEIGHTS, which mislabelled runs
+            # initialised from an earlier run's params).
+            "base": str(getattr(config.weight_loader, "params_path", configs.BASE_WEIGHTS)),
             "manifest_sha256": sha256(REPO / "vla/pi05_first_frame/weights.sha256"),
         },
         "derived": {
@@ -152,7 +163,7 @@ def run_meta(config, *, argv: list[str], checkpoints: dict) -> dict:
             "samples_seen": config.batch_size * config.num_train_steps,
             "epochs": round(config.batch_size * config.num_train_steps / frames, 2) if frames and not episodes else None,
             "image_keys": list(config.model.image_keys),
-            "first_frame_camera": config.data.first_frame_camera,
+            "first_frame_camera": getattr(config.data, "first_frame_camera", None),
             "action_horizon": config.model.action_horizon,
             "max_token_len": config.model.max_token_len,
             "discrete_state_input": config.model.discrete_state_input,

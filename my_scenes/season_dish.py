@@ -69,11 +69,12 @@ from utils.robocasa_utils import (
 #: The task text a language-conditioned policy is given (the VLA dataset's `task`).
 #: It names the chore, never the answer: which condiment the dish needs is shown by
 #: the recipe marker during the cue and is the memory content. No numerals.
+#: Salt and pepper are one RoboCasa shaker in two colours (shaker_1 white, shaker_0 black), so
+#: the text names the colour that tells them apart (the owner's call 2026-10-22).
 INSTRUCTIONS = (
-    "Remember the salt or pepper shown in the picture on the fridge. After the "
-    "picture disappears, take that condiment and tip it over the bowl to season "
-    "the dish, leaving the other "
-    "condiment untouched.",
+    "Remember whether the picture on the fridge shows the white salt shaker or the "
+    "black pepper shaker. After the picture disappears, take that shaker and tip it "
+    "over the bowl to season the dish, leaving the other shaker untouched.",
 )
 
 # Where the cue marker goes while it must not be seen. The constant, and the

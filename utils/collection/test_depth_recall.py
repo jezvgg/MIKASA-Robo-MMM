@@ -280,7 +280,7 @@ def test_scene_contact_offset_is_the_tasks():
 
 def test_the_instruction_names_each_props_pad():
     from my_scenes.depth_recall_v1 import INSTRUCTIONS, PAD_COLOR_NAMES, PAD_MAP, PROP_COLORS
-    pairs = [f"{spec.label} on the {color} pad" for spec, color in zip(PROPS, PAD_COLOR_NAMES)]
+    pairs = [f"{spec.spoken or spec.label} on the {color} pad" for spec, color in zip(PROPS, PAD_COLOR_NAMES)]
     assert PAD_MAP == ", ".join(pairs)
     assert all(PAD_MAP in text for text in INSTRUCTIONS)
     # Profile 6: a prop is recoloured only into its own pad's colour (the mustard).

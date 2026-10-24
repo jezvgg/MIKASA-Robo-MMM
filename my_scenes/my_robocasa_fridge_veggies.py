@@ -15,15 +15,34 @@ from mani_skill.utils.scene_builder.robocasa.objects.kitchen_objects import (
 from mani_skill.utils.structs import Actor, Pose
 
 from utils.scene_utils import degree_to_quanterion, get_actor_size
+from utils.mikasa.assisted_grasp import AssistedGraspTask
 
 from .my_robocasa_fridge_picture import MyRoboCasaFridgePicture
 
 
 @register_env("MyRoboCasa_FridgeVeggies-v1", asset_download_ids=["RoboCasa"])
-class MyRoboCasaFridgeVeggies(MyRoboCasaFridgePicture):
+class MyRoboCasaFridgeVeggies(AssistedGraspTask, MyRoboCasaFridgePicture):
     """Robot spawns in front of the fridge; the fridge door shows a photo of
     one of the NUM_VEGGIES different vegetables sitting on the counter (the
     target, re-picked every episode). A pot also lies on the counter."""
+
+    # Match the planner's start in every ordinary reset, including validation.
+    ROBOT_FRONT_DISTANCE = 1.15
+
+    def _initialize_ready_pose(self, env_idx):
+        robot = self.agent.robot
+        qpos = robot.get_qpos().clone()
+        rest = torch.as_tensor(self.agent.keyframes["rest"].qpos,
+                               device=qpos.device, dtype=qpos.dtype)
+        names = list(self.agent.controller.controllers["arm"].config.joint_names)
+        names.append("torso_lift_joint")
+        for name in names:
+            index = robot.active_joints_map[name].active_index[0].item()
+            qpos[env_idx, index] = rest[index]
+        robot.set_qpos(qpos)
+
+    def _assisted_grasp_objects(self):
+        return list(self.veggies)
 
     NUM_VEGGIES = 3  # three different vegetables (kinds sampled from the pool)
 
@@ -345,6 +364,9 @@ class MyRoboCasaFridgeVeggies(MyRoboCasaFridgePicture):
         self.plate.set_pose(
             Pose.create_from_pq(p=self.plate_pos, q=self.plate_quat)
         )
+
+        # Set the ready pose before reset returns observations / frame 0.
+        self._initialize_ready_pose(env_idx)
 
     # ------------------------------------------------------------------ #
     # Task logic

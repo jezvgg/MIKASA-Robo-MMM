@@ -12,14 +12,18 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.structs import Actor, Pose
 from .base_robocasa import BaseRoboCasaSimple
 from utils.scene_utils import get_actor_size
+from utils.mikasa.assisted_grasp import AssistedGraspTask
 
 
 @register_env("MyRoboCasa_TakeItBack-v1", asset_download_ids=["RoboCasa"])
-class MyRoboCasaSceneTakeItBack(BaseRoboCasaSimple):
+class MyRoboCasaSceneTakeItBack(AssistedGraspTask, BaseRoboCasaSimple):
     """Cup and baking tray freely placed in separate zones of the usable counter
     area every episode; the robot spawns at a random free floor spot. The task:
     carry the cup from its spot to the baking tray and back to its initial
     spot."""
+
+    def _assisted_grasp_objects(self):
+        return [self.cup]
 
     # baking tray asset (repo assets/), recentered + scaled at load time
     TRAY_PATH = os.path.normpath(
@@ -41,6 +45,13 @@ class MyRoboCasaSceneTakeItBack(BaseRoboCasaSimple):
     # is exactly one tray tall (0.282 m), so the tray's y is pinned to its
     # center like the cup's.
     TRAY_BAND_Y = (-0.50, -0.20)
+
+    # Realistic non-zero ds_fetch start pose. Keep small per-episode jitter so the
+    # first recorded state is not a single all-zero keyframe.
+    INITIAL_TORSO = 0.25
+    INITIAL_ARM = np.array([0.0, -0.5, 0.0, -1.5, 0.0, 1.5, 0.0])
+    INITIAL_TORSO_JITTER = 0.03
+    INITIAL_ARM_JITTER = 0.03
 
     cup_pos: np.ndarray  # [N, 3] initial cup position per env
     camera_pos: np.ndarray
@@ -113,6 +124,27 @@ class MyRoboCasaSceneTakeItBack(BaseRoboCasaSimple):
         self.cup_pos = np.asarray(cup_pos)
         self.cup.set_pose(Pose.create_from_pq(p=self.cup_pos))
         self.tray.set_pose(Pose.create_from_pq(p=np.asarray(tray_pos)))
+
+        # ds_fetch has no useful reset keyframe; seed torso and arm without changing head.
+        qpos = self.agent.robot.get_qpos()[env_idx].clone()
+        for row in range(len(env_idx)):
+            qpos[row, 3] = self.INITIAL_TORSO + self._main_rng.uniform(
+                -self.INITIAL_TORSO_JITTER, self.INITIAL_TORSO_JITTER
+            )
+            qpos[row, 6:13] = torch.as_tensor(
+                self.INITIAL_ARM
+                + self._main_rng.uniform(
+                    -self.INITIAL_ARM_JITTER, self.INITIAL_ARM_JITTER, size=7
+                ),
+                dtype=qpos.dtype,
+                device=qpos.device,
+            )
+            qpos[row, 13:15] = 0.015
+        self.agent.robot.set_qpos(qpos)
+        qvel = self.agent.robot.get_qvel()[env_idx].clone()
+        qvel[:, 3] = 0
+        qvel[:, 6:15] = 0
+        self.agent.robot.set_qvel(qvel)
 
     # ------------------------------------------------------------------ #
     # Tray asset
