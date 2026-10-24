@@ -559,7 +559,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
 
 
 def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
-                  record: dict | None = None, target_rad: float | None = None):
+                  record: dict | None = None, target_rad: float | None = None, keep_hold: bool = False):
     """Grasp the leaf's bar, swing it open with the servoed hand, let go and clear the hand.
 
     Same contract as `cabinet_retrieval_planner.open_the_door` (D6): -1 only for a refusal
@@ -576,6 +576,9 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         target_rad: a swing target of its own (`cabinet_door_fist`'s crack of the leaf); the
             base then keeps the grasp's lever instead of settling on LEVER_END. None (default)
             is the shipped target and stance.
+        keep_hold: end with the fingers still on the bar (no release, no clear) and the swing's
+            servo state in `record["hold"]`, for `swing_back_and_release` (cab_1 is closed by the
+            handle it was opened by). False (default) is the shipped stage.
 
     Example:
         >>> res = open_the_door(env, planner, task, door=CAB_MAIN_RIGHT)   # doctest: +SKIP
@@ -692,7 +695,21 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
             arm_qpos=_qpos(task).copy())
         record["tape"] = planner.start_tape()
 
+    if keep_hold:
+        if record is not None:
+            record["hold"] = dict(drv=drv, servo=servo, G0=G0, rad0=rad0, anchor_xy=anchor_xy, sense=sense,
+                                  s=s, lever=lever)
+        say(env, "holding the bar (bimbo)", door_rad=round(float(crp.door_rad_now(task, door)), 4))
+        return res
+
     # -- door_release ------------------------------------------------------------------------
+    return release_and_clear(env, planner, task, door=door, drv=drv, anchor_xy=anchor_xy, sense=sense,
+                             s=s, res=res, record=record)
+
+
+def release_and_clear(env, planner, task, *, door, drv, anchor_xy, sense, s, res, record=None):
+    """BIMBO's door_release and door_clear: open the hand on the bar, then take it off on a path
+    that never closes on the panel. The shipped stage's tail, callable after a held swing."""
     n = _leaf_normal(task, door, anchor_xy, sense)
     hz = _T(task.agent.tcp.pose.sp)[:3, 2]
     off_normal = float(-hz[:2] @ n)

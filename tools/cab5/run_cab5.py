@@ -21,6 +21,9 @@ def main():
     ap.add_argument("--video-dir", default=None)
     ap.add_argument("--trajectory-out", default=None)
     ap.add_argument("--n4", action="store_true", help="the four-compartment task (control)")
+    ap.add_argument("--variant", choices=("n4-untangled", "n5-tangled-off"), default=None,
+                    help="regression probes: n4-untangled = the four compartments with cab_1's door made "
+                         "tangible (untangle_stems as in N=5)")
     ap.add_argument("--cab1-cam", action="store_true",
                     help="record from a camera close on cab_1 (south-east of it, above the counter)")
     args = ap.parse_args()
@@ -56,7 +59,19 @@ def main():
         csp.search_plan = first_then_seed
     seed = args.seed
     seed_everything(seed)
-    env = gym.make("MikasaCabinetSearch-v0" if args.n4 else "MikasaCabinetSearch5-v0", **kwargs)
+    env_id = "MikasaCabinetSearch-v0" if args.n4 else "MikasaCabinetSearch5-v0"
+    if args.variant == "n4-untangled":
+        import dataclasses
+        from mani_skill.utils.registration import register_env
+        from my_scenes import cabinet_search as cs
+
+        @register_env("MikasaCabinetSearchN4Untangled-v0", max_episode_steps=cs.CabinetSearchConfig.horizon,
+                      asset_download_ids=["RoboCasa"])
+        class N4Untangled(cs.CabinetSearchTask):
+            cfg = dataclasses.replace(cs.CabinetSearchConfig(), untangle_stems=frozenset({cs.CAB_1_STEM}))
+
+        env_id = "MikasaCabinetSearchN4Untangled-v0"
+    env = gym.make(env_id, **kwargs)
     base = env.unwrapped
     if args.video_dir:
         from mani_skill.utils.wrappers.record import RecordEpisode

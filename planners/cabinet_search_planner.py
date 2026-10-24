@@ -1510,6 +1510,13 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
             say(env, "FOUND, not yet touched", compartment=comp.name, k=k, **_latches(info))
             # Empty inspections go straight to closing. Only a found object
             # needs the published tucked approach to clear the door on its way in.
+            if fist_open and rec and "hold" in rec:
+                # cab_1 is held by its bar through the look (`cabinet_door_fist`, MODE "bar"): let go.
+                r = _fist.release_hold(env, planner, task, door=door, record=rec, res=res)
+                if r != -1:
+                    res = r
+                if common.stopped_by_horizon(planner):
+                    return res
             tuck = drive_posture_targets(task)
             tuck.pop("torso_lift_joint", None)
             planner.planner.update_from_simulation()
@@ -1591,7 +1598,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         else:
             closed = False
             if fist_open:
-                res, closed = _fist.close_the_leaf(env, planner, task, door=door, res=res)
+                res, closed = _fist.close_the_leaf(env, planner, task, door=door, res=res, record=rec)
                 if common.stopped_by_horizon(planner):
                     return res
             if CLOSE_RETRACE and rec and not fist_open:

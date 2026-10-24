@@ -122,7 +122,7 @@ YAW_W_MAX = 0.4
 
 FIST_STEM = "cab_1_main_group"
 """The one leaf this stage serves (`my_scenes.cabinet_search.CAB_1_FIST`)."""
-CLOSE_DOCKS = ((0.70, -1.30), (0.60, -1.40), (0.80, -1.20), (0.55, -1.25))
+CLOSE_DOCKS = ((0.80, -1.35), (0.75, -1.30), (0.65, -1.35), (0.85, -1.25))
 """cab_1's closing ladder when the fist leaves it at OPEN_RAD: base xy east of the west wall and
 south of the leaf, the push point on the outer face west of the free edge. GUESSES, unmeasured;
 W24's mirror of the family's rungs (x 0.73/0.53/0.93 about this hinge on the WRONG side) is
@@ -256,6 +256,51 @@ def _low_roll_joints(planner, task, T):
     return {n: float(best[1][int(jm[n].active_index[0])]) for n in names}, best[0]
 
 
+def _near_joints(planner, task, T, k: int = 4):
+    """Up to `k` arm-joint goals for the TCP at `T` (base and torso held), nearest the present joints
+    first (the largest single-joint change), inside the episode's roll window (D2): a joint line to the
+    nearest is the smallest arm motion there is, no wrist turned over. [(targets, max_change_rad)]."""
+    import mplib
+    from robots.fetch.utils import unwrap_toward
+
+    p = planner.planner
+    robot = task.agent.robot
+    cur = robot.get_qpos()[0].cpu().numpy().astype(np.float64)
+    cur_f = p.fold_qpos(cur)
+    goal_b = p._transform_goal_to_wrt_base(mplib.Pose(p=T[:3, 3], q=_quat(T)))
+    mask = [True, True, True, True] + [False] * (len(cur) - 4)
+    try:
+        status, sols = p.IK(goal_b, cur_f, mask, n_init_qpos=LOW_ROLL_SEEDS)
+    except Exception:
+        return []
+    if status != "Success" or sols is None or len(np.atleast_2d(sols)) == 0:
+        return []
+    jm = robot.active_joints_map
+    names = list(task.agent.controller.controllers["arm"].config.joint_names)
+    arm = np.array([int(jm[n].active_index[0]) for n in names])
+    idx = list(getattr(planner, "_roll_indices", []))
+    low = np.asarray(getattr(planner, "_roll_low", np.zeros(len(idx))), dtype=np.float64)
+    high = np.asarray(getattr(planner, "_roll_high", np.zeros(len(idx))), dtype=np.float64)
+    cands = []
+    for g in np.atleast_2d(sols):
+        g = np.asarray(unwrap_toward(g, cur_f, p.joint_limits), dtype=np.float64)
+        if idx:
+            r = g[idx]
+            if np.any(np.abs(r) > np.pi - 0.02) or np.any(np.maximum(high, r) - np.minimum(low, r) > np.pi - 0.02):
+                continue
+        cands.append((float(np.max(np.abs(g[arm] - cur[arm]))), g))
+    cands.sort(key=lambda c: c[0])
+    out, seen = [], []
+    for d, g in cands:
+        if any(np.max(np.abs(g[arm] - h[arm])) < 0.05 for h in seen):
+            continue
+        seen.append(g)
+        out.append(({n: float(g[int(jm[n].active_index[0])]) for n in names}, d))
+        if len(out) >= k:
+            break
+    return out
+
+
 def _reach_low_roll(env, planner, task, T, *, stage: str):
     """A joint move to `_low_roll_joints(T)`, else `_move(T)`; the 5-tuple or -1."""
     got = _low_roll_joints(planner, task, T)
@@ -300,9 +345,11 @@ def open_the_door(env, planner, task, *, door, crack_rad: float = CRACK_RAD,
                   open_rad: float = OPEN_RAD, record: dict | None = None):
     """Crack the leaf on the bar, then open it from inside with the fist (module docstring)."""
     if MODE == "bar":
-        res = _bimbo.open_the_door(env, planner, task, door=door, record=record, target_rad=BAR_OPEN_RAD)
+        res = _bimbo.open_the_door(env, planner, task, door=door, record=record, target_rad=BAR_OPEN_RAD,
+                                   keep_hold=record is not None)
         if res != -1 and not common.stopped_by_horizon(planner):
-            say(env, "opened by the bar", door_rad=round(Leaf(task, door).rad(), 3), target_rad=BAR_OPEN_RAD)
+            say(env, "opened by the bar", door_rad=round(Leaf(task, door).rad(), 3), target_rad=BAR_OPEN_RAD,
+                holding=bool(record and "hold" in record))
         return res
     if MODE == "into":
         return open_into(env, planner, task, door=door, record=record)
@@ -511,9 +558,11 @@ def _closed_by_state(planner, task):
     return res, idx >= 0 and not bool(_bimbo._np(task.is_open)[0, idx])
 
 
-def close_the_leaf(env, planner, task, *, door, res):
+def close_the_leaf(env, planner, task, *, door, res, record=None):
     """Sweep the leaf shut with the fist on its outer face; `(res, closed)` judged by state."""
     if MODE == "bar":
+        if record and "hold" in record:
+            return swing_back_and_close(env, planner, task, door=door, record=record, res=res)
         return close_bar(env, planner, task, door=door, res=res)
     if MODE == "into":
         return close_into(env, planner, task, door=door, res=res)
@@ -799,14 +848,20 @@ def _contact(env, planner, task, leaf, door, *, cands, label: str):
     for yaw_off, pose_of, stand_pre, stand_goal in cands:
         pre = pose_of(rad, stand_pre)
         pre[:3, 3] -= INTO_BACK_M * pre[:3, 2]
-        got = _low_roll_joints(planner, task, pre)
-        if got is None:
+        goals = _near_joints(planner, task, pre)
+        if not goals:
             say(env, f"{label}: no IK for the pre-contact", yaw_off=yaw_off, door_rad=round(rad, 3))
             continue
-        targets, grow = got
-        r = common.plan_joints(env, planner, task, targets, label=f"{label}: pre-contact", who=WHO)
-        say(env, f"{label}: pre-contact", yaw_off=yaw_off, roll_window_growth=round(grow, 3),
-            planned=r != -1)
+        r = -1
+        for targets, change in goals:
+            # A straight joint line only: an RRT path here turned the wrist over (3.5-4.7 rad of
+            # wrist flex on six seeds) — the owner's «кувырки».
+            r = common.plan_joints(env, planner, task, targets, label=f"{label}: pre-contact",
+                                   who=WHO, line_only=True, tries=1)
+            say(env, f"{label}: pre-contact", yaw_off=yaw_off, max_joint_change=round(change, 3),
+                planned=r != -1)
+            if r != -1:
+                break
         if r == -1:
             continue
         if common.stopped_by_horizon(planner):
@@ -979,29 +1034,33 @@ def close_into(env, planner, task, *, door, res):
 
 
 def close_bar(env, planner, task, *, door, res):
-    """The bar-opened leaf (MODE "bar"): stand where the family's push from here reaches its outer
-    face, then hand over (`closed` False) to the round's own `close_and_verify` — the closing every
-    other leaf gets. From the closing stance that push shut cab_1 from 1.05-1.20 rad on 5 of 6 seeds
-    (after the into-face sweep had stalled there), where from the look pose it had no IK."""
+    """The bar-opened leaf (MODE "bar"). The owner (2026-10-24): «Убери кувырки руки, перед закрытием
+    отъезжай». Back the base straight off (CLOSE_BACKOFF_M, the arm held), fold to the drive posture and
+    drive to the closing stance, reach the pre-contact by a straight joint line to the NEAREST IK goal
+    (no RRT: its paths turned the wrist over), stroke into the outer face and sweep it shut with the
+    fist, withdraw. `(res, closed)` by state; not closed, the round's own `close_and_verify` follows."""
     leaf = Leaf(task, door)
     rad0 = leaf.rad()
-    # Under the leaf's bottom edge first: the fold straight from beside the leaf swept it open
-    # 1.22 -> 1.34-1.36 on five of six seeds, past where the push from the stance reaches it.
-    r = _bimbo.lower_the_hand(env, planner, task, door=door)
+    r = planner.drive_straight(-CLOSE_BACKOFF_M, v=0.10)
     if r != -1:
         res = r
         if common.stopped_by_horizon(planner):
             return res, False
-        planner.planner.update_from_simulation()
+    planner.planner.update_from_simulation()
+    say(env, "backed off for the closing push", m=CLOSE_BACKOFF_M, door_rad_before=round(rad0, 3),
+        door_rad=round(leaf.rad(), 3), base=[round(float(v), 3) for v in _bimbo._qpos(task)[:3]])
     look = leaf.point(leaf.rad(), leaf.L - INTO_R, -INTO_STAND)
     r = _stance(env, planner, task, leaf, INTO_STANCE_CLOSE, look, label="closing stance")
     if r is None:
-        say(env, "the closing stance drive refused; the family push from here", door_rad=round(leaf.rad(), 3))
+        say(env, "the closing stance drive refused; the family push", door_rad=round(leaf.rad(), 3))
         return res, False
-    say(env, "the leaf through the stance", door_rad_before=round(rad0, 3), door_rad=round(leaf.rad(), 3))
-    # The fist square to the outer face sweeps it toward shut; whatever is left, the family push
-    # finishes from the same stance (`close_and_verify`, the caller's next step when not closed).
-    return _close_from_stance(env, planner, task, leaf, door, r)
+    res = r
+    if common.stopped_by_horizon(planner):
+        return res, False
+    return _close_from_stance(env, planner, task, leaf, door, res)
+
+
+CLOSE_BACKOFF_M = _f("MIKASA_FD_CLOSE_BACKOFF_M", 0.20)
 
 
 def _close_from_stance(env, planner, task, leaf, door, res):
@@ -1026,3 +1085,69 @@ def _close_from_stance(env, planner, task, leaf, door, res):
     say(env, "fist withdrawn from the leaf", door_rad=round(leaf.rad(), 4), closed=closed,
         then=("done" if closed else "the family push"))
     return res, closed
+
+
+# -- MODE "bar": the handle opens the leaf, the hand stays on it for the look, the handle shuts it ------
+#
+# The owner (2026-10-24), asked how to close cab_1 now that the fist's push from outside turns the wrist
+# over (the wall leaves no other way to the outer face): «Ручкой, не отпуская». The swing back is the
+# opening's own servo (`cabinet_door_bimbo._swing`) run toward shut, on the same grip.
+
+CLOSE_BY_BAR_RAD = _f("MIKASA_FD_CLOSE_BY_BAR_RAD", 0.003)
+HAND_AWAY_M = _f("MIKASA_FD_HAND_AWAY_M", 0.20)
+"""After the release and clear, the hand comes this far back toward the base: shut at 0.000 rad on
+six of six seeds, the close latch still read open with the hand ~0.15 m off the bar."""
+HOLD_SETTLE_STEPS = 6
+
+
+def swing_back_and_close(env, planner, task, *, door, record, res):
+    """Swing the held leaf back shut on the bar, let go, take the hand off; `(res, closed)` by state."""
+    h = record.pop("hold")
+    leaf = Leaf(task, door)
+    rad = leaf.rad()
+    say(env, "swing shut on the bar", door_rad=round(rad, 3), target_rad=CLOSE_BY_BAR_RAD)
+    h["drv"].reset_command()
+    out, reason, _goal = _bimbo._swing(env, planner, task, door, h["drv"], h["servo"], G0=h["G0"],
+                                       rad0=h["rad0"], anchor_xy=h["anchor_xy"], s=h["s"], start=rad,
+                                       target=CLOSE_BY_BAR_RAD, lever_a=h["lever"], lever_b=h["lever"],
+                                       res=res, label="swing shut")
+    if out is None:
+        return planner._guard.last_step, False
+    res = out
+    r = planner.idle_steps(t=HOLD_SETTLE_STEPS)
+    if r != -1:
+        res = r
+    if common.stopped_by_horizon(planner):
+        return res, False
+    planner.planner.update_from_simulation()
+    rad_shut = leaf.rad()
+    res = _bimbo.release_and_clear(env, planner, task, door=door, drv=h["drv"], anchor_xy=h["anchor_xy"],
+                                   sense=h["sense"], s=h["s"], res=res, record=record)
+    if common.stopped_by_horizon(planner):
+        return res, False
+    # The latch wants the hand `cfg.hand_far_m` (0.25) off the bar: the clear leaves it ~0.15.
+    T = _T(task.agent.tcp.pose.sp)
+    q = _bimbo._qpos(task)
+    back = q[:2] - T[:2, 3]
+    back = back / max(float(np.linalg.norm(back)), 1e-6)
+    g = T.copy()
+    g[:3, 3] = T[:3, 3] + HAND_AWAY_M * np.array([back[0], back[1], 0.0])
+    h["drv"].reset_command()
+    out, _ = _servo_to(env, planner, task, h["drv"], g, steps=50, tol=0.02)
+    if out is None:
+        return planner._guard.last_step, False
+    res = out
+    planner.planner.update_from_simulation()
+    res, closed = _closed_by_state(planner, task)
+    say(env, "shut by the bar" if closed else "the bar swing left the leaf open", why=reason,
+        door_rad_held=round(rad_shut, 4), door_rad=round(leaf.rad(), 4), closed=closed)
+    return res, closed
+
+
+def release_hold(env, planner, task, *, door, record, res):
+    """The can is in the held compartment: let go of the bar and take the hand off (no swing)."""
+    if not record or "hold" not in record:
+        return res
+    h = record.pop("hold")
+    return _bimbo.release_and_clear(env, planner, task, door=door, drv=h["drv"], anchor_xy=h["anchor_xy"],
+                                    sense=h["sense"], s=h["s"], res=res, record=record)
