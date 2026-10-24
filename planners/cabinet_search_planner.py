@@ -233,6 +233,14 @@ link, 0.5 m to either side, toed IN by 0.2 rad (measured from `get_sensor_params
 LOOK_HEAD_PAN_MAX = 1.2
 LOOK_HEAD_RETURN_STEPS = 10
 LOOK_HEAD_SETTLE_STEPS = 8
+CAB1_LOOK_EYE = os.environ.get("MIKASA_CAB1_LOOK_EYE", "right_base_camera_link")
+"""cab_1's look centres the compartment in this camera (`HeadTracker.eye`); "" keeps the midpoint aim.
+The owner (2026-10-24): «сосредоточь камеру на отсеке». Held by its bar, cab_1's leaf puts the arm across
+the left camera, and the midpoint aim of the two toed-in cameras left the compartment in the right
+camera's top-left corner (trial-001, 7991300)."""
+CAB1_EMPTY_LOOK_STEPS = int(os.environ.get("MIKASA_CAB1_EMPTY_LOOK_STEPS", "30"))
+"""An empty cab_1 is looked at this many more control steps (1.5 s) before the swing shut: the owner
+(2026-10-24), «если она пустая сделай задержку чуть больше». The look was ~0.7 s."""
 LOOK_HEAD_RAMP_STEPS = int(os.environ.get("MIKASA_LOOK_HEAD_RAMP", "16"))
 """Steps over which the head turns toward the look (and back): 0.8 s at 20 Hz. 0 = the
 one-step snap of W22c. Owner's request 2026-09-08: the look was too fast to read."""
@@ -1462,16 +1470,34 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                 # needs the revealed cube seen for `reveal_dwell_steps`), and stops the
                 # moment success latches.
                 dwell = int(getattr(task.cfg, "reveal_dwell_steps", 0) or 0)
+                tracker = getattr(planner, "_head_tracker", None)
+                one_eye = fist_open and CAB1_LOOK_EYE and tracker is not None and CAB1_LOOK_EYE in tracker.eyes
+                if one_eye:
+                    # cab_1: the arm holding the bar fills the left camera, and the toed-in midpoint aim
+                    # leaves the compartment in the right camera's corner; centre it in the right one.
+                    tracker.eye = CAB1_LOOK_EYE
+                    say(env, "look into cabinet 1 with one camera", camera=CAB1_LOOK_EYE)
                 # Tracking has already aimed at this compartment during the
                 # approach. Wait only for actual alignment and the reveal dwell.
                 aligned_steps = 0
-                for _ in range(LOOK_HEAD_RAMP_STEPS + LOOK_HEAD_SETTLE_STEPS + max(dwell, 1)):
+                for _ in range((2 if one_eye else 1) * LOOK_HEAD_RAMP_STEPS + LOOK_HEAD_SETTLE_STEPS
+                               + max(dwell, 1)):
                     r = planner.idle_steps(t=1)
                     if common.stopped_by_horizon(planner):
                         return r
                     aligned_steps = aligned_steps + 1 if planner._head_tracker.aligned() else 0
                     if aligned_steps >= max(dwell, 1):
                         break
+                if fist_open and CAB1_EMPTY_LOOK_STEPS > 0 and r != -1 and not _b(r[-1], "revealed"):
+                    # The owner (2026-10-24): «у 1-ой дверцы если она пустая сделай задержку чуть больше».
+                    say(env, "cabinet 1 is empty: hold the look", steps=CAB1_EMPTY_LOOK_STEPS)
+                    r2 = planner.idle_steps(t=CAB1_EMPTY_LOOK_STEPS)
+                    if r2 != -1:
+                        r = r2
+                    if common.stopped_by_horizon(planner):
+                        return r
+                if one_eye:
+                    tracker.eye = None
             else:
                 theta += LOOK_TURN_RAD * (1.0 if theta < np.pi / 2 else -1.0)
                 aim = np.array([float(np.cos(theta)), float(np.sin(theta)), 0.0])

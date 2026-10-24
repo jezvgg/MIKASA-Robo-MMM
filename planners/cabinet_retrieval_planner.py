@@ -2841,8 +2841,9 @@ def _retreat_by_servo(env, planner, task, *, away, dist: float):
     """Back the TCP `dist` metres along the horizontal unit `away`, orientation held (FIST_RETREAT_SERVO).
 
     The hand servo moves the arm alone (rolls held where they stand, joint limits and the episode's roll
-    window clipped), and stops at the goal or when the error stops shrinking (a joint at its stop). The
-    rest is a straight base reverse, arm held, when reversing takes the hand away at all. Returns the
+    window clipped), and stops at the goal, when the error stops shrinking (a joint at its stop), or before
+    a command the planning world calls a contact other than the hand on a door. The rest is a straight
+    base reverse, arm held, when reversing takes the hand away at all. Returns the
     last 5-tuple, -1 when nothing stepped (no servo), or None at the horizon."""
     from planners import cabinet_door_bimbo as _bimbo
 
@@ -2856,6 +2857,32 @@ def _retreat_by_servo(env, planner, task, *, away, dist: float):
     def tcp_xyz():
         return _np(task.agent.tcp.pose.sp.p).reshape(-1)[:3].astype(np.float64)
 
+    mp = planner.planner
+    mp.update_from_simulation()
+    unchecked: list = []
+
+    def blocked(q_arm):
+        """The pair the commanded arm would touch, or None. The hand (gripper or wrist links) on a
+        cabinet door is the push's own contact, as `audit_cabinet_closing` counts it; anything else
+        (a self-contact, the arm on the room) stops the arm (7991306: elbow_flex on head_pan)."""
+        q = _bimbo._qpos(task).copy()
+        q[servo.idx] = q_arm
+        s = mp.fold_qpos(q) if callable(getattr(mp, "fold_qpos", None)) else q
+        try:
+            hits = list(mp.check_for_self_collision(s)) + list(mp.check_for_env_collision(s))
+        except Exception as exc:
+            if not unchecked:
+                unchecked.append(exc)
+                say(env, "retreat by servo: no collision check", why=f"{type(exc).__name__}: {exc}"[:120])
+            return None
+        for h in hits:
+            pair = (h.link_name1, h.link_name2)
+            hand_on_door = (any("ds_fetch" in n and ("gripper" in n or "wrist" in n) for n in pair)
+                            and any("cab_" in n and "door" in n for n in pair))
+            if not hand_on_door:
+                return f"{pair[0]}<->{pair[1]}"
+        return None
+
     servo.hold_rolls_here()
     drv.reset_command()
     p0 = tcp_xyz()
@@ -2863,6 +2890,12 @@ def _retreat_by_servo(env, planner, task, *, away, dist: float):
     goal[:3, 3] = p0 + dist * np.asarray(away, dtype=np.float64)
     res, best, still = -1, np.inf, 0
     for _ in range(RETREAT_SERVO_STEPS):
+        if drv.sampled():
+            cand, _, _ = servo.step(_bimbo._qpos(task), goal, drv.q_cmd)
+            hit = blocked(cand)
+            if hit is not None:
+                say(env, "retreat by servo: the arm stops before a contact", pair=hit)
+                break
         res, dp, _, fresh = drv.step(goal)
         if common.stopped_by_horizon(planner):
             return None
@@ -2899,4 +2932,8 @@ def _retreat_by_servo(env, planner, task, *, away, dist: float):
         else:
             say(env, "retreat by servo: reversing would not take the hand off the leaf",
                 along=round(along, 2))
+    if res == -1:
+        # The arm stopped before its first step and the base could not take over: stand still
+        # rather than hand the retreat to the planned move (the RRT this stage replaces).
+        res = planner.idle_steps(t=1)
     return res
