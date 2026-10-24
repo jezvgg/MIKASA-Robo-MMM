@@ -299,6 +299,11 @@ def _servo_to(env, planner, task, drv, goal, *, steps: int, tol: float = 0.01):
 def open_the_door(env, planner, task, *, door, crack_rad: float = CRACK_RAD,
                   open_rad: float = OPEN_RAD, record: dict | None = None):
     """Crack the leaf on the bar, then open it from inside with the fist (module docstring)."""
+    if MODE == "bar":
+        res = _bimbo.open_the_door(env, planner, task, door=door, record=record, target_rad=BAR_OPEN_RAD)
+        if res != -1 and not common.stopped_by_horizon(planner):
+            say(env, "opened by the bar", door_rad=round(Leaf(task, door).rad(), 3), target_rad=BAR_OPEN_RAD)
+        return res
     if MODE == "into":
         return open_into(env, planner, task, door=door, record=record)
     res = _bimbo.open_the_door(env, planner, task, door=door, record=record, target_rad=crack_rad)
@@ -508,6 +513,8 @@ def _closed_by_state(planner, task):
 
 def close_the_leaf(env, planner, task, *, door, res):
     """Sweep the leaf shut with the fist on its outer face; `(res, closed)` judged by state."""
+    if MODE == "bar":
+        return close_bar(env, planner, task, door=door, res=res)
     if MODE == "into":
         return close_into(env, planner, task, door=door, res=res)
     leaf = Leaf(task, door)
@@ -648,8 +655,15 @@ def close_the_leaf(env, planner, task, *, door, res):
 # 0.9-1.3 rad from 78-94 % of 32 stances (roll growth 1.07-1.26 rad) and the outer face at 1.3-0.1 rad
 # from 11 of 24 (1.57-1.69 rad); upright it was 0.63-0.87.
 
-MODE = os.environ.get("MIKASA_FD_MODE", "into")
-""""into" (default): the fist square to the face; "up": the upright fist from under the leaf."""
+MODE = os.environ.get("MIKASA_FD_MODE", "bar")
+""""bar" (default): the bar swing alone opens the leaf to BAR_OPEN_RAD, and the round looks, touches
+or closes it like every other leaf; "into": cracked by the bar, opened on by the horizontal fist in
+the gap; "up": the upright fist from under the leaf."""
+BAR_OPEN_RAD = _f("MIKASA_FD_BAR_OPEN_RAD", 1.28)
+"""The owner (2026-10-24): «после первичного открытия нужно ли открывать полностью, чтобы коснуться
+банки? Может, первичного открытия хватает?». The bar swing stops here: past the reveal (1.2) with the
+release drift's margin, and short of where the closing push loses its stances (the outer-face scan:
+from 1.22-1.30 rad 11-14 of 24 stances, from 1.45 3-6). No fist goes inside."""
 INTO_CRACK_RAD = _f("MIKASA_FD_INTO_CRACK_RAD", 0.90)
 INTO_R = _f("MIKASA_FD_INTO_R", 0.38)
 """The press point's distance from the hinge along the leaf (its free edge is at 0.483)."""
@@ -672,6 +686,8 @@ outer-face scan's (0.80, -1.35; 1.58): 5 cm apart, so the closing needs no drive
 INTO_TORSO = 0.386
 """The scan's best torso for both stances (the drive posture's is ~0.2)."""
 INTO_LEAD_MAX = 0.12
+STANCE_NEAR_M = _f("MIKASA_FD_STANCE_NEAR_M", 0.25)
+"""Within this of a stance the base stays where it is (the stances are scan picks, not exact needs)."""
 TOUCH_N = 1.0
 INTO_OPEN_RAD = _f("MIKASA_FD_INTO_OPEN_RAD", 1.45)
 """How open the horizontal fist leaves the leaf (the owner: wider at the end too). The horizontal
@@ -734,23 +750,31 @@ def _stance(env, planner, task, leaf, xy, look_xy, *, label: str):
     """Fold, drive to `xy` facing `look_xy` (skipped when within 8 cm), raise the torso; a 5-tuple,
     None if the drive refused."""
     res = None
-    r = _fold(env, planner, task, f"fold the fist for the {label}")
-    if r != -1:
-        res = r
-    if common.stopped_by_horizon(planner):
-        return res
-    planner.planner.update_from_simulation()
     base = _bimbo._qpos(task)[:2]
     xy = np.asarray(xy, dtype=np.float64)
-    if float(np.linalg.norm(base - xy)) > 0.08:
+    near = float(np.linalg.norm(base - xy)) <= STANCE_NEAR_M
+    if not near:
+        # A drive needs the arm folded; standing near enough, the arm goes straight on from where it
+        # is (the owner: the hand pulled back to the body between the stages looked wrong).
+        r = _fold(env, planner, task, f"fold the fist for the {label}")
+        if r != -1:
+            res = r
+        if common.stopped_by_horizon(planner):
+            return res
+        planner.planner.update_from_simulation()
+    if not near:
         look = np.asarray(look_xy, dtype=np.float64) - xy
         say(env, f"drive to the {label}", stance=[round(float(v), 3) for v in xy],
             heading_deg=round(math.degrees(math.atan2(look[1], look[0])), 1))
         got = planner.drive_base(target_pos=np.array([xy[0], xy[1], 0.0]),
-                                 target_view_vec=np.array([look[0], look[1], 0.0]), freeze_arm=True,
-                                 arrive_tol=0.05)
+                                 target_view_vec=np.array([look[0], look[1], 0.0]), freeze_arm=True)
         if got == -1:
-            return None
+            # The view turn refused on the leaf: keep the heading the drive arrived with. An
+            # arrive_tol spin here is unplanned and swept the leaf open 1.22 -> 1.36 (six seeds).
+            base = _bimbo._qpos(task)[:2]
+            if float(np.linalg.norm(base - xy)) > 0.06:
+                return None
+            got = planner.idle_steps(t=1)
         res = got
         if common.stopped_by_horizon(planner):
             return res
@@ -951,4 +975,54 @@ def close_into(env, planner, task, *, door, res):
     res, closed = _closed_by_state(planner, task)
     say(env, "fist withdrawn from the shut leaf", door_rad=round(leaf.rad(), 4), closed=closed,
         touching=planner.touching_now())
+    return res, closed
+
+
+def close_bar(env, planner, task, *, door, res):
+    """The bar-opened leaf (MODE "bar"): stand where the family's push from here reaches its outer
+    face, then hand over (`closed` False) to the round's own `close_and_verify` — the closing every
+    other leaf gets. From the closing stance that push shut cab_1 from 1.05-1.20 rad on 5 of 6 seeds
+    (after the into-face sweep had stalled there), where from the look pose it had no IK."""
+    leaf = Leaf(task, door)
+    rad0 = leaf.rad()
+    # Under the leaf's bottom edge first: the fold straight from beside the leaf swept it open
+    # 1.22 -> 1.34-1.36 on five of six seeds, past where the push from the stance reaches it.
+    r = _bimbo.lower_the_hand(env, planner, task, door=door)
+    if r != -1:
+        res = r
+        if common.stopped_by_horizon(planner):
+            return res, False
+        planner.planner.update_from_simulation()
+    look = leaf.point(leaf.rad(), leaf.L - INTO_R, -INTO_STAND)
+    r = _stance(env, planner, task, leaf, INTO_STANCE_CLOSE, look, label="closing stance")
+    if r is None:
+        say(env, "the closing stance drive refused; the family push from here", door_rad=round(leaf.rad(), 3))
+        return res, False
+    say(env, "the leaf through the stance", door_rad_before=round(rad0, 3), door_rad=round(leaf.rad(), 3))
+    # The fist square to the outer face sweeps it toward shut; whatever is left, the family push
+    # finishes from the same stance (`close_and_verify`, the caller's next step when not closed).
+    return _close_from_stance(env, planner, task, leaf, door, r)
+
+
+def _close_from_stance(env, planner, task, leaf, door, res):
+    cands = [((y, p, rr), (lambda rad, st, y=y, p=p, rr=rr:
+                           into_pose(task, leaf, rad, inner=False, yaw_off=y, stand=st, pitch=p, r=rr)),
+              INTO_STAND, INTO_TOUCH) for y, p, rr in CLOSE_POSES]
+    got = _contact(env, planner, task, leaf, door, cands=cands, label="fist to the outer face")
+    if got is None:
+        say(env, "no pre-contact for the outer face; the family push", door_rad=round(leaf.rad(), 3))
+        return res, False
+    res, drv, G0, ref, _ = got
+    if drv is None or common.stopped_by_horizon(planner):
+        return res, False
+    res, why = _sweep(env, planner, task, leaf, door, drv, G0, ref, target=CLOSE_TARGET_RAD,
+                      floor=CLOSE_CMD_FLOOR, label="fist sweep (into)", hand_turn=HAND_TURN_INTO)
+    if common.stopped_by_horizon(planner):
+        return res, False
+    out = _withdraw(env, planner, task, drv)
+    if out is None:
+        return planner._guard.last_step, False
+    res, closed = _closed_by_state(planner, task)
+    say(env, "fist withdrawn from the leaf", door_rad=round(leaf.rad(), 4), closed=closed,
+        then=("done" if closed else "the family push"))
     return res, closed
