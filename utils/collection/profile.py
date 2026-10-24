@@ -18,6 +18,7 @@ PROFILE = Path(__file__).with_name("cabinet_search_profile.json")
 TASKS = {
     "same_drawer": ("MikasaSameDrawer-v0", "my_scenes.same_drawer", "SameDrawerTask"),
     "cabinet_search": ("MikasaCabinetSearch-v0", "my_scenes.cabinet_search", "CabinetSearchTask"),
+    "cabinet_search5": ("MikasaCabinetSearch5-v0", "my_scenes.cabinet_search", "CabinetSearch5Task"),  # EXPERIMENTAL
     "season_dish": ("MikasaSeasonDish-v0", "my_scenes.season_dish", "SeasonDishTask"),
     "depth_recall": ("MikasaDepthRecall-v1", "my_scenes.depth_recall_v1", "DepthRecallV1Task"),
 }
@@ -108,7 +109,7 @@ def runtime_signature(profile=None):
                 continue
             if "collection" in path.parts and path.name not in {
                 "__init__.py", "pipeline.py", "contract.py", "client.py", "profile.py", "campaign.py", "drawer_balance.py",
-                "cabinet_search_profile.json", "season_dish_profile.json", "same_drawer_profile.json", "depth_recall_profile.json",
+                "cabinet_search_profile.json", "cabinet_search5_profile.json", "season_dish_profile.json", "same_drawer_profile.json", "depth_recall_profile.json",
             }:
                 continue
             files[str(path.relative_to(REPO))] = hashlib.sha256(path.read_bytes()).hexdigest()

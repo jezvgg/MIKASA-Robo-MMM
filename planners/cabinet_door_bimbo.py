@@ -85,6 +85,18 @@ centimetres of the bar however the door moves)."""
 HAND_TURN = _f("MIKASA_BD_HAND_TURN", 0.0)
 """Fraction of the door's turn the hand's yaw follows (BIMBO: 1; see the module docstring)."""
 SWING_MAX_STEPS = int(_f("MIKASA_BD_SWING_MAX_STEPS", 600))
+LEAF_CONTACT_N = _f("MIKASA_BD_LEAF_CONTACT_N", 1.0)
+LEAF_STOP_STEPS = int(_f("MIKASA_BD_LEAF_STOP_STEPS", 8))
+LEAF_STOP_EPS = _f("MIKASA_BD_LEAF_STOP_EPS", 0.005)
+"""The swing ends where the leaf stops against the hand: the hand (`gripper_link`) pressing the
+leaf with more than LEAF_CONTACT_N newtons while the leaf moved less than LEAF_STOP_EPS rad over
+the last LEAF_STOP_STEPS controls. With HAND_TURN 0 the hand keeps its world orientation while the
+leaf turns ~100 deg and the bar turns freely in the weld, so the face comes round onto the hand.
+Since assisted grasp keeps the hand colliding (2026-10-23) the face touches it from ~1.0 rad and
+slides along it to ~1.69-1.71 rad, where it stops; without this rule the swing then pressed it for
+its whole 60-control stall window (seven of seven openings, seeds 7880000-7880793). Stopping at the
+first touch instead left the leaf at ~1.0 rad and lost the round (4/4, measured). Under the
+pre-fix drives the hand passed through the leaf and this never fires."""
 STALL_STEPS = 60
 STALL_EPS = 0.01
 "Less door travel than STALL_EPS over STALL_STEPS controls is a stall."
@@ -438,7 +450,8 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
     than LEAD_MAX ahead of the measured leaf; the hand is servoed to the grasp frame carried to
     `sw` (`door_frames`, its yaw turned by HAND_TURN of the door's); the base creeps so the goal
     stands at a lever going from `lever_a` to `lever_b` by LEVER_LEAD_FRAC of the way, then
-    settles there. Stops on the target, an empty hand, a stall, or SWING_MAX_STEPS.
+    settles there. Stops on the target, the leaf stopped against the hand (LEAF_*), an empty
+    hand, a stall, or SWING_MAX_STEPS.
 
     Returns `(res, reason, goal)`; `res` is None when the horizon struck (the caller returns
     the solver's last step).
@@ -465,6 +478,11 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
     goal = frame(sw)
     q = _qpos(task)
     q_arm0, q_base0 = q[servo.idx].copy(), q[:3].copy()
+    art = task.scene.articulations[crp._art_key(task, door)]
+    joints = art.get_active_joints()
+    leaf = joints[[j.name for j in joints].index(door.hinge)].child_link
+    hand_link = task.agent.robot.links_map["gripper_link"]
+    pressed, press_max = 0, 0.0
     hist: list = []
     trace: list = []
     reason = "max-steps"
@@ -497,6 +515,14 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
         if fresh:
             perr_max = max(perr_max, float(np.linalg.norm(dp)))
             rerr_max = max(rerr_max, float(np.linalg.norm(dr)))
+        press = float(np.linalg.norm(_np(task.scene.get_pairwise_contact_forces(hand_link, leaf))
+                                     .reshape(-1, 3), axis=1).max())
+        press_max = max(press_max, press)
+        pressed = pressed + 1 if press > LEAF_CONTACT_N else 0
+        if (pressed >= LEAF_STOP_STEPS and len(hist) > LEAF_STOP_STEPS
+                and direction * (hist[-1] - hist[-1 - LEAF_STOP_STEPS]) < LEAF_STOP_EPS):
+            reason = "hand-on-leaf"
+            break
         if i % 10 == 0:
             hand = ds.angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
             trace.append([i, round(sw, 3), round(rad, 3), round(hand, 3),
@@ -506,7 +532,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
             return None, "horizon", goal
     # -- the stance settles: the goal held on the bar, the creep runs on to lever_b -----------
     settle, lever_err = 0, 0.0
-    if reason == "target" and LEVER_END[0] > 0:
+    if reason in ("target", "hand-on-leaf") and LEVER_END[0] > 0:
         for settle in range(1, SETTLE_STEPS + 1):
             q = _qpos(task)
             v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], np.zeros(2), q[:2], float(q[2]),
@@ -526,14 +552,14 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
         arm_moved=[round(float(v), 3) for v in q_end[servo.idx] - q_arm0],
         base_moved=[round(float(v), 3) for v in q_end[:3] - q_base0],
         base_end=[round(float(v), 3) for v in q_end[:3]], settle=settle,
-        lever_err=round(lever_err, 3),
+        lever_err=round(lever_err, 3), hand_on_leaf_n_max=round(press_max, 2),
         trace="[i, sw, rad, hand, perr, rerr, v, w, a_x, a_y] " + str(trace[-16:]),
         **({"door_tail": [round(v, 3) for v in hist[-20:]]} if reason != "target" else {}))
     return res, reason, goal
 
 
 def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
-                  record: dict | None = None):
+                  record: dict | None = None, target_rad: float | None = None, keep_hold: bool = False):
     """Grasp the leaf's bar, swing it open with the servoed hand, let go and clear the hand.
 
     Same contract as `cabinet_retrieval_planner.open_the_door` (D6): -1 only for a refusal
@@ -547,12 +573,20 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         park_rad: a wall-park target (cab_1); the swing then runs to the larger of it and
             `DOOR_OPEN_TARGET` on the same grip.
         record: optional dict for `retrace_the_door`.
+        target_rad: a swing target of its own (`cabinet_door_fist`'s crack of the leaf); the
+            base then keeps the grasp's lever instead of settling on LEVER_END. None (default)
+            is the shipped target and stance.
+        keep_hold: end with the fingers still on the bar (no release, no clear) and the swing's
+            servo state in `record["hold"]`, for `swing_back_and_release` (cab_1 is closed by the
+            handle it was opened by). False (default) is the shipped stage.
 
     Example:
         >>> res = open_the_door(env, planner, task, door=CAB_MAIN_RIGHT)   # doctest: +SKIP
     """
     target = float(crp.DOOR_OPEN_TARGET if park_rad is None
                    else max(crp.DOOR_OPEN_TARGET, float(park_rad)))
+    if target_rad is not None:
+        target = float(target_rad)
     dock = np.array([door.handle_dock[0], door.handle_dock[1], 0.0])
     res, done = crp.grasp_the_bar(env, planner, task, door, bar=door.handle_bar, dock=dock)
     if done:
@@ -614,14 +648,14 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     rad0 = float(crp.door_rad_now(task, door))
     q = _qpos(task)
     lever = _lever(G0[:2, 3], q)
-    lever_end = lever if LEVER_END[0] <= 0 else (LEVER_END[0], s * LEVER_END[1])
+    lever_end = lever if (LEVER_END[0] <= 0 or target_rad is not None) else (LEVER_END[0], s * LEVER_END[1])
     yaw0 = float(q[2])
     res, reason, goal = _swing(env, planner, task, door, drv, servo, G0=G0, rad0=rad0,
                                anchor_xy=anchor_xy, s=s, start=rad0, target=target,
                                lever_a=lever, lever_b=lever_end, res=res, label="swing")
     if res is None:
         return planner._guard.last_step
-    if reason == "target" and STANCE_TURN > 0 and LEVER_END[0] > 0:
+    if reason == "target" and STANCE_TURN > 0 and LEVER_END[0] > 0 and target_rad is None:
         q1 = _qpos(task)
         out = _square_stance(env, planner, task, drv, goal, yaw_goal=yaw0 - s * STANCE_TURN,
                              lever_goal=lever_end)
@@ -661,7 +695,21 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
             arm_qpos=_qpos(task).copy())
         record["tape"] = planner.start_tape()
 
+    if keep_hold:
+        if record is not None:
+            record["hold"] = dict(drv=drv, servo=servo, G0=G0, rad0=rad0, anchor_xy=anchor_xy, sense=sense,
+                                  s=s, lever=lever)
+        say(env, "holding the bar (bimbo)", door_rad=round(float(crp.door_rad_now(task, door)), 4))
+        return res
+
     # -- door_release ------------------------------------------------------------------------
+    return release_and_clear(env, planner, task, door=door, drv=drv, anchor_xy=anchor_xy, sense=sense,
+                             s=s, res=res, record=record)
+
+
+def release_and_clear(env, planner, task, *, door, drv, anchor_xy, sense, s, res, record=None):
+    """BIMBO's door_release and door_clear: open the hand on the bar, then take it off on a path
+    that never closes on the panel. The shipped stage's tail, callable after a held swing."""
     n = _leaf_normal(task, door, anchor_xy, sense)
     hz = _T(task.agent.tcp.pose.sp)[:3, 2]
     off_normal = float(-hz[:2] @ n)

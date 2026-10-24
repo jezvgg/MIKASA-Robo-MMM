@@ -206,6 +206,64 @@ hand that has just let go of the bar. The ladder's point (r 0.35, z 1.55) was dr
 base that has driven round to the hinge side and refused on IK from the opening pose
 (`joint limit at index [3]`)."""
 PUSH_FROM_HERE = os.environ.get("MIKASA_PUSH_FROM_HERE", "1") == "1"
+FIST_ROLL_FREE = os.environ.get("MIKASA_FIST_ROLL_FREE", "1") == "1"
+FIST_NEAR_IK = os.environ.get("MIKASA_FIST_NEAR_IK", "0") == "1"
+"""The closing fist's pre-contact is reached by a straight joint line to the IK goal nearest the arm's
+present joints, the wrist roll weighted low (NEAR_IK_W_WRIST_ROLL), either way up: the shipped screw to
+the fixed fist turned the forearm 1.95 rad and the upper arm 1.18 against each other where the wrist
+roll alone had to turn (2026-10-24, seed 7991201's first close). Falls back to the shipped move.
+Off by default: on eight four-compartment seeds the lines were mostly blocked and the closes no
+better (6/8 episodes, forearm roll up to 5.8 rad)."""
+FIST_WRIST_FIRST = os.environ.get("MIKASA_FIST_WRIST_FIRST", "1") == "1"
+"""Before the closing fist's pre-contact, turn the wrist roll alone (one joint, in place) until the
+fingers stand vertical, the nearer way up: the owner's «можно было просто повернуть сам гриппер». The
+pre-contact move then has (almost) no turn about the hand's axis left to spread over the forearm and
+upper-arm rolls."""
+FIST_TURN_ON_THE_WAY = os.environ.get("MIKASA_FIST_TURN_ON_THE_WAY", "1") == "1"
+"""The wrist-first turn and the fist happen during the pre-contact move instead of before it (the owner on
+the comparison video, 2026-10-24: «Поворачивать гриппер у других дверей и закрывать его можно
+одновременно»): the same path, the gripper turning about its own axis on the way (`_reach_turning`).
+The sequential order stays the fallback."""
+FIST_TURN_RATE = 1.0
+"""rad/s: the wrist's peak speed in a turn on the way."""
+FIST_RETREAT_SERVO = os.environ.get("MIKASA_FIST_RETREAT_SERVO", "1") == "1"
+"""After the closing push and the release, the hand backs off the shut leaf the way its stroke came in
+(the face's outward normal), orientation held, under the hand servo; the base reverses for what the arm
+cannot give. Nothing is planned next to the leaf. The shipped retreat, a screw back along the hand's
+axis with RRT behind it, jammed on shoulder_lift (`joint limit at index [7]`: 8 refusals on eight
+four-compartment seeds with FIST_WRIST_FIRST, 2026-10-24) and the RRT path that replaced it dragged the
+leaf open (7991201: to 0.114 rad, the episode lost)."""
+FIST_WRIST_BACK = os.environ.get("MIKASA_FIST_WRIST_BACK", "0") == "1"
+"""Once the hand is off the leaf, undo FIST_WRIST_FIRST's turn: the wrist roll alone, back to where it
+stood before the close. Off: the fold to the drive posture that follows sets every arm joint, the wrist
+roll among them, so the gripper turns back while the arm returns to rest (the owner, 2026-10-25: «После
+закрытия тоже можно одновременно поворачивать гриппер и возвращаться в rest позу»)."""
+FIST_OPEN_OFF_PANEL = os.environ.get("MIKASA_FIST_OPEN_OFF_PANEL", "1") == "1"
+"""With the servo retreat, the fist backs off the shut leaf closed and opens only there. Opened on the
+panel, the fingers spread 10 cm beside the bar and the retreat pulled the leaf open by them (trial-002,
+7991314: r_gripper_finger on cab_main's right leaf, 0 -> 0.58 rad). The close latch needs the hand 0.25 m
+off the bar, not an open hand; the hand still goes home open."""
+RETREAT_DRAG_RAD = 0.02
+FIST_OPEN_WHILE_BACKING = os.environ.get("MIKASA_FIST_OPEN_WHILE_BACKING", "1") == "1"
+FIST_OPEN_BACKING_M = 0.20
+"""The fist opens during its back-off, once 0.20 m off the shut leaf (no bar within reach of the fingers),
+instead of standing still to open after it (the owner, 2026-10-25: «И гриппер закрывать тоже одновременно
+можно»). The servo is not an execution-noise path and switches on a sampled (even) step, so the collection's
+gripper rules hold; a back-off that stops short opens after it, as before."""
+RETREAT_SLIDE_M = float(os.environ.get("MIKASA_RETREAT_SLIDE_M", "0.06"))
+RETREAT_SLIDE_KEEP_M = 0.15
+"""Before backing off the shut leaf the fist slides this far along it toward the hinge (never nearer
+the hinge than RETREAT_SLIDE_KEEP_M): the push stands at the bar's radius, 3 cm inboard of the bar,
+and the fist's edge sat behind it — backing straight off, the closed fist dragged the leaf too
+(trial-004, 7991320: 0.026 rad at 2.3 cm, then 0.57 under the correction's drive). Along the leaf is
+radial to the hinge, so the slide turns nothing."""
+RETREAT_SERVO_STEPS = 80
+RETREAT_BASE_MAX_M = 0.30
+NEAR_IK_W_WRIST_ROLL = 0.3
+NEAR_IK_SEEDS = 120
+"""The closing fist's fingers stay vertical but either way up, whichever is nearer the hand's present
+turn (2026-10-24, the owner on the other leaves' closing: «рука совершает поворот на 180, хотя можно
+было просто повернуть сам гриппер»). Off: the shipped fingers-vertical fist, always +z."""
 """Try the fist push from where the base stands BEFORE the ladder of closing docks.
 
 The owner's fallback for the closing (2026-09-05, after the 1105/1250 recordings): if
@@ -2015,17 +2073,38 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         """Fist and pre-contact from the rung just taken; `-1` = this rung does not
         afford the push. Nothing executes when the plan refuses, so the arm is left
         exactly as the drive left it and the next rung starts clean."""
-        if not push.get("fisted"):
-            if fist:
-                r = planner.close_gripper(t=12)  # the fist is the tool, not a failed grasp
-            else:
-                # The open hand is the tool (assisted grasp): no command below open, no weld.
-                r = planner.open_gripper() if int(getattr(planner, "gripper_state", 1)) != 1 else -1
-                say(env, "push with the hand open (assisted grasp)")
-            push["fisted"] = True
-            if r != -1 and common.stopped_by_horizon(planner):
-                push["stop"] = r
-                return -1
+        def turn_and_fist() -> bool:
+            """The sequential order: the wrist roll alone, then the fist; True when the horizon struck."""
+            if fist and FIST_WRIST_FIRST and not push.get("wrist_turned"):
+                push["wrist_turned"] = True
+                j = int(A.robot.active_joints_map["wrist_roll_joint"].active_index[0])
+                before = float(_np(A.robot.get_qpos()).reshape(-1)[j])
+                r = _turn_wrist_for_fist(env, planner, task)
+                if r != -1:
+                    push["wrist_from"] = before
+                    if common.stopped_by_horizon(planner):
+                        push["stop"] = r
+                        return True
+            if not push.get("fisted"):
+                if fist:
+                    r = planner.close_gripper(t=12)  # the fist is the tool, not a failed grasp
+                else:
+                    # The open hand is the tool (assisted grasp): no command below open, no weld.
+                    r = planner.open_gripper() if int(getattr(planner, "gripper_state", 1)) != 1 else -1
+                    say(env, "push with the hand open (assisted grasp)")
+                push["fisted"] = True
+                if r != -1 and common.stopped_by_horizon(planner):
+                    push["stop"] = r
+                    return True
+            return False
+
+        # FIST_TURN_ON_THE_WAY: the wrist turns and the fist closes during the pre-contact move below,
+        # not before it; `turn` is where the wrist-first turn would leave the hand.
+        on_the_way = (fist and FIST_WRIST_FIRST and FIST_TURN_ON_THE_WAY and not push.get("wrist_turned")
+                      and not push.get("fisted"))
+        turn = _wrist_turn_target(env, planner, task) if on_the_way else None
+        if not on_the_way and turn_and_fist():
+            return -1
         # The contact, rebuilt from the LIVE angle (the drive never touches the door,
         # but the pull left it anywhere in ~1.65-1.75): push point on the panel's
         # mid-plane arc, approach into the outer face, closing along z (a wrist roll
@@ -2065,8 +2144,35 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
                 _b = _np(task.agent.base_link.pose.sp.p).reshape(-1)[:2]
                 d = np.array([centre_xy[0] - _b[0], centre_xy[1] - _b[1], 0.0])
                 approach = d / max(float(np.linalg.norm(d)), 1e-6)
-            goal = A.build_grasp_pose(approach, np.array([0.0, 0.0, 1.0]), centre)
+            closing = np.array([0.0, 0.0, 1.0])
+            if fist and FIST_ROLL_FREE:
+                # The fingers stay vertical (a fist with them across the vertical bar hooked the
+                # leaf open on the retreat: 4 of 4 four-compartment seeds), but either way up — +z
+                # or -z, the same fist turned over — whichever is nearer the hand's present y-axis,
+                # so the wrist turns at most a quarter, never the half turn the owner saw.
+                y_now = _np(A.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4)[:3, 1]
+                if on_the_way and turn is not None:
+                    y_now = turn["y"]            # the hand as the turn on the way will leave it
+                if float(y_now[2]) < 0.0:
+                    closing = np.array([0.0, 0.0, -1.0])
+            goal = A.build_grasp_pose(approach, closing, centre)
             pre = goal * sapien.Pose([0, 0, -0.15])
+            cands = []
+            if fist and FIST_NEAR_IK:
+                for c in (closing, -closing):
+                    g = A.build_grasp_pose(approach, c, centre)
+                    pr = (sapien.Pose(p=centre + 0.15 * np.array([n[0], n[1], 0.0]), q=g.q)
+                          if push.get("from_here") else g * sapien.Pose([0, 0, -0.15]))
+                    cands.append((g, pr))
+            if cands:
+                near = _near_ik_move(env, planner, task, cands, stage="pre-contact the panel (near)")
+                if near is not None:
+                    got, goal = near
+                    if common.stopped_by_horizon(planner):
+                        push["stop"] = got
+                        return -1
+                    push["goal"] = goal
+                    return got
             if push.get("from_here"):
                 # The stroke runs pre-contact -> goal along the FIST'S axis, and from
                 # here that axis lies along the panel (toward the hinge), so a
@@ -2077,6 +2183,21 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
                 # normal instead, fist orientation unchanged: the stroke enters the
                 # outer face square, as the ladder's does.
                 pre = sapien.Pose(p=centre + 0.15 * np.array([n[0], n[1], 0.0]), q=goal.q)
+            if on_the_way:
+                got = _reach_turning(env, planner, task, pre, turn,
+                                     stage="pre-contact the panel, the wrist turning on the way")
+                if got is None:
+                    push["stop"] = planner._guard.last_step
+                    return -1
+                if got != -1:
+                    push.update(wrist_turned=True, fisted=True, goal=goal)
+                    if turn is not None:
+                        push["wrist_from"] = turn["frm"]
+                    return got
+                # The sequential order from here on; the turn ends where `turn` said, so `goal` holds.
+                on_the_way = False
+                if turn_and_fist():
+                    return -1
             got = common.arm_move(env, planner, pre,
                                   who=WHO, stage="pre-contact the panel",
                                   tries=3 if i == 0 else 2)
@@ -2235,8 +2356,12 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
     LAST_PUSH["pushed"] = float(door_rad_now(task, door))
 
     # Release on the next policy tick, before withdrawing. Returning home with a
-    # fist would disclose which compartments have already been inspected.
-    if physical_close:
+    # fist would disclose which compartments have already been inspected. With the
+    # servo retreat the fist withdraws first and opens off the panel (FIST_OPEN_OFF_PANEL).
+    servo_back = fist and FIST_RETREAT_SERVO
+    open_late = physical_close and servo_back and FIST_OPEN_OFF_PANEL
+    retreat_state: dict = {}
+    if physical_close and not open_late:
         res = planner.open_gripper()
         if common.stopped_by_horizon(planner):
             return res
@@ -2244,14 +2369,49 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         planner.planner.update_from_simulation()
 
     # Retreat the open hand so the closure dwell reads a free door.
-    tcp = task.agent.tcp.pose.sp
-    back = common.arm_move(env, planner,
-                           sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -.30 if physical_close else -.15]),
-                           who=WHO, stage="retreat off the panel", tries=2)
+    dist = .30 if physical_close else .15
+    back = -1
+    if servo_back:
+        _, n_shut = push_frame(anchor_xy, sense, _hinge_qpos(task, door), door)
+        away = np.array([float(n_shut[0]), float(n_shut[1]), 0.0])
+        away = away / max(float(np.linalg.norm(away)), 1e-6)
+        # Along the shut leaf toward its hinge, off the bar the push stood beside.
+        to_hinge = np.asarray(anchor_xy, dtype=np.float64) - _np(task.agent.tcp.pose.sp.p).reshape(-1)[:2]
+        to_hinge = to_hinge - float(to_hinge @ away[:2]) * away[:2]
+        r_hand = float(np.linalg.norm(to_hinge))
+        slide = None
+        if RETREAT_SLIDE_M > 0 and r_hand > RETREAT_SLIDE_M + RETREAT_SLIDE_KEEP_M:
+            slide = RETREAT_SLIDE_M * np.array([to_hinge[0] / r_hand, to_hinge[1] / r_hand, 0.0])
+        back = _retreat_by_servo(env, planner, task, away=away, dist=dist,
+                                 leaf_rad=lambda: door_rad_now(task, door), slide=slide,
+                                 open_at=FIST_OPEN_BACKING_M if (open_late and FIST_OPEN_WHILE_BACKING) else None,
+                                 state=retreat_state)
+        if back is None:
+            return planner._guard.last_step
+    if open_late and not retreat_state.get("opened"):
+        r = planner.open_gripper()
+        if r != -1:
+            back = r
+        if common.stopped_by_horizon(planner):
+            return planner._guard.last_step if r == -1 else r
+        say(env, "opened the hand off the panel", gripper="open",
+            door_rad=round(float(door_rad_now(task, door)), 4))
+        planner.planner.update_from_simulation()
+    if back == -1:
+        tcp = task.agent.tcp.pose.sp
+        back = common.arm_move(env, planner, sapien.Pose(p=tcp.p, q=tcp.q) * sapien.Pose([0, 0, -dist]),
+                               who=WHO, stage="retreat off the panel", tries=2)
     if back != -1:
         res = back
         if common.stopped_by_horizon(planner):
             return res
+    if push.get("wrist_from") is not None and FIST_WRIST_BACK:
+        planner.planner.update_from_simulation()
+        r = common.plan_joints(env, planner, task, {"wrist_roll_joint": push["wrist_from"]},
+                               label="turn the wrist back", who=WHO, line_only=True, tries=1)
+        if r != -1:
+            res = r
+            planner.planner.update_from_simulation()
     return res
 
 
@@ -2654,3 +2814,358 @@ if __name__ == "__main__":
     out = solve(env, seed=args.seed)
     print("result:", "no_plan" if out == -1 else f"success={bool(_np(out[-1]['success']).any())}")
     env.close()
+
+
+def _near_ik_move(env, planner, task, cands, *, stage: str):
+    """A joint line to the cheapest IK goal over `cands` [(goal_pose, pre_pose)], the cost the arm's
+    joint change with the wrist roll weighted NEAR_IK_W_WRIST_ROLL, inside the collection's roll window.
+    Returns `(5-tuple, goal_pose)` or None (nothing stepped)."""
+    import mplib
+    from robots.fetch.utils import unwrap_toward
+
+    p = planner.planner
+    robot = task.agent.robot
+    cur = _np(robot.get_qpos()).reshape(-1).astype(np.float64)
+    cur_f = p.fold_qpos(cur)
+    mask = [True, True, True, True] + [False] * (len(cur) - 4)
+    jm = robot.active_joints_map
+    names = list(task.agent.controller.controllers["arm"].config.joint_names)
+    arm = np.array([int(jm[nm].active_index[0]) for nm in names])
+    w = np.array([NEAR_IK_W_WRIST_ROLL if nm == "wrist_roll_joint" else 1.0 for nm in names])
+    idx = list(getattr(planner, "_roll_indices", []))
+    low = np.asarray(getattr(planner, "_roll_low", np.zeros(len(idx))), dtype=np.float64)
+    high = np.asarray(getattr(planner, "_roll_high", np.zeros(len(idx))), dtype=np.float64)
+    options = []
+    for goal, pre in cands:
+        try:
+            status, sols = p.IK(p._transform_goal_to_wrt_base(mplib.Pose(p=pre.p, q=pre.q)), cur_f, mask,
+                                n_init_qpos=NEAR_IK_SEEDS)
+        except Exception:
+            continue
+        if status != "Success" or sols is None:
+            continue
+        for g in np.atleast_2d(sols):
+            g = np.asarray(unwrap_toward(g, cur_f, p.joint_limits), dtype=np.float64)
+            if idx:
+                r = g[idx]
+                if np.any(np.abs(r) > np.pi - 0.02) or np.any(np.maximum(high, r) - np.minimum(low, r) > np.pi - 0.02):
+                    continue
+            options.append((float(np.sum(w * np.abs(g[arm] - cur[arm]))), g, goal))
+    options.sort(key=lambda o: o[0])
+    for cost, g, goal in options[:4]:
+        targets = {nm: float(g[int(jm[nm].active_index[0])]) for nm in names}
+        r = common.plan_joints(env, planner, task, targets, label=stage, who=WHO, line_only=True, tries=1)
+        say(env, stage, cost=round(cost, 3), planned=r != -1)
+        if r != -1:
+            planner.planner.update_from_simulation()
+            return r, goal
+    return None
+
+
+def _wrist_turn_target(env, planner, task):
+    """The wrist roll value that stands the gripper's closing axis (TCP y) vertical, +z or -z, whichever
+    is nearer, the sign of the joint's effect read off the arm's own kinematic model: a dict(joint, from,
+    to, phi, grow, y) with `y` the TCP y-axis it gives, or None (nothing to turn, or no value inside the
+    episode's roll window)."""
+    from planners import cabinet_door_bimbo as _bimbo
+
+    T = _np(task.agent.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4)
+    z, y = T[:3, 2], T[:3, 1]
+    c = np.array([0.0, 0.0, 1.0]) - float(z[2]) * z
+    if float(np.linalg.norm(c)) < 0.3:
+        return None                                 # the hand points (nearly) up or down
+    c = c / float(np.linalg.norm(c))
+    if float(y @ c) < 0.0:
+        c = -c
+    phi = float(np.arctan2(float(np.cross(y, c) @ z), float(y @ c)))
+    if abs(phi) < 0.15:
+        return None
+    jm = task.agent.robot.active_joints_map
+    j = int(jm["wrist_roll_joint"].active_index[0])
+    q = _bimbo._qpos(task)
+    servo = _bimbo.HandServo(task, planner)
+    # Both ways up are a vertical fist (phi to +c, or phi -+ pi to -c); of the joint values that
+    # realise either, take the one that grows the episode's roll window (D2) least, then the nearer.
+    roll_i = list(getattr(planner, "_roll_indices", []))
+    k = roll_i.index(j) if j in roll_i else None
+    lo = float(planner._roll_low[k]) if k is not None else -np.inf
+    hi = float(planner._roll_high[k]) if k is not None else np.inf
+    options = []
+    for target_c in (c, -c):
+        for d in (phi, phi - np.pi, phi + np.pi, -phi):
+            q1 = q.copy()
+            q1[j] += d
+            y1 = servo.pose(q1)[:3, 1]
+            if float(y1 @ target_c) < 0.97:
+                continue
+            v = float(q1[j])
+            grow = (max(hi, v) - min(lo, v)) - (hi - lo) if k is not None else 0.0
+            if k is not None and max(hi, v) - min(lo, v) > np.pi - 0.02:
+                continue
+            options.append((round(grow, 3), abs(d), v, d, tuple(float(x) for x in y1)))
+    if not options:
+        say(env, "turn the wrist for the fist: no turn inside the roll window")
+        return None
+    options.sort()
+    grow, _, value, d, y1 = options[0]
+    return dict(joint=j, frm=float(q[j]), to=value, phi=d, grow=grow, y=np.array(y1))
+
+
+def _turn_wrist_for_fist(env, planner, task):
+    """Turn the wrist roll alone to `_wrist_turn_target`. Returns the 5-tuple or -1 (nothing to do, or
+    no line)."""
+    t = _wrist_turn_target(env, planner, task)
+    if t is None:
+        return -1
+    say(env, "turn the wrist for the fist", phi_deg=round(float(np.degrees(t["phi"])), 1),
+        roll_window_growth=round(float(t["grow"]), 3))
+    r = common.plan_joints(env, planner, task, {"wrist_roll_joint": t["to"]}, label="turn the wrist for the fist",
+                           who=WHO, line_only=True, tries=1)
+    if r != -1:
+        planner.planner.update_from_simulation()
+    return r
+
+
+def _reach_turning(env, planner, task, pre, turn, *, stage: str):
+    """The pre-contact move with the wrist turning and the fist closing on the way (FIST_TURN_ON_THE_WAY).
+
+    The path is the sequential one's: the screw to `pre` planned from the arm as the wrist-first turn would
+    leave it. Knot i then carries (1 - s_i) of the turn still to go, s a smoothstep from 0 to 1, so the
+    hand travels the same line and the gripper turns about its own axis on the way, the first knot being
+    the arm as it stands; the path is stretched so the wrist turns no faster than FIST_TURN_RATE. Refused
+    unless it stays inside the episode's roll window (D2) and the planning world finds it clear. The
+    gripper command closes at the first knot. Returns the 5-tuple, -1 when refused (nothing executed), or
+    None at the horizon."""
+    import mplib
+    from robots.fetch.extand import CLOSED
+
+    mp = planner.planner
+    q = _np(task.agent.robot.get_qpos()).reshape(-1).astype(np.float64)
+    q_turn = q.copy()
+    if turn is not None:
+        q_turn[turn["joint"]] = turn["to"]
+    only = [True, True, True, False] + [False] * (len(q) - 4)
+    try:
+        result = mp.plan_screw(mplib.Pose(p=pre.p, q=pre.q), q_turn, time_step=planner.base_env.control_timestep,
+                               masked_joints=~np.array(only), goal_tolerance=planner.ARM_SCREW_GOAL_TOLERANCE)
+    except Exception as exc:
+        say(env, f"{stage}: no screw", why=f"{type(exc).__name__}: {exc}"[:120])
+        return -1
+    if result.get("status") != "Success" or len(result.get("position", [])) < 2:
+        say(env, f"{stage}: the screw refused", status=str(result.get("status"))[:120])
+        return -1
+    pos = np.array(result["position"], dtype=np.float64)
+    n = len(pos)
+    stretch = 1
+    if turn is not None:
+        names = [str(mp.user_joint_names[i]) for i in mp.move_group_joint_indices]   # "scene-0-ds_fetch_..."
+        col = next(c for c, nm in enumerate(names) if nm.endswith("wrist_roll_joint"))
+        off = float(turn["frm"]) - float(turn["to"])
+        t = np.linspace(0.0, 1.0, n)
+        pos[:, col] += (1.0 - t * t * (3.0 - 2.0 * t)) * off
+        need = 1.5 * abs(off) / (FIST_TURN_RATE * float(planner.base_env.control_timestep))
+        stretch = max(1, int(np.ceil(need / max(n - 1, 1))))
+    dt = float(planner.base_env.control_timestep)
+    result = dict(result, position=pos, velocity=np.gradient(pos, dt, axis=0))
+    result.pop("acceleration", None)
+    result = planner.stretch_path(result, stretch)
+    accepts = getattr(mp, "accepts", None)
+    if callable(accepts) and not accepts(result["position"], move_group=True):
+        say(env, f"{stage}: outside the roll window")
+        return -1
+    hits = planner.path_env_collisions(result["position"])
+    fold = getattr(mp, "fold_qpos", None)
+    selfhit = 0
+    for k in result["position"]:
+        try:
+            if mp.check_for_self_collision(np.asarray(fold(k) if callable(fold) else k)):
+                selfhit += 1
+        except Exception:
+            selfhit = -1
+            break
+    if hits != 0 or selfhit != 0:
+        say(env, f"{stage}: the path touches", env_knots=int(hits), self_knots=int(selfhit))
+        return -1
+    noise = getattr(planner, "execution_noise", None)
+    if noise is not None and getattr(noise, "stage", None) is not None:
+        say(env, f"{stage}: an execution-noise phase is open; the gripper may not switch")
+        return -1
+    say(env, stage, knots=int(len(result["position"])), stretch=stretch,
+        turn_deg=round(float(np.degrees(turn["phi"])), 1) if turn is not None else 0.0)
+    # The collection switches the gripper on an even 20 Hz step only (CollectionMotionPlanner._step,
+    # change_gripper_state): from an odd one, hold one step first, as that primitive does.
+    if int(_np(planner.base_env.elapsed_steps).reshape(-1)[0]) % 2:
+        planner.idle_steps(t=1)
+        if common.stopped_by_horizon(planner):
+            return None
+    planner.gripper_state = CLOSED
+    out = planner.follow_forward_path_w_refinement(result, refine=True)
+    if common.stopped_by_horizon(planner):
+        return None
+    planner.planner.update_from_simulation()
+    return out
+
+
+def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None, slide=None, open_at=None,
+                      state=None):
+    """Back the TCP `dist` metres along the horizontal unit `away`, orientation held (FIST_RETREAT_SERVO).
+
+    The hand servo moves the arm alone (rolls held where they stand, joint limits and the episode's roll
+    window clipped), and stops at the goal, when the error stops shrinking (a joint at its stop), or before
+    a command the planning world calls a contact other than the hand on a door. `slide` (a vector along
+    the leaf, toward its hinge) is servoed first: the fist pushes beside the bar and its edge can sit
+    behind it, so it slides clear before it backs off. `leaf_rad` (how open the pushed leaf is) stops a
+    leg once the hand drags the leaf RETREAT_DRAG_RAD open; the hand then slides clear once more and
+    backs off again (once). The rest is a straight base reverse, arm held, when reversing takes the
+    hand away at all. `open_at` (metres): the gripper command opens on the first sampled step of the
+    back-off with the hand that far back (`state["opened"]` then True). Returns the last 5-tuple, -1 when
+    nothing stepped (no servo), or None at the horizon."""
+    from planners import cabinet_door_bimbo as _bimbo
+
+    try:
+        servo = _bimbo.HandServo(task, planner)
+        drv = _bimbo._Driver(planner, task, servo, _bimbo._torso(task))
+    except Exception as exc:  # a stub planner, or no kinematic model
+        say(env, "retreat by servo: no hand servo", why=f"{type(exc).__name__}: {exc}"[:120])
+        return -1
+
+    def tcp_xyz():
+        return _np(task.agent.tcp.pose.sp.p).reshape(-1)[:3].astype(np.float64)
+
+    mp = planner.planner
+    mp.update_from_simulation()
+    unchecked: list = []
+
+    def blocked(q_arm):
+        """The pair the commanded arm would touch, or None. The hand (gripper or wrist links) on a
+        cabinet door is the push's own contact, as `audit_cabinet_closing` counts it; anything else
+        (a self-contact, the arm on the room) stops the arm (7991306: elbow_flex on head_pan)."""
+        q = _bimbo._qpos(task).copy()
+        q[servo.idx] = q_arm
+        s = mp.fold_qpos(q) if callable(getattr(mp, "fold_qpos", None)) else q
+        try:
+            hits = list(mp.check_for_self_collision(s)) + list(mp.check_for_env_collision(s))
+        except Exception as exc:
+            if not unchecked:
+                unchecked.append(exc)
+                say(env, "retreat by servo: no collision check", why=f"{type(exc).__name__}: {exc}"[:120])
+            return None
+        for h in hits:
+            pair = (h.link_name1, h.link_name2)
+            hand_on_door = (any("ds_fetch" in n and ("gripper" in n or "wrist" in n) for n in pair)
+                            and any("cab_" in n and "door" in n for n in pair))
+            if not hand_on_door:
+                return f"{pair[0]}<->{pair[1]}"
+        return None
+
+    T0 = _np(task.agent.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4).astype(np.float64)
+    servo.hold_rolls_here()
+
+    state = {} if state is None else state
+
+    def leg(target, opening_from=None):
+        """Servo the TCP to `target` (orientation T0's); `(res, why)`, why in goal/stall/contact/drag,
+        res None at the horizon and -1 when nothing stepped. With `opening_from` (the leg's start) the
+        gripper opens once the hand is `open_at` back from it along `away`."""
+        from robots.fetch.extand import OPEN
+
+        drv.reset_command()
+        goal = T0.copy()
+        goal[:3, 3] = target
+        rad_start = float(leaf_rad()) if leaf_rad is not None else None
+        out, best, still, why = -1, np.inf, 0, "steps"
+        for _ in range(RETREAT_SERVO_STEPS):
+            sampled = drv.sampled()
+            if (sampled and opening_from is not None and open_at is not None and not state.get("opened")
+                    and float((tcp_xyz() - opening_from) @ away) >= float(open_at)
+                    and getattr(getattr(planner, "execution_noise", None), "stage", None) is None):
+                # A sampled step is an even one: the collection's gripper rule holds (CollectionMotionPlanner._step).
+                planner.gripper_state = OPEN
+                state["opened"] = True
+                say(env, "retreat by servo: the hand opens on the way back",
+                    backed_m=round(float((tcp_xyz() - opening_from) @ away), 3))
+            if sampled:
+                cand, _, _ = servo.step(_bimbo._qpos(task), goal, drv.q_cmd)
+                hit = blocked(cand)
+                if hit is not None:
+                    say(env, "retreat by servo: the arm stops before a contact", pair=hit)
+                    why = "contact"
+                    break
+            out, dp, _, fresh = drv.step(goal)
+            if common.stopped_by_horizon(planner):
+                return None, why
+            if rad_start is not None and float(leaf_rad()) - rad_start > RETREAT_DRAG_RAD:
+                say(env, "retreat by servo: the hand drags the leaf; the arm stops",
+                    door_rad=round(float(leaf_rad()), 4))
+                why = "drag"
+                break
+            if not fresh:
+                continue
+            err = float(np.linalg.norm(dp))
+            if err < 0.02:
+                why = "goal"
+                break
+            if err < best - 0.002:
+                best, still = err, 0
+            else:
+                still += 1
+                if still >= 8:
+                    why = "stall"
+                    break
+        planner.planner.update_from_simulation()
+        return out, why
+
+    res = -1
+    away = np.asarray(away, dtype=np.float64)
+    slide = None if slide is None or float(np.linalg.norm(slide)) < 1e-3 else np.asarray(slide, dtype=np.float64)
+    tries = 2 if slide is not None and leaf_rad is not None else 1
+    dragged = False
+    p1, gone = tcp_xyz(), 0.0
+    for attempt in range(tries):
+        if slide is not None:
+            p = tcp_xyz()
+            r, why = leg(p + slide)
+            if r is None:
+                return None
+            if r != -1:
+                res = r
+            say(env, "retreat by servo: slide along the leaf, off the bar",
+                slid_m=round(float(np.linalg.norm(tcp_xyz() - p)), 3), why=why)
+            if why == "drag":
+                dragged = True
+                break
+        p1 = tcp_xyz()
+        r, why = leg(p1 + dist * away, opening_from=p1)
+        if r is None:
+            return None
+        if r != -1:
+            res = r
+        gone = float((tcp_xyz() - p1) @ away)
+        say(env, "retreat by servo: the arm", backed_m=round(gone, 3), asked_m=round(dist, 3), why=why)
+        dragged = why == "drag"
+        if not dragged:
+            break
+    left = dist - gone
+    if left > 0.03 and not dragged:
+        bx = _np(task.agent.base_link.pose.sp.to_transformation_matrix()).reshape(4, 4)[:3, 0].copy()
+        bx[2] = 0.0
+        bx = bx / max(float(np.linalg.norm(bx)), 1e-6)
+        along = float(-bx @ away)
+        if along > 0.3:
+            d = min(left / along, RETREAT_BASE_MAX_M)
+            r = planner.drive_straight(-d)
+            if r != -1:
+                res = r
+            if common.stopped_by_horizon(planner):
+                return None
+            planner.planner.update_from_simulation()
+            say(env, "retreat by servo: the base reversed", base_m=round(d, 3),
+                backed_m=round(float((tcp_xyz() - p1) @ away), 3))
+        else:
+            say(env, "retreat by servo: reversing would not take the hand off the leaf",
+                along=round(along, 2))
+    if res == -1:
+        # The arm stopped before its first step and the base could not take over: stand still
+        # rather than hand the retreat to the planned move (the RRT this stage replaces).
+        res = planner.idle_steps(t=1)
+    return res
