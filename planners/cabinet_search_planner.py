@@ -241,6 +241,10 @@ camera's top-left corner (trial-001, 7991300)."""
 CAB1_EMPTY_LOOK_STEPS = int(os.environ.get("MIKASA_CAB1_EMPTY_LOOK_STEPS", "30"))
 """An empty cab_1 is looked at this many more control steps (1.5 s) before the swing shut: the owner
 (2026-10-24), «если она пустая сделай задержку чуть больше». The look was ~0.7 s."""
+CAB1_LOOK_RISE_M = float(os.environ.get("MIKASA_CAB1_LOOK_RISE_M", "0.25"))
+"""During that hold the camera aims this far above the spawn point (the compartment's floor, z 1.47):
+cab_1 stands 1.39-2.31 m, and aimed at its floor the camera showed it in the top half of the frame
+(trial-003, 7991300). The reveal itself still aims at the spawn point."""
 LOOK_HEAD_RAMP_STEPS = int(os.environ.get("MIKASA_LOOK_HEAD_RAMP", "16"))
 """Steps over which the head turns toward the look (and back): 0.8 s at 20 Hz. 0 = the
 one-step snap of W22c. Owner's request 2026-09-08: the look was too fast to read."""
@@ -1490,8 +1494,17 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                         break
                 if fist_open and CAB1_EMPTY_LOOK_STEPS > 0 and r != -1 and not _b(r[-1], "revealed"):
                     # The owner (2026-10-24): «у 1-ой дверцы если она пустая сделай задержку чуть больше».
-                    say(env, "cabinet 1 is empty: hold the look", steps=CAB1_EMPTY_LOOK_STEPS)
+                    aim_before = tracker.target if tracker is not None else None
+                    if tracker is not None and CAB1_LOOK_RISE_M > 0:
+                        # The reveal aims at the spawn point, the compartment's floor; held on an
+                        # empty cab_1 the camera looks into the compartment's middle instead.
+                        tracker.target = np.array([spawn_x, spawn_y, float(task.cfg.shelf_top_z)
+                                                   + float(task.cfg.cube_half) + CAB1_LOOK_RISE_M])
+                    say(env, "cabinet 1 is empty: hold the look", steps=CAB1_EMPTY_LOOK_STEPS,
+                        rise_m=CAB1_LOOK_RISE_M)
                     r2 = planner.idle_steps(t=CAB1_EMPTY_LOOK_STEPS)
+                    if tracker is not None:
+                        tracker.target = aim_before
                     if r2 != -1:
                         r = r2
                     if common.stopped_by_horizon(planner):
