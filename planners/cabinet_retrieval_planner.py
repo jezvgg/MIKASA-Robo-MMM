@@ -219,6 +219,13 @@ FIST_WRIST_FIRST = os.environ.get("MIKASA_FIST_WRIST_FIRST", "1") == "1"
 fingers stand vertical, the nearer way up: the owner's «можно было просто повернуть сам гриппер». The
 pre-contact move then has (almost) no turn about the hand's axis left to spread over the forearm and
 upper-arm rolls."""
+FIST_TURN_ON_THE_WAY = os.environ.get("MIKASA_FIST_TURN_ON_THE_WAY", "1") == "1"
+"""The wrist-first turn and the fist happen during the pre-contact move instead of before it (the owner on
+the comparison video, 2026-10-24: «Поворачивать гриппер у других дверей и закрывать его можно
+одновременно»): the same path, the gripper turning about its own axis on the way (`_reach_turning`).
+The sequential order stays the fallback."""
+FIST_TURN_RATE = 1.0
+"""rad/s: the wrist's peak speed in a turn on the way."""
 FIST_RETREAT_SERVO = os.environ.get("MIKASA_FIST_RETREAT_SERVO", "1") == "1"
 """After the closing push and the release, the hand backs off the shut leaf the way its stroke came in
 (the face's outward normal), orientation held, under the hand servo; the base reverses for what the arm
@@ -2058,27 +2065,38 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         """Fist and pre-contact from the rung just taken; `-1` = this rung does not
         afford the push. Nothing executes when the plan refuses, so the arm is left
         exactly as the drive left it and the next rung starts clean."""
-        if fist and FIST_WRIST_FIRST and not push.get("wrist_turned"):
-            push["wrist_turned"] = True
-            j = int(A.robot.active_joints_map["wrist_roll_joint"].active_index[0])
-            before = float(_np(A.robot.get_qpos()).reshape(-1)[j])
-            r = _turn_wrist_for_fist(env, planner, task)
-            if r != -1:
-                push["wrist_from"] = before
-                if common.stopped_by_horizon(planner):
+        def turn_and_fist() -> bool:
+            """The sequential order: the wrist roll alone, then the fist; True when the horizon struck."""
+            if fist and FIST_WRIST_FIRST and not push.get("wrist_turned"):
+                push["wrist_turned"] = True
+                j = int(A.robot.active_joints_map["wrist_roll_joint"].active_index[0])
+                before = float(_np(A.robot.get_qpos()).reshape(-1)[j])
+                r = _turn_wrist_for_fist(env, planner, task)
+                if r != -1:
+                    push["wrist_from"] = before
+                    if common.stopped_by_horizon(planner):
+                        push["stop"] = r
+                        return True
+            if not push.get("fisted"):
+                if fist:
+                    r = planner.close_gripper(t=12)  # the fist is the tool, not a failed grasp
+                else:
+                    # The open hand is the tool (assisted grasp): no command below open, no weld.
+                    r = planner.open_gripper() if int(getattr(planner, "gripper_state", 1)) != 1 else -1
+                    say(env, "push with the hand open (assisted grasp)")
+                push["fisted"] = True
+                if r != -1 and common.stopped_by_horizon(planner):
                     push["stop"] = r
-                    return -1
-        if not push.get("fisted"):
-            if fist:
-                r = planner.close_gripper(t=12)  # the fist is the tool, not a failed grasp
-            else:
-                # The open hand is the tool (assisted grasp): no command below open, no weld.
-                r = planner.open_gripper() if int(getattr(planner, "gripper_state", 1)) != 1 else -1
-                say(env, "push with the hand open (assisted grasp)")
-            push["fisted"] = True
-            if r != -1 and common.stopped_by_horizon(planner):
-                push["stop"] = r
-                return -1
+                    return True
+            return False
+
+        # FIST_TURN_ON_THE_WAY: the wrist turns and the fist closes during the pre-contact move below,
+        # not before it; `turn` is where the wrist-first turn would leave the hand.
+        on_the_way = (fist and FIST_WRIST_FIRST and FIST_TURN_ON_THE_WAY and not push.get("wrist_turned")
+                      and not push.get("fisted"))
+        turn = _wrist_turn_target(env, planner, task) if on_the_way else None
+        if not on_the_way and turn_and_fist():
+            return -1
         # The contact, rebuilt from the LIVE angle (the drive never touches the door,
         # but the pull left it anywhere in ~1.65-1.75): push point on the panel's
         # mid-plane arc, approach into the outer face, closing along z (a wrist roll
@@ -2125,6 +2143,8 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
                 # or -z, the same fist turned over — whichever is nearer the hand's present y-axis,
                 # so the wrist turns at most a quarter, never the half turn the owner saw.
                 y_now = _np(A.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4)[:3, 1]
+                if on_the_way and turn is not None:
+                    y_now = turn["y"]            # the hand as the turn on the way will leave it
                 if float(y_now[2]) < 0.0:
                     closing = np.array([0.0, 0.0, -1.0])
             goal = A.build_grasp_pose(approach, closing, centre)
@@ -2155,6 +2175,21 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
                 # normal instead, fist orientation unchanged: the stroke enters the
                 # outer face square, as the ladder's does.
                 pre = sapien.Pose(p=centre + 0.15 * np.array([n[0], n[1], 0.0]), q=goal.q)
+            if on_the_way:
+                got = _reach_turning(env, planner, task, pre, turn,
+                                     stage="pre-contact the panel, the wrist turning on the way")
+                if got is None:
+                    push["stop"] = planner._guard.last_step
+                    return -1
+                if got != -1:
+                    push.update(wrist_turned=True, fisted=True, goal=goal)
+                    if turn is not None:
+                        push["wrist_from"] = turn["frm"]
+                    return got
+                # The sequential order from here on; the turn ends where `turn` said, so `goal` holds.
+                on_the_way = False
+                if turn_and_fist():
+                    return -1
             got = common.arm_move(env, planner, pre,
                                   who=WHO, stage="pre-contact the panel",
                                   tries=3 if i == 0 else 2)
@@ -2816,23 +2851,24 @@ def _near_ik_move(env, planner, task, cands, *, stage: str):
     return None
 
 
-def _turn_wrist_for_fist(env, planner, task):
-    """Turn the wrist roll alone so the gripper's closing axis (TCP y) stands vertical, +z or -z,
-    whichever is nearer; the sign of the joint's effect is read off the arm's own kinematic model.
-    Returns the 5-tuple or -1 (nothing to do, or no line)."""
+def _wrist_turn_target(env, planner, task):
+    """The wrist roll value that stands the gripper's closing axis (TCP y) vertical, +z or -z, whichever
+    is nearer, the sign of the joint's effect read off the arm's own kinematic model: a dict(joint, from,
+    to, phi, grow, y) with `y` the TCP y-axis it gives, or None (nothing to turn, or no value inside the
+    episode's roll window)."""
     from planners import cabinet_door_bimbo as _bimbo
 
     T = _np(task.agent.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4)
     z, y = T[:3, 2], T[:3, 1]
     c = np.array([0.0, 0.0, 1.0]) - float(z[2]) * z
     if float(np.linalg.norm(c)) < 0.3:
-        return -1                                   # the hand points (nearly) up or down
+        return None                                 # the hand points (nearly) up or down
     c = c / float(np.linalg.norm(c))
     if float(y @ c) < 0.0:
         c = -c
     phi = float(np.arctan2(float(np.cross(y, c) @ z), float(y @ c)))
     if abs(phi) < 0.15:
-        return -1
+        return None
     jm = task.agent.robot.active_joints_map
     j = int(jm["wrist_roll_joint"].active_index[0])
     q = _bimbo._qpos(task)
@@ -2848,26 +2884,115 @@ def _turn_wrist_for_fist(env, planner, task):
         for d in (phi, phi - np.pi, phi + np.pi, -phi):
             q1 = q.copy()
             q1[j] += d
-            if float(servo.pose(q1)[:3, 1] @ target_c) < 0.97:
+            y1 = servo.pose(q1)[:3, 1]
+            if float(y1 @ target_c) < 0.97:
                 continue
             v = float(q1[j])
             grow = (max(hi, v) - min(lo, v)) - (hi - lo) if k is not None else 0.0
             if k is not None and max(hi, v) - min(lo, v) > np.pi - 0.02:
                 continue
-            options.append((round(grow, 3), abs(d), v, d))
+            options.append((round(grow, 3), abs(d), v, d, tuple(float(x) for x in y1)))
     if not options:
         say(env, "turn the wrist for the fist: no turn inside the roll window")
-        return -1
+        return None
     options.sort()
-    grow, _, value, d = options[0]
-    best = (1.0, value)
-    say(env, "turn the wrist for the fist", phi_deg=round(float(np.degrees(d)), 1),
-        roll_window_growth=round(float(grow), 3))
-    r = common.plan_joints(env, planner, task, {"wrist_roll_joint": best[1]}, label="turn the wrist for the fist",
+    grow, _, value, d, y1 = options[0]
+    return dict(joint=j, frm=float(q[j]), to=value, phi=d, grow=grow, y=np.array(y1))
+
+
+def _turn_wrist_for_fist(env, planner, task):
+    """Turn the wrist roll alone to `_wrist_turn_target`. Returns the 5-tuple or -1 (nothing to do, or
+    no line)."""
+    t = _wrist_turn_target(env, planner, task)
+    if t is None:
+        return -1
+    say(env, "turn the wrist for the fist", phi_deg=round(float(np.degrees(t["phi"])), 1),
+        roll_window_growth=round(float(t["grow"]), 3))
+    r = common.plan_joints(env, planner, task, {"wrist_roll_joint": t["to"]}, label="turn the wrist for the fist",
                            who=WHO, line_only=True, tries=1)
     if r != -1:
         planner.planner.update_from_simulation()
     return r
+
+
+def _reach_turning(env, planner, task, pre, turn, *, stage: str):
+    """The pre-contact move with the wrist turning and the fist closing on the way (FIST_TURN_ON_THE_WAY).
+
+    The path is the sequential one's: the screw to `pre` planned from the arm as the wrist-first turn would
+    leave it. Knot i then carries (1 - s_i) of the turn still to go, s a smoothstep from 0 to 1, so the
+    hand travels the same line and the gripper turns about its own axis on the way, the first knot being
+    the arm as it stands; the path is stretched so the wrist turns no faster than FIST_TURN_RATE. Refused
+    unless it stays inside the episode's roll window (D2) and the planning world finds it clear. The
+    gripper command closes at the first knot. Returns the 5-tuple, -1 when refused (nothing executed), or
+    None at the horizon."""
+    import mplib
+    from robots.fetch.extand import CLOSED
+
+    mp = planner.planner
+    q = _np(task.agent.robot.get_qpos()).reshape(-1).astype(np.float64)
+    q_turn = q.copy()
+    if turn is not None:
+        q_turn[turn["joint"]] = turn["to"]
+    only = [True, True, True, False] + [False] * (len(q) - 4)
+    try:
+        result = mp.plan_screw(mplib.Pose(p=pre.p, q=pre.q), q_turn, time_step=planner.base_env.control_timestep,
+                               masked_joints=~np.array(only), goal_tolerance=planner.ARM_SCREW_GOAL_TOLERANCE)
+    except Exception as exc:
+        say(env, f"{stage}: no screw", why=f"{type(exc).__name__}: {exc}"[:120])
+        return -1
+    if result.get("status") != "Success" or len(result.get("position", [])) < 2:
+        say(env, f"{stage}: the screw refused", status=str(result.get("status"))[:120])
+        return -1
+    pos = np.array(result["position"], dtype=np.float64)
+    n = len(pos)
+    stretch = 1
+    if turn is not None:
+        names = [str(mp.user_joint_names[i]) for i in mp.move_group_joint_indices]   # "scene-0-ds_fetch_..."
+        col = next(c for c, nm in enumerate(names) if nm.endswith("wrist_roll_joint"))
+        off = float(turn["frm"]) - float(turn["to"])
+        t = np.linspace(0.0, 1.0, n)
+        pos[:, col] += (1.0 - t * t * (3.0 - 2.0 * t)) * off
+        need = 1.5 * abs(off) / (FIST_TURN_RATE * float(planner.base_env.control_timestep))
+        stretch = max(1, int(np.ceil(need / max(n - 1, 1))))
+    dt = float(planner.base_env.control_timestep)
+    result = dict(result, position=pos, velocity=np.gradient(pos, dt, axis=0))
+    result.pop("acceleration", None)
+    result = planner.stretch_path(result, stretch)
+    accepts = getattr(mp, "accepts", None)
+    if callable(accepts) and not accepts(result["position"], move_group=True):
+        say(env, f"{stage}: outside the roll window")
+        return -1
+    hits = planner.path_env_collisions(result["position"])
+    fold = getattr(mp, "fold_qpos", None)
+    selfhit = 0
+    for k in result["position"]:
+        try:
+            if mp.check_for_self_collision(np.asarray(fold(k) if callable(fold) else k)):
+                selfhit += 1
+        except Exception:
+            selfhit = -1
+            break
+    if hits != 0 or selfhit != 0:
+        say(env, f"{stage}: the path touches", env_knots=int(hits), self_knots=int(selfhit))
+        return -1
+    noise = getattr(planner, "execution_noise", None)
+    if noise is not None and getattr(noise, "stage", None) is not None:
+        say(env, f"{stage}: an execution-noise phase is open; the gripper may not switch")
+        return -1
+    say(env, stage, knots=int(len(result["position"])), stretch=stretch,
+        turn_deg=round(float(np.degrees(turn["phi"])), 1) if turn is not None else 0.0)
+    # The collection switches the gripper on an even 20 Hz step only (CollectionMotionPlanner._step,
+    # change_gripper_state): from an odd one, hold one step first, as that primitive does.
+    if int(_np(planner.base_env.elapsed_steps).reshape(-1)[0]) % 2:
+        planner.idle_steps(t=1)
+        if common.stopped_by_horizon(planner):
+            return None
+    planner.gripper_state = CLOSED
+    out = planner.follow_forward_path_w_refinement(result, refine=True)
+    if common.stopped_by_horizon(planner):
+        return None
+    planner.planner.update_from_simulation()
+    return out
 
 
 def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None, slide=None):
