@@ -235,6 +235,13 @@ panel, the fingers spread 10 cm beside the bar and the retreat pulled the leaf o
 7991314: r_gripper_finger on cab_main's right leaf, 0 -> 0.58 rad). The close latch needs the hand 0.25 m
 off the bar, not an open hand; the hand still goes home open."""
 RETREAT_DRAG_RAD = 0.02
+RETREAT_SLIDE_M = float(os.environ.get("MIKASA_RETREAT_SLIDE_M", "0.06"))
+RETREAT_SLIDE_KEEP_M = 0.15
+"""Before backing off the shut leaf the fist slides this far along it toward the hinge (never nearer
+the hinge than RETREAT_SLIDE_KEEP_M): the push stands at the bar's radius, 3 cm inboard of the bar,
+and the fist's edge sat behind it — backing straight off, the closed fist dragged the leaf too
+(trial-004, 7991320: 0.026 rad at 2.3 cm, then 0.57 under the correction's drive). Along the leaf is
+radial to the hinge, so the slide turns nothing."""
 RETREAT_SERVO_STEPS = 80
 RETREAT_BASE_MAX_M = 0.30
 NEAR_IK_W_WRIST_ROLL = 0.3
@@ -2323,8 +2330,16 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
     if servo_back:
         _, n_shut = push_frame(anchor_xy, sense, _hinge_qpos(task, door), door)
         away = np.array([float(n_shut[0]), float(n_shut[1]), 0.0])
-        back = _retreat_by_servo(env, planner, task, away=away / max(float(np.linalg.norm(away)), 1e-6),
-                                 dist=dist, leaf_rad=lambda: door_rad_now(task, door))
+        away = away / max(float(np.linalg.norm(away)), 1e-6)
+        # Along the shut leaf toward its hinge, off the bar the push stood beside.
+        to_hinge = np.asarray(anchor_xy, dtype=np.float64) - _np(task.agent.tcp.pose.sp.p).reshape(-1)[:2]
+        to_hinge = to_hinge - float(to_hinge @ away[:2]) * away[:2]
+        r_hand = float(np.linalg.norm(to_hinge))
+        slide = None
+        if RETREAT_SLIDE_M > 0 and r_hand > RETREAT_SLIDE_M + RETREAT_SLIDE_KEEP_M:
+            slide = RETREAT_SLIDE_M * np.array([to_hinge[0] / r_hand, to_hinge[1] / r_hand, 0.0])
+        back = _retreat_by_servo(env, planner, task, away=away, dist=dist,
+                                 leaf_rad=lambda: door_rad_now(task, door), slide=slide)
         if back is None:
             return planner._guard.last_step
     if open_late:
@@ -2855,16 +2870,18 @@ def _turn_wrist_for_fist(env, planner, task):
     return r
 
 
-def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None):
+def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None, slide=None):
     """Back the TCP `dist` metres along the horizontal unit `away`, orientation held (FIST_RETREAT_SERVO).
 
     The hand servo moves the arm alone (rolls held where they stand, joint limits and the episode's roll
     window clipped), and stops at the goal, when the error stops shrinking (a joint at its stop), or before
-    a command the planning world calls a contact other than the hand on a door. The rest is a straight
-    base reverse, arm held, when reversing takes the hand away at all. `leaf_rad` (how open the
-    pushed leaf is) stops the arm, and skips the base, once the hand drags the leaf RETREAT_DRAG_RAD
-    open. Returns the
-    last 5-tuple, -1 when nothing stepped (no servo), or None at the horizon."""
+    a command the planning world calls a contact other than the hand on a door. `slide` (a vector along
+    the leaf, toward its hinge) is servoed first: the fist pushes beside the bar and its edge can sit
+    behind it, so it slides clear before it backs off. `leaf_rad` (how open the pushed leaf is) stops a
+    leg once the hand drags the leaf RETREAT_DRAG_RAD open; the hand then slides clear once more and
+    backs off again (once). The rest is a straight base reverse, arm held, when reversing takes the
+    hand away at all. Returns the last 5-tuple, -1 when nothing stepped (no servo), or None at the
+    horizon."""
     from planners import cabinet_door_bimbo as _bimbo
 
     try:
@@ -2903,43 +2920,79 @@ def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None):
                 return f"{pair[0]}<->{pair[1]}"
         return None
 
+    T0 = _np(task.agent.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4).astype(np.float64)
     servo.hold_rolls_here()
-    drv.reset_command()
-    p0 = tcp_xyz()
-    rad0 = float(leaf_rad()) if leaf_rad is not None else None
+
+    def leg(target):
+        """Servo the TCP to `target` (orientation T0's); `(res, why)`, why in goal/stall/contact/drag,
+        res None at the horizon and -1 when nothing stepped."""
+        drv.reset_command()
+        goal = T0.copy()
+        goal[:3, 3] = target
+        rad_start = float(leaf_rad()) if leaf_rad is not None else None
+        out, best, still, why = -1, np.inf, 0, "steps"
+        for _ in range(RETREAT_SERVO_STEPS):
+            if drv.sampled():
+                cand, _, _ = servo.step(_bimbo._qpos(task), goal, drv.q_cmd)
+                hit = blocked(cand)
+                if hit is not None:
+                    say(env, "retreat by servo: the arm stops before a contact", pair=hit)
+                    why = "contact"
+                    break
+            out, dp, _, fresh = drv.step(goal)
+            if common.stopped_by_horizon(planner):
+                return None, why
+            if rad_start is not None and float(leaf_rad()) - rad_start > RETREAT_DRAG_RAD:
+                say(env, "retreat by servo: the hand drags the leaf; the arm stops",
+                    door_rad=round(float(leaf_rad()), 4))
+                why = "drag"
+                break
+            if not fresh:
+                continue
+            err = float(np.linalg.norm(dp))
+            if err < 0.02:
+                why = "goal"
+                break
+            if err < best - 0.002:
+                best, still = err, 0
+            else:
+                still += 1
+                if still >= 8:
+                    why = "stall"
+                    break
+        planner.planner.update_from_simulation()
+        return out, why
+
+    res = -1
+    away = np.asarray(away, dtype=np.float64)
+    slide = None if slide is None or float(np.linalg.norm(slide)) < 1e-3 else np.asarray(slide, dtype=np.float64)
+    tries = 2 if slide is not None and leaf_rad is not None else 1
     dragged = False
-    goal = _np(task.agent.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4).astype(np.float64)
-    goal[:3, 3] = p0 + dist * np.asarray(away, dtype=np.float64)
-    res, best, still = -1, np.inf, 0
-    for _ in range(RETREAT_SERVO_STEPS):
-        if drv.sampled():
-            cand, _, _ = servo.step(_bimbo._qpos(task), goal, drv.q_cmd)
-            hit = blocked(cand)
-            if hit is not None:
-                say(env, "retreat by servo: the arm stops before a contact", pair=hit)
+    p1, gone = tcp_xyz(), 0.0
+    for attempt in range(tries):
+        if slide is not None:
+            p = tcp_xyz()
+            r, why = leg(p + slide)
+            if r is None:
+                return None
+            if r != -1:
+                res = r
+            say(env, "retreat by servo: slide along the leaf, off the bar",
+                slid_m=round(float(np.linalg.norm(tcp_xyz() - p)), 3), why=why)
+            if why == "drag":
+                dragged = True
                 break
-        res, dp, _, fresh = drv.step(goal)
-        if common.stopped_by_horizon(planner):
+        p1 = tcp_xyz()
+        r, why = leg(p1 + dist * away)
+        if r is None:
             return None
-        if rad0 is not None and float(leaf_rad()) - rad0 > RETREAT_DRAG_RAD:
-            dragged = True
-            say(env, "retreat by servo: the hand drags the leaf; the arm stops",
-                door_rad=round(float(leaf_rad()), 4))
+        if r != -1:
+            res = r
+        gone = float((tcp_xyz() - p1) @ away)
+        say(env, "retreat by servo: the arm", backed_m=round(gone, 3), asked_m=round(dist, 3), why=why)
+        dragged = why == "drag"
+        if not dragged:
             break
-        if not fresh:
-            continue
-        err = float(np.linalg.norm(dp))
-        if err < 0.02:
-            break
-        if err < best - 0.002:
-            best, still = err, 0
-        else:
-            still += 1
-            if still >= 8:
-                break
-    planner.planner.update_from_simulation()
-    gone = float((tcp_xyz() - p0) @ away)
-    say(env, "retreat by servo: the arm", backed_m=round(gone, 3), asked_m=round(dist, 3))
     left = dist - gone
     if left > 0.03 and not dragged:
         bx = _np(task.agent.base_link.pose.sp.to_transformation_matrix()).reshape(4, 4)[:3, 0].copy()
@@ -2955,7 +3008,7 @@ def _retreat_by_servo(env, planner, task, *, away, dist: float, leaf_rad=None):
                 return None
             planner.planner.update_from_simulation()
             say(env, "retreat by servo: the base reversed", base_m=round(d, 3),
-                backed_m=round(float((tcp_xyz() - p0) @ away), 3))
+                backed_m=round(float((tcp_xyz() - p1) @ away), 3))
         else:
             say(env, "retreat by servo: reversing would not take the hand off the leaf",
                 along=round(along, 2))
