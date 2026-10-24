@@ -953,6 +953,8 @@ def nudge_the_cube(env, planner, task, res, cab=None):
     if centres is not None and cab is not None:
         dock_x = float(_np(centres).reshape(-1, int(task.layout.n_compartments))[0][cab])
     dock = np.array([dock_x, LOOK_DOCK_Y, 0.0])
+    fist_cab = (cab is not None and str(task.cfg.compartments[cab].stem) == _fist.FIST_STEM
+                and task.cfg.compartments[cab].close_policy != "wall_park")
     # Two postures for the drive, in order: as the arm stands after the look (its tuck
     # cleared 2100-2109 and the own leaf), then the drive posture (which cleared the six
     # 200-seed losses of the tuck — a neighbour's door swept, the microwave — but meets
@@ -960,6 +962,18 @@ def nudge_the_cube(env, planner, task, res, cab=None):
     # IK there and one attempt took pinocchio down (log3 assertion) on 2102-2104.
     docked = False
     view = np.array([0.0, 1.0, 0.0])
+    if fist_cab:
+        # cab_1 opened by the fist: its leaf hangs at 1.31 rad over the front of the box, so the
+        # family's dock (the centre's x, facing +y) stands on it, and a dock east of it could not
+        # turn to +y without the arm sweeping the leaf (seeds 7991102/03/09/11). Dock on the line
+        # from where the fist left the base toward the cube, facing the cube.
+        stand = _np(task.agent.base_link.pose.sp.p).reshape(-1)[:2].astype(np.float64)
+        d = target_p[:2] - stand
+        d = d / max(float(np.linalg.norm(d)), 1e-6)
+        dock = np.array([*(target_p[:2] - _fist.TOUCH_REACH_M * d), 0.0])
+        view = np.array([d[0], d[1], 0.0])
+        say(env, "touch dock for the fist-opened leaf", dock=[round(float(v), 3) for v in dock[:2]],
+            heading_deg=round(math.degrees(math.atan2(d[1], d[0])), 1))
     # The arm is readied NUDGE_LEVEL_ROOM_M short of the dock, and the base rolls in after
     # the level hand (profile 19): the swing to the level hand reaches into the compartment.
     prep = dock - view * NUDGE_LEVEL_ROOM_M
@@ -1514,6 +1528,11 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
                     planner.planner.update_from_simulation()
                     r = plan_joints(env, planner, task, tuck, label="tuck after finding the can "
                                     "(hand under the leaf)", tries=1, line_only=True)
+            if r == -1 and fist_open:
+                # cab_1 opened by the fist: no bar swing to undo and no hand beside the leaf;
+                # the line is blocked by the counter, not the leaf, so let RRT look.
+                r = plan_joints(env, planner, task, tuck, label="tuck after finding the can (fist)",
+                                tries=2)
             if r == -1:
                 say(env, "MISSED: cannot clear the door for the can approach")
                 return res

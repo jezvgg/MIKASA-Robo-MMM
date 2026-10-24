@@ -77,6 +77,12 @@ LEAD_RATE = _f("MIKASA_FD_LEAD_RATE", 0.30)
 PUSH_MAX_STEPS = int(_f("MIKASA_FD_PUSH_MAX_STEPS", 500))
 INSERT_MAX_STEPS = 80
 WITHDRAW_M = _f("MIKASA_FD_WITHDRAW_M", 0.25)
+WITHDRAW_BACK_M = _f("MIKASA_FD_WITHDRAW_BACK_M", 0.20)
+TOUCH_REACH_M = _f("MIKASA_FD_TOUCH_REACH_M", 0.80)
+"""When the can is in cab_1 the touch dock stands this far from it, on the line from the fist's
+stance, facing it (the family's +y dock, LOOK_DOCK_Y = -1.05, is ~0.80 from a can on the shelf).
+The leaf left at 1.31 rad hangs to (0.39, -0.87): at the centre's x (0.50, -1.15) the base stood on
+it, and at x 0.70 the turn to +y swept the arm through it (four seeds)."""
 STANCE = (_f("MIKASA_FD_STANCE_X", 0.96), _f("MIKASA_FD_STANCE_Y", -1.11))
 """Where the base stands for both sweeps, turning in place only: the roll scan's lowest-winding
 stances for the inner press (0.95, -1.10..-1.25) and the outer push (1.0, -1.15) meet here. From the
@@ -432,6 +438,18 @@ def open_the_door(env, planner, task, *, door, crack_rad: float = CRACK_RAD,
     out_goal = T.copy()
     out_goal[:3, 3] = T[:3, 3] - WITHDRAW_M * T[:3, 2]          # back down the fist's axis
     out, err = _servo_to(env, planner, task, drv, out_goal, steps=60, tol=0.02)
+    if out is None:
+        return planner._guard.last_step
+    res = out
+    # ...then back toward the base, off the counter's front: from down there the round's tuck
+    # (a joint line to the drive posture) ran the fingers into the counter (seed 7991103).
+    T = _T(task.agent.tcp.pose.sp)
+    q = _bimbo._qpos(task)
+    back = q[:2] - T[:2, 3]
+    back = back / max(float(np.linalg.norm(back)), 1e-6)
+    back_goal = T.copy()
+    back_goal[:3, 3] = T[:3, 3] + WITHDRAW_BACK_M * np.array([back[0], back[1], 0.0])
+    out, _ = _servo_to(env, planner, task, drv, back_goal, steps=50, tol=0.02)
     if out is None:
         return planner._guard.last_step
     res = out
