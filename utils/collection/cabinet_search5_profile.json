@@ -1,0 +1,136 @@
+{
+  "profile_version": 1,
+  "base_profile": "cabinet_search 19",
+  "env_id": "MikasaCabinetSearch5-v0",
+  "task_variant": "five_compartments_cola_random_home_nudge",
+  "robot_reference": {
+    "repository": "https://github.com/jezvgg/MIKASA-Robo-MMM",
+    "commit": "4c5c8b3de941565ee2d57b153a10254fe64c2849",
+    "class": "DSFetch",
+    "uid": "ds_fetch"
+  },
+  "env_kwargs": {
+    "robot_uids": "ds_fetch",
+    "control_mode": "pd_joint_pos",
+    "num_envs": 1,
+    "scene_idx": 0,
+    "sim_backend": "cpu",
+    "render_backend": "sapien_cuda",
+    "sim_config": {
+      "control_freq": 20,
+      "sim_freq": 100
+    },
+    "assisted_grasp": true
+  },
+  "task": {
+    "terminal": "nudge",
+    "cube_nudge_m": 0.02,
+    "num_compartments": 5,
+    "partition": true,
+    "horizon": 9000,
+    "foreign_drift_fails": false,
+    "require_found_closed": false,
+    "cube_half": 0.05,
+    "spawn_jitter_x": 0.06,
+    "spawn_jitter_depth": 0.02,
+    "start_jitter_xy": 0.08,
+    "start_jitter_yaw": 0.1,
+    "initial_arm_jitter_rad": 0.04,
+    "initial_torso_jitter_m": 0.01,
+    "initial_head_jitter_rad": 0.05,
+    "can_model": "can_11",
+    "home_jitter_xy": [
+      0.25,
+      0.08
+    ],
+    "theta_closed": 0.01,
+    "close_dwell_steps": 10
+  },
+  "data": {
+    "control_hz": 20,
+    "policy_hz": 10,
+    "action_repeat": 2,
+    "source_action_repeat": 2,
+    "action_dim": 13,
+    "proprio_dim": 12,
+    "debug_global_state_dim": 3,
+    "lerobot_format": "v3.0",
+    "rgb_only": true,
+    "max_instruction_tokens": 100
+  },
+  "cameras": {
+    "left_base_camera_link": {
+      "width": 256,
+      "height": 256,
+      "fov": 1.5
+    },
+    "fetch_hand": {
+      "width": 128,
+      "height": 128,
+      "fov": 2.0
+    },
+    "right_base_camera_link": {
+      "width": 256,
+      "height": 256,
+      "fov": 1.5
+    }
+  },
+  "validation": {
+    "successful_unique_seeds": 100,
+    "exclude_all_training_attempts": true,
+    "exclude_development_seeds": true,
+    "replace_after_policy_failure": false
+  },
+  "runtime_packages": {
+    "mani_skill": "3.0.0b22",
+    "sapien": "3.0.3",
+    "mplib": "0.2.1",
+    "numpy": "1.26.4",
+    "torch": "2.14.0",
+    "gymnasium": "0.29.1",
+    "h5py": "3.16.0"
+  },
+  "planner": {
+    "module": "planners.cabinet_search_planner",
+    "waypoint_noise_m": 0.005,
+    "noise_seed_offset": 200003,
+    "noise_scope": "free_floor_direct_home",
+    "action_noise": 0.003,
+    "noise_hold": 10,
+    "execution_noise_seed_offset": 300007,
+    "execution_noise_scope": "follow_path: fold unloaded arm for transit; no handle/cube contact",
+    "gripper_commands": [
+      -1,
+      1
+    ],
+    "gripper_switch_control_step_parity": 0,
+    "motion_revision": "checklist_fixes_2026_09_28",
+    "navigation_posture": "canonical_rest_arm_torso_0.20",
+    "final_return_required": false,
+    "closing_dock_navigation": "published_reverse_capable_within_door_work",
+    "empty_inspection_rest": false,
+    "opening_speed_m_s": 0.2,
+    "closing_speed_m_s": 0.2,
+    "rest_reference": "pa40l/ManiSkill:dair@616833324e135a9c28cdd707b7cadd77d7ebcdf8",
+    "motion_parameters": {
+      "closing_speed_m_s": 0.2,
+      "home_arrival_tolerance_m": 0.03,
+      "grasp_noise_m": 0.005
+    },
+    "environment_hinge_assistance": false,
+    "closing_target_rad": 0.0,
+    "closing_final_band_rad": 0.1,
+    "closing_final_speed_m_s": 0.05,
+    "maximum_closing_corrections": 2,
+    "closing_release_retreat_m": 0.3,
+    "closing_release_gripper": "open_before_retreat_even_tick",
+    "touch_preparation": "joint_line_arm_and_torso_with_logged_sequential_fallback",
+    "door_grasp_branch": "elbow_negative_wrist_positive_endpoint_only_shoulder_lift_held_retry",
+    "home_arrival_tolerance_m": 0.03,
+    "grasp_point_noise": "BIBLE 5 waypoint noise at the grasp points from the episode-seeded free-floor generator: handle grasp uniform +-5 mm in depth (y) and along the vertical bar (z), none across the bar and none for the rare finisher re-grasp; can touch +-5 mm sideways (x) and vertically (z), push depth unchanged. Paired 80 scenes vs profile 14: 80/80 both, all native and held; D2, D3 (209/209 one combination), D4, closing and transport clearance unchanged; an across-bar variant lost 2 of 80 (door not fully closed) and was rejected."
+  },
+  "assisted_grasp": "Profile 17 = profile 16 with the hand colliding with the graspable objects (2026-10-23, tools/assisted_grasp_check/RESULTS.md). Under profile 16 a SAPIEN drive from the hand to every leaf and to the can switched their collision off for the whole episode, and the hand went 36-57 mm through the leaves in every episode; utils/mikasa/assisted_grasp.py now holds through a shapeless proxy. With the hand colliding, the BIMBO swing (planners/cabinet_door_bimbo.py) ends when the leaf stops against the hand (> 1 N, < 0.005 rad over 8 controls), ~1.69-1.72 rad, instead of pressing it for a 60-control stall window. Validated 13/15 acceptable (5/5 and 9/10 succeed; one knocked can rejected by the can-early gate). Still assisted_grasp=True in env_kwargs (owner 2026-10-18), the BIMBO door (cabinet_search_planner.door_mode), HAND_TURN 0 (owner 2026-10-23).",
+  "home_marker": "Profile 18 = profile 17 with a round rug marking home instead of the yellow disk (owner 2026-10-23): my_scenes/assets/home_rug/, the same footprint (radius home_radius) and still visual only, so the home predicate, the physics and every motion are profile 17's. Every instruction says 'the rug' for 'the floor mark'/'the mark' (34-45 PaliGemma tokens). CabinetSearchConfig.home_marker='disk' restores the profile <= 17 look and texts.",
+  "touch_preparation_room": "Profile 19 = profile 18 with the touch readied 0.10 m short of the touch dock (cabinet_search_planner.NUDGE_LEVEL_ROOM_M; 2026-10-23, tools/assisted_grasp_check/RESULTS.md): the ready posture, the torso raise and the joint line to the level hand run there with the can in the planning world, then the base rolls in, arm frozen. The level-hand line swings the fingertips ~10 cm into the compartment; at the dock that passed 0.7-3.5 cm from the can and, with the hand colliding since profile 17, laid it on its side on 7880257. 15 seeds: 14/15 succeed (the miss is profile 17's door-closing miss), 14/14 pass the can-early gate, clearance 8.9-12.9 cm, D6 15/15. Profile 18 was never collected.",
+  "five_compartments": "EXPERIMENTAL (branch feat/cabinet-fifth-door, 2026-10-24): cabinet_search profile 19 with cab_1, the west wall unit, as compartment 0 (my_scenes/cabinet_search.CabinetSearch5Config: horizon 9000, cab_1's door tangible). cab_1 is opened by its handle to 1.28 rad, held through the look and swung shut on the same grip (planners/cabinet_door_fist.py, MODE bar); a can found there is touched after the leaf is swung on to 1.60. Every other leaf closes with the fist turned by the wrist alone and backs off by the hand servo (planners/cabinet_retrieval_planner.py FIST_WRIST_FIRST, FIST_RETREAT_SERVO, FIST_WRIST_BACK). Probes on seeds 7991201-232: 32/32 episodes (profile 19's closing on the same env: 26/32). Not collected."
+}
