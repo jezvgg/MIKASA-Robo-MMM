@@ -238,12 +238,13 @@ CAB1_LOOK_EYE = os.environ.get("MIKASA_CAB1_LOOK_EYE", "right_base_camera_link")
 The owner (2026-10-24): «сосредоточь камеру на отсеке». Held by its bar, cab_1's leaf puts the arm across
 the left camera, and the midpoint aim of the two toed-in cameras left the compartment in the right
 camera's top-left corner (trial-001, 7991300)."""
-CAB1_EMPTY_LOOK_STEPS = int(os.environ.get("MIKASA_CAB1_EMPTY_LOOK_STEPS", "120"))
-"""An empty cab_1 is looked at this many more control steps (6 s) before the swing shut. The owner
-(2026-10-24): «если она пустая сделай задержку чуть больше», then, on the c5-train-001 review, «сделай у
-первой дверцы такую же паузу как и у остальных дверей»: from the end of the opening to the closing push
-the other leaves take a median 141 steps (7.0 s: release, clear, wrist turn, reach; c5-train-001/002,
-63 rounds), cab_1 took 50 with 30 here, so 120 makes it ~140."""
+CAB1_EMPTY_LOOK_STEPS = int(os.environ.get("MIKASA_CAB1_EMPTY_LOOK_STEPS", "70"))
+"""An empty cab_1 is looked at this many more control steps (3.5 s) before the swing shut, so the arm stands
+still on the bar 90 steps (4.5 s) from the end of the opening. The owner (2026-10-24): «если она пустая
+сделай задержку чуть больше» (30), «такую же паузу как и у остальных дверей» (120: the other leaves'
+7 s from the opening to the push, c5v2-train-001), then «Сделай паузу меньше, секунд 4-5». Of the other
+leaves' 8 s to the push the arm is still only 0.5 s (the look); the rest is release, clear, wrist turn,
+reach and stroke (c5v2-train-001, 29 rounds)."""
 HEAD_START_ON_HOME = os.environ.get("MIKASA_HEAD_START_ON_HOME", "1") == "1"
 """Aim the head at the rug from the episode's first step (the first drive goes there) instead of at the
 cabinets' middle."""
