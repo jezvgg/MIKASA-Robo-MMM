@@ -238,9 +238,15 @@ CAB1_LOOK_EYE = os.environ.get("MIKASA_CAB1_LOOK_EYE", "right_base_camera_link")
 The owner (2026-10-24): «сосредоточь камеру на отсеке». Held by its bar, cab_1's leaf puts the arm across
 the left camera, and the midpoint aim of the two toed-in cameras left the compartment in the right
 camera's top-left corner (trial-001, 7991300)."""
-CAB1_EMPTY_LOOK_STEPS = int(os.environ.get("MIKASA_CAB1_EMPTY_LOOK_STEPS", "30"))
-"""An empty cab_1 is looked at this many more control steps (1.5 s) before the swing shut: the owner
-(2026-10-24), «если она пустая сделай задержку чуть больше». The look was ~0.7 s."""
+CAB1_EMPTY_LOOK_STEPS = int(os.environ.get("MIKASA_CAB1_EMPTY_LOOK_STEPS", "120"))
+"""An empty cab_1 is looked at this many more control steps (6 s) before the swing shut. The owner
+(2026-10-24): «если она пустая сделай задержку чуть больше», then, on the c5-train-001 review, «сделай у
+первой дверцы такую же паузу как и у остальных дверей»: from the end of the opening to the closing push
+the other leaves take a median 141 steps (7.0 s: release, clear, wrist turn, reach; c5-train-001/002,
+63 rounds), cab_1 took 50 with 30 here, so 120 makes it ~140."""
+HEAD_START_ON_HOME = os.environ.get("MIKASA_HEAD_START_ON_HOME", "1") == "1"
+"""Aim the head at the rug from the episode's first step (the first drive goes there) instead of at the
+cabinets' middle."""
 CAB1_LOOK_RISE_M = float(os.environ.get("MIKASA_CAB1_LOOK_RISE_M", "0.25"))
 """During that hold the camera aims this far above the spawn point (the compartment's floor, z 1.47):
 cab_1 stands 1.39-2.31 m, and aimed at its floor the camera showed it in the top half of the frame
@@ -1246,7 +1252,13 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
         x = float(centres.mean() if cab is None else centres[cab])
         return np.array([x, float(cfg.spawn_depth), float(cfg.shelf_top_z) + float(cfg.cube_half)])
 
-    planner.track_target(lambda: compartment_gaze())
+    if HEAD_START_ON_HOME:
+        # The first drive is home, and `drive_home` tracks the rug: aimed at the cabinets first, the head
+        # rose for the second the arm ducked and then dropped to the rug (the owner on the c5-train-001
+        # review, 2026-10-24: «В начале камера почему гуляет»).
+        planner.track_target(lambda: task.home_marker.pose[0].sp.p)
+    else:
+        planner.track_target(lambda: compartment_gaze())
     comps = tuple(cfg.compartments)
     n = len(comps)
     rng, order = search_plan(seed, n)
