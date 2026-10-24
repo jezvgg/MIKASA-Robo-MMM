@@ -20,6 +20,9 @@ def main():
     ap.add_argument("--first", type=int, default=None, help="open this compartment first (0 = cab_1)")
     ap.add_argument("--video-dir", default=None)
     ap.add_argument("--trajectory-out", default=None)
+    ap.add_argument("--n4", action="store_true", help="the four-compartment task (control)")
+    ap.add_argument("--cab1-cam", action="store_true",
+                    help="record from a camera close on cab_1 (south-east of it, above the counter)")
     args = ap.parse_args()
 
     import gymnasium as gym
@@ -36,6 +39,12 @@ def main():
     kwargs = profile_env_kwargs(profile, obs_mode="state")
     if args.video_dir:
         kwargs["render_mode"] = "rgb_array"
+        if args.cab1_cam:
+            from mani_skill.utils import sapien_utils
+
+            kwargs["human_render_camera_configs"] = dict(
+                pose=sapien_utils.look_at(eye=[1.75, -2.05, 2.25], target=[0.55, -0.70, 1.45]),
+                width=720, height=540, fov=1.1)
     if args.first is not None:
         plan = csp.search_plan
 
@@ -47,7 +56,7 @@ def main():
         csp.search_plan = first_then_seed
     seed = args.seed
     seed_everything(seed)
-    env = gym.make("MikasaCabinetSearch5-v0", **kwargs)
+    env = gym.make("MikasaCabinetSearch-v0" if args.n4 else "MikasaCabinetSearch5-v0", **kwargs)
     base = env.unwrapped
     if args.video_dir:
         from mani_skill.utils.wrappers.record import RecordEpisode
