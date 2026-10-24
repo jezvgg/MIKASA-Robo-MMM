@@ -1511,7 +1511,13 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
             # Empty inspections go straight to closing. Only a found object
             # needs the published tucked approach to clear the door on its way in.
             if fist_open and rec and "hold" in rec:
-                # cab_1 is held by its bar through the look (`cabinet_door_fist`, MODE "bar"): let go.
+                # cab_1 is held by its bar through the look (`cabinet_door_fist`, MODE "bar"): open it
+                # wider for the touch on the same grip, then let go.
+                r = _fist.widen_hold(env, planner, task, door=door, record=rec, res=res)
+                if r != -1:
+                    res = r
+                if common.stopped_by_horizon(planner):
+                    return res
                 r = _fist.release_hold(env, planner, task, door=door, record=rec, res=res)
                 if r != -1:
                     res = r

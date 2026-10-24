@@ -1144,6 +1144,36 @@ def swing_back_and_close(env, planner, task, *, door, record, res):
     return res, closed
 
 
+FOUND_OPEN_RAD = _f("MIKASA_FD_FOUND_OPEN_RAD", 1.60)
+"""The can is in cab_1: before letting go, the held leaf swings on to here on the same grip (the owner,
+2026-10-24, «Ок» to opening it wider for the touch). At BAR_OPEN_RAD the touch's pre-contact put the
+forearm and the wrist on the leaf (R5 7991207/7991209: `wrist_flex_link<->cab_1 hingedoor`, pre-touch
+refused). BAR_OPEN_RAD was chosen for the closing push, and a found can ends the episode at the touch:
+nothing is closed after this."""
+
+
+def widen_hold(env, planner, task, *, door, record, res):
+    """The can is in the held compartment: swing the leaf on to FOUND_OPEN_RAD on the bar; the 5-tuple."""
+    if not record or "hold" not in record:
+        return res
+    h = record["hold"]
+    leaf = Leaf(task, door)
+    rad = leaf.rad()
+    if rad >= FOUND_OPEN_RAD - 0.02:
+        return res
+    h["drv"].reset_command()
+    out, reason, _goal = _bimbo._swing(env, planner, task, door, h["drv"], h["servo"], G0=h["G0"],
+                                       rad0=h["rad0"], anchor_xy=h["anchor_xy"], s=h["s"], start=rad,
+                                       target=FOUND_OPEN_RAD, lever_a=h["lever"], lever_b=h["lever"],
+                                       res=res, label="swing wider")
+    if out is None:
+        return planner._guard.last_step
+    planner.planner.update_from_simulation()
+    say(env, "swung wider for the touch", door_rad=round(leaf.rad(), 3), start_rad=round(rad, 3),
+        target_rad=FOUND_OPEN_RAD, why=reason)
+    return out
+
+
 def release_hold(env, planner, task, *, door, record, res):
     """The can is in the held compartment: let go of the bar and take the hand off (no swing)."""
     if not record or "hold" not in record:
