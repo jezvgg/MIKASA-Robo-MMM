@@ -7,7 +7,7 @@ import gymnasium as gym,h5py,numpy as np
 from PIL import Image,ImageDraw
 import my_scenes
 root=Path(sys.argv[1]);profile=json.loads((root/'run.json').read_text())['signature']['profile'];kind=profile['env_id'];out=Path(__file__).parent/(root.name+'-views'+os.environ.get('RESTORATION_VIEW_SHARD',''));out.mkdir(exist_ok=True)
-report={'run':str(root),'scope':'Every 10 Hz physical state; current phase targets and real grasp camera geometry. Not human E5.','episodes':[],'grasps':[]}
+report={'run':str(root),'scope':'Every 10 Hz physical state; current phase targets and real grasp camera geometry. Not human E5. CabinetSearch rug phases: a frame with the base on the rug (within home_radius of its centre) counts the rug as reached (owner 2026-10-25); raw camera visibility kept as seen / visible_fraction_raw.','episodes':[],'grasps':[]}
 if (out/'result.json').exists():report=json.loads((out/'result.json').read_text())
 done={e['seed'] for e in report['episodes']};seeds=[int(x) for x in sys.argv[2:]] or sorted(int(p.parent.name) for p in (root/'validated').glob('*/result.json') if json.loads(p.read_text()).get('success'))
 def cache_group(g):return {k:cache_group(v) if isinstance(v,h5py.Group) else v[:] for k,v in g.items()}
@@ -20,7 +20,7 @@ try:
   env.reset(seed=seed);t=env.unwrapped;events=[json.loads(x) for x in (root/'oracle'/str(seed)/'events.jsonl').read_text().splitlines()]
   stamp=lambda name:next(e['step'] for e in events if e['message']==name)
   with h5py.File(root/'validated'/str(seed)/'trajectory.h5') as f:
-   g=f['traj_0'];a=g['actions'][:];q=g['qpos'][:];state_cache=cache_group(g['env_states']);closes=np.flatnonzero(np.diff(a[:,7])<0)+1;trans=[];grasp_indices={}
+   g=f['traj_0'];a=g['actions'][:];q=g['qpos'][:];on_rug=lambda i,phase:False;state_cache=cache_group(g['env_states']);closes=np.flatnonzero(np.diff(a[:,7])<0)+1;trans=[];grasp_indices={}
    def grasp_window(label,end,obj):
     previous=closes[closes<end]
     if not len(previous):return
@@ -34,6 +34,8 @@ try:
    elif 'CabinetSearch' in kind:
     from planners import cabinet_search_planner as search,cabinet_retrieval_planner as retrieval
     trans=[(0,'home_start',ids(t.home_marker))];rounds=[e for e in events if e['message']=='round']
+    rug_xy=np.asarray(t.home_marker.pose.p.cpu()).reshape(-1)[:2];rug_r=float(t.cfg.home_radius)
+    on_rug=lambda i,phase:phase.startswith('home_') and float(np.linalg.norm(q[min(i,len(q)-1),:2]-rug_xy))<=rug_r
     for k,rnd in enumerate(rounds):
      begin=rnd['step'];end=rounds[k+1]['step'] if k+1<len(rounds) else len(a)+1
      door=search.door_spec_for(t.cfg.compartments[rnd['pick']],closed_rad=t.cfg.theta_closed);art=t.scene.articulations[retrieval._art_key(t,door)];link=next(j for j in art.get_active_joints() if j.name==door.hinge).child_link
@@ -53,7 +55,7 @@ try:
    for i in sorted(set(range(0,len(a),2))|set(grasp_indices)):
     t.set_state_dict(sample(state_cache,i));t._elapsed_steps[:]=i;obs=t.get_obs();_,phase,target_ids=trans[bisect.bisect_right(stamps,i)-1]
     if i%2==0 and i<len(a):
-     pixels={n:int(np.count_nonzero(np.isin(s['segmentation'][0].cpu().numpy(),target_ids))) for n,s in obs['sensor_data'].items()};row=dict(step=i,phase=phase,pixels=pixels,visible=max(pixels.values())>0);rows.append(row);byphase[phase].append(row)
+     pixels={n:int(np.count_nonzero(np.isin(s['segmentation'][0].cpu().numpy(),target_ids))) for n,s in obs['sensor_data'].items()};seen=max(pixels.values())>0;reached=bool(on_rug(i,phase));row=dict(step=i,phase=phase,pixels=pixels,seen=seen,reached=reached,visible=seen or reached);rows.append(row);byphase[phase].append(row)
     if i in grasp_indices:
      label,close,object_ids=grasp_indices[i];hand=t.agent.robot.links_map['gripper_link'].pose[0].sp;cfg=next(c for c in t.agent._sensor_configs if c.uid=='fetch_hand');cam=hand*cfg.pose[0].sp;pixels={n:int(np.count_nonzero(np.isin(s['segmentation'][0].cpu().numpy(),object_ids))) for n,s in obs['sensor_data'].items()};row=dict(seed=seed,target=label,step=i,close_step=close,signs=np.sign(q[i,[9,11]]).astype(int).tolist(),camera_above_hand_m=float(cam.p[2]-hand.p[2]),gripper_frame_x_pitch_deg=float(np.degrees(np.arcsin(np.clip(hand.to_transformation_matrix()[2,0],-1,1)))),tcp_approach_pitch_deg=float(np.degrees(np.arcsin(np.clip(t.agent.tcp.pose[0].sp.to_transformation_matrix()[2,2],-1,1)))),image_up_world_z=float(cam.to_transformation_matrix()[2,2]),pixels=pixels);report['grasps'].append(row)
      if i==close:
@@ -61,5 +63,5 @@ try:
       for k,n in enumerate(['left_base_camera_link','fetch_hand','right_base_camera_link']):
        sheet.paste(Image.fromarray(obs['sensor_data'][n]['rgb'][0].cpu().numpy()).resize((256,256)),(256*k,26));ImageDraw.Draw(sheet).text((256*k+4,4),f'{seed} {label} {n}',fill='black')
       sheet.save(out/f'{seed}-{label}-grasp.jpg')
-   summary={k:dict(frames=len(v),visible_fraction=float(np.mean([r['visible'] for r in v])),missing_steps=[r['step'] for r in v if not r['visible']]) for k,v in byphase.items()};r=dict(seed=seed,visible_fraction=float(np.mean([r['visible'] for r in rows])),summary=summary,transitions=[x[:2] for x in trans],frames=rows);report['episodes'].append(r);(out/'result.json').write_text(json.dumps(report,indent=2)+'\n');print('RESULT',seed,r['visible_fraction'],{k:v['visible_fraction'] for k,v in summary.items()},flush=True)
+   summary={k:dict(frames=len(v),visible_fraction=float(np.mean([r['visible'] for r in v])),missing_steps=[r['step'] for r in v if not r['visible']]) for k,v in byphase.items()};r=dict(seed=seed,visible_fraction=float(np.mean([r['visible'] for r in rows])),visible_fraction_raw=float(np.mean([r.get('seen',r['visible']) for r in rows])),summary=summary,transitions=[x[:2] for x in trans],frames=rows);report['episodes'].append(r);(out/'result.json').write_text(json.dumps(report,indent=2)+'\n');print('RESULT',seed,r['visible_fraction'],{k:v['visible_fraction'] for k,v in summary.items()},flush=True)
 finally:env.close();(out/'result.json').write_text(json.dumps(report,indent=2)+'\n')

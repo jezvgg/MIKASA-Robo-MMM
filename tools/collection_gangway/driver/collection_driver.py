@@ -16,11 +16,13 @@ C = Path(os.path.expanduser(os.environ.get('SD_RUNS', '~/sd-collect/runs-ag'))) 
 TOK = os.path.expanduser('~/mikasa-pi05/openpi-cache/big_vision/paligemma_tokenizer.model')
 SIM = os.environ['SIM']  # ~/sd-collect/env.sh
 REPOS = dict(same_drawer=os.path.expanduser('~/sd-collect/repo'),
+             cabinet_search5=os.path.expanduser('~/sd-collect/repo-cab5c7'),  # five compartments, profile 7, feat/cabinet-fifth-door d65cd4c (unpushed)
              season_dish=os.path.expanduser('~/sd-collect/repo-sdish'),  # profile 26, collection/seasondish-ag 5dbf5a8
-             cabinet_search=os.path.expanduser('~/sd-collect/repo-cab'),  # profile 16, collection/samedrawer-ag 4562981
+             cabinet_search=os.path.expanduser('~/sd-collect/repo-cab19'),  # profile 19 (d674243, unpushed); p18 repo-cab18 never collected; (rug, hand collides), check/assisted-grasp-collisions 3eef80c + render lanes 4e3ba84; p16 was repo-cab 4562981
              depth_recall=os.path.expanduser('~/sd-collect/repo-dr6'))  # profile 6, feat/depth-recall-mustard ddfbccf
 RANGES = dict(season_dish=(7780000, 7789999),  # profile 26; 7760000-7769999 was the pod's p25
-               cabinet_search=(7880000, 7889999),  # profile 16; 7860000-7869999 was the pod's p14/p15
+               cabinet_search5=(7920000, 7929999),  # five compartments: profile 1 from 7920000, 2 from 7920200, 3 from 7920300 (launch_cab5.sh first seed)
+               cabinet_search=(7890000, 7899999),  # profile 18; 7880000-7889999 was profile 16, 7860000-7869999 the pod's p14/p15
                depth_recall=(7970000, 7979999))  # profile 5 (spices, pad map)
 BANK = A / 'bank.json'  # 500 per reset drawer from 9100000 (utils.collection.drawer_balance plan)
 QUOTA = 262  # accepted per drawer: 250 for the dataset plus room for D6 rejects at selection
@@ -83,6 +85,7 @@ def campaign(task, batch, seeds, jobs):
         return subprocess.run(args, cwd=REPOS[task], env=ENV, stdout=f, stderr=subprocess.STDOUT).returncode
 
 
+MAX_BATCHES = int(os.environ.get('MAX_BATCHES', '0'))  # 0 = no limit
 MAX_PENDING_GATES = 2  # 2026-09-30 22:xx: two exports (~10 GiB temporary PNG each) fit the budget
 
 
@@ -120,6 +123,9 @@ def main(task, batch_size, jobs, target, budget, prefix='', first_seed=None):
             seeds = None
         else:
             n = len(batches) + 1
+            if MAX_BATCHES and len(batches) >= MAX_BATCHES:  # a pilot of a fixed number of batches
+                log(task, event='max batches', batches=len(batches), accepted=len(accepted))
+                break
             batch = f'{prefix}train-{n:03d}'
             seeds = next_seeds(task, attempted, accepted, batch_size, first_seed)
             if not seeds:
