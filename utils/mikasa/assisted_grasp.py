@@ -30,7 +30,9 @@ through the door leaves (``tools/assisted_grasp_check/RESULTS.md``, 2026-10-23).
 drive starts at one shapeless, gravity-free proxy body, and one more drive locks the proxy to the
 hand while something is held; the hand itself is in no drive and collides with everything.
 ``AssistedGraspConfig.hand_collides=False`` (or ``MIKASA_AG_LEGACY_DRIVE=1``) rebuilds the old
-direct drives, to replay datasets collected before the fix. Measured on mani_skill 3.0.0b22, CPU: a welded prop
+direct drives, to replay datasets collected before the fix; since 2026-10-26 that is what every
+task but CabinetSearch builds (``AssistedGraspTask.HAND_COLLIDES``, the owner's call: the proxy
+for CabinetSearch only, where the hand met the door leaves). Measured on mani_skill 3.0.0b22, CPU: a welded prop
 follows the hand in position and orientation and falls when the drive is disabled
 (``test_assisted_grasp.py``). CPU simulation only (one env): under GPU
 simulation the drives would have to exist before ``gpu_init`` and toggling them there is
@@ -472,10 +474,22 @@ class AssistedGraspTask:
     * the rule runs after every physics step, as OmniGibson's does;
     * ``info["ag_held"]`` is the welded object's index or -1 (not an observation);
     * the weld survives ``get_state_dict``/``set_state_dict``.
+
+    Which drive (``AssistedGraspConfig.hand_collides``) is the task's: ``HAND_COLLIDES`` on
+    the class, or ``gym.make(..., assisted_grasp_hand_collides=...)``. The direct drive
+    (False) is the default, the physics the SameDrawer, SeasonDish, TakeItBack and Veggie
+    datasets were recorded with; there the hand never entered a graspable object (RESULTS.md,
+    five episodes per task). CabinetSearch sets True: its hand went through the door leaves.
+    The owner's call 2026-10-26: the proxy for CabinetSearch only.
     """
 
-    def __init__(self, *args, assisted_grasp: bool = True, **kwargs):
+    HAND_COLLIDES = False
+
+    def __init__(self, *args, assisted_grasp: bool = True,
+                 assisted_grasp_hand_collides: Optional[bool] = None, **kwargs):
         self.assisted_grasp = bool(assisted_grasp)
+        self.assisted_grasp_hand_collides = (type(self).HAND_COLLIDES if assisted_grasp_hand_collides is None
+                                             else bool(assisted_grasp_hand_collides))
         self._ag = None
         super().__init__(*args, **kwargs)
 
@@ -484,7 +498,8 @@ class AssistedGraspTask:
 
     def _after_reconfigure(self, options: dict):
         out = super()._after_reconfigure(options)
-        self._ag = AssistedGrasp(self, list(self._assisted_grasp_objects())) if self.assisted_grasp else None
+        cfg = AssistedGraspConfig(hand_collides=self.assisted_grasp_hand_collides)
+        self._ag = AssistedGrasp(self, list(self._assisted_grasp_objects()), cfg) if self.assisted_grasp else None
         return out
 
     def reset(self, *args, **kwargs):

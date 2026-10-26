@@ -19,7 +19,8 @@
       "control_freq": 20,
       "sim_freq": 100
     },
-    "assisted_grasp": true
+    "assisted_grasp": true,
+    "assisted_grasp_hand_collides": true
   },
   "task": {
     "terminal": "nudge",
@@ -130,5 +131,6 @@
   },
   "assisted_grasp": "Profile 17 = profile 16 with the hand colliding with the graspable objects (2026-10-23, tools/assisted_grasp_check/RESULTS.md). Under profile 16 a SAPIEN drive from the hand to every leaf and to the can switched their collision off for the whole episode, and the hand went 36-57 mm through the leaves in every episode; utils/mikasa/assisted_grasp.py now holds through a shapeless proxy. With the hand colliding, the BIMBO swing (planners/cabinet_door_bimbo.py) ends when the leaf stops against the hand (> 1 N, < 0.005 rad over 8 controls), ~1.69-1.72 rad, instead of pressing it for a 60-control stall window. Validated 13/15 acceptable (5/5 and 9/10 succeed; one knocked can rejected by the can-early gate). Still assisted_grasp=True in env_kwargs (owner 2026-10-18), the BIMBO door (cabinet_search_planner.door_mode), HAND_TURN 0 (owner 2026-10-23).",
   "home_marker": "Profile 18 = profile 17 with a round rug marking home instead of the yellow disk (owner 2026-10-23): my_scenes/assets/home_rug/, the same footprint (radius home_radius) and still visual only, so the home predicate, the physics and every motion are profile 17's. Every instruction says 'the rug' for 'the floor mark'/'the mark' (34-45 PaliGemma tokens). CabinetSearchConfig.home_marker='disk' restores the profile <= 17 look and texts.",
-  "touch_preparation_room": "Profile 19 = profile 18 with the touch readied 0.10 m short of the touch dock (cabinet_search_planner.NUDGE_LEVEL_ROOM_M; 2026-10-23, tools/assisted_grasp_check/RESULTS.md): the ready posture, the torso raise and the joint line to the level hand run there with the can in the planning world, then the base rolls in, arm frozen. The level-hand line swings the fingertips ~10 cm into the compartment; at the dock that passed 0.7-3.5 cm from the can and, with the hand colliding since profile 17, laid it on its side on 7880257. 15 seeds: 14/15 succeed (the miss is profile 17's door-closing miss), 14/14 pass the can-early gate, clearance 8.9-12.9 cm, D6 15/15. Profile 18 was never collected."
+  "touch_preparation_room": "Profile 19 = profile 18 with the touch readied 0.10 m short of the touch dock (cabinet_search_planner.NUDGE_LEVEL_ROOM_M; 2026-10-23, tools/assisted_grasp_check/RESULTS.md): the ready posture, the torso raise and the joint line to the level hand run there with the can in the planning world, then the base rolls in, arm frozen. The level-hand line swings the fingertips ~10 cm into the compartment; at the dock that passed 0.7-3.5 cm from the can and, with the hand colliding since profile 17, laid it on its side on 7880257. 15 seeds: 14/15 succeed (the miss is profile 17's door-closing miss), 14/14 pass the can-early gate, clearance 8.9-12.9 cm, D6 15/15. Profile 18 was never collected.",
+  "one_branch_2026_10_26": "Reproduction on train/vla (owner 2026-10-26): assisted_grasp_hand_collides true is the proxy drive under which the hand collides with the door leaves (tools/assisted_grasp_check/RESULTS.md); CabinetSearch's default."
 }

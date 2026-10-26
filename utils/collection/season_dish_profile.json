@@ -19,7 +19,9 @@
       "control_freq": 20,
       "sim_freq": 100
     },
-    "assisted_grasp": true
+    "assisted_grasp": true,
+    "assisted_grasp_hand_collides": false,
+    "instruction_version": 1
   },
   "task": {
     "horizon": 1100,
@@ -288,5 +290,6 @@
       0.45
     ],
     "precheck": "full_robot_turn_drive_turn_then_complete_upright_hover_and_wrist_only_pour"
-  }
+  },
+  "one_branch_2026_10_26": "Reproduction on train/vla (owner 2026-10-26, «Можно же применить прокси только к задаче cabinetsearch»): assisted_grasp_hand_collides false is the direct hand -> object drive this dataset was recorded with (utils/mikasa/assisted_grasp.py; the default of every AssistedGraspTask but CabinetSearch); instruction_version 1 is the instruction text it was recorded with (2 names the shakers' colours)."
 }

@@ -103,12 +103,18 @@ MAKE_KW = dict(num_envs=1, robot_uids="ds_fetch", control_mode="pd_joint_pos", o
                sim_backend="cpu", scene_idx=0, sim_config={"control_freq": 20, "sim_freq": 100})
 
 
-def _make_env(assisted, env_id="MikasaSeasonDish-v0"):
+#: Which drive each task builds (the owner's call 2026-10-26): the proxy, under which the hand
+#: collides with the graspable objects, for CabinetSearch only; the direct drive elsewhere.
+HAND_COLLIDES = {"MikasaSeasonDish-v0": False, "MikasaSameDrawer-v0": False,
+                 "MikasaCabinetSearch-v0": True, "MikasaDepthRecall-v1": False}
+
+
+def _make_env(assisted, env_id="MikasaSeasonDish-v0", **kwargs):
     gym = pytest.importorskip("gymnasium")
     pytest.importorskip("mani_skill")
     try:
         import my_scenes  # noqa: F401  (registers the benchmark environments)
-        env = gym.make(env_id, assisted_grasp=assisted, **MAKE_KW)
+        env = gym.make(env_id, assisted_grasp=assisted, **MAKE_KW, **kwargs)
         env.reset(seed=0)
     except Exception as exc:  # no RoboCasa assets, no renderer, ...
         pytest.skip(f"{env_id} cannot be built here: {exc!r}")
@@ -162,6 +168,26 @@ def test_off_by_default_adds_nothing(env_id):
         assert task._ag is None
         assert "ag_window" not in task.get_state_dict()
         assert "ag_held" not in task.get_info()
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("env_id", sorted(TASKS))
+def test_each_task_builds_its_own_drive(env_id):
+    """The proxy exists exactly when the hand is meant to collide with the objects."""
+    env = _make_env(True, env_id)
+    try:
+        assert env.unwrapped.assisted_grasp_hand_collides is HAND_COLLIDES[env_id]
+        assert (env.unwrapped._ag._proxy is not None) is HAND_COLLIDES[env_id]
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("env_id", ["MikasaSeasonDish-v0", "MikasaCabinetSearch-v0"])
+def test_an_env_kwarg_overrides_the_tasks_drive(env_id):
+    env = _make_env(True, env_id, assisted_grasp_hand_collides=not HAND_COLLIDES[env_id])
+    try:
+        assert (env.unwrapped._ag._proxy is not None) is (not HAND_COLLIDES[env_id])
     finally:
         env.close()
 

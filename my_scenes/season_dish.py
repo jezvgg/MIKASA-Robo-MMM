@@ -76,6 +76,15 @@ INSTRUCTIONS = (
     "black pepper shaker. After the picture disappears, take that shaker and tip it "
     "over the bowl to season the dish, leaving the other shaker untouched.",
 )
+#: The text `seasondish-ag-1000ep` was recorded with (profile 26, before the colours were named).
+INSTRUCTIONS_V1 = (
+    "Remember the salt or pepper shown in the picture on the fridge. After the "
+    "picture disappears, take that condiment and tip it over the bowl to season "
+    "the dish, leaving the other "
+    "condiment untouched.",
+)
+#: `instruction_version` -> the instructions: 1 as recorded, 2 the current text.
+INSTRUCTION_VERSIONS = {1: INSTRUCTIONS_V1, 2: INSTRUCTIONS}
 
 # Where the cue marker goes while it must not be seen. The constant, and the
 # teleport-in-evaluate idiom, are MIKASA-Robo's: memory_envs/chain_rule_transfer.py:47
@@ -384,7 +393,13 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
     shaker: Actor
     condiment_bottle: Actor
 
-    def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0, **kwargs):
+    def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0,
+                 instruction_version: int = 2, **kwargs):
+        # instruction_version 1 is the text seasondish-ag-1000ep was recorded with
+        # (INSTRUCTION_VERSIONS); 2, the default, names the shakers' colours.
+        if instruction_version not in INSTRUCTION_VERSIONS:
+            raise ValueError(f"instruction_version must be one of {sorted(INSTRUCTION_VERSIONS)}")
+        self.instruction_version = int(instruction_version)
         # scene_idx defaults to 0 (K43, 2026-08-18): the pinned kitchen 102 (layout
         # one_wall_small, style industrial) — the same default as the burner and the
         # station tasks, so the three memory tasks are one-kitchen benchmarks by
@@ -1205,8 +1220,8 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
     # -------------------------------------------------------------------- obs --
 
     def get_language_instruction(self, **kwargs):
-        """`INSTRUCTIONS[0]` for every env: the text is the chore, the answer is the cue."""
-        return [INSTRUCTIONS[0]] * self.num_envs
+        """The version's first text for every env: the text is the chore, the answer is the cue."""
+        return [INSTRUCTION_VERSIONS[self.instruction_version][0]] * self.num_envs
 
     def _get_obs_extra(self, info: dict) -> dict:
         """The most dangerous method in the file. Three ways it can leak the answer.

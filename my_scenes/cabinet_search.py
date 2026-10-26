@@ -1296,6 +1296,9 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
 
     SUPPORTED_ROBOTS = ["ds_fetch", "fetch"]
     SUPPORTED_REWARD_MODES = ["sparse", "none"]
+    # The proxy drive: with the direct one the hand went through the door leaves
+    # (tools/assisted_grasp_check/RESULTS.md); the owner's call 2026-10-26.
+    HAND_COLLIDES = True
 
     cfg = CabinetSearchConfig()
 

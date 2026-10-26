@@ -45,7 +45,7 @@ from mani_skill.utils.structs import Pose
 from mani_skill.utils.structs.types import SceneConfig, SimConfig
 
 from utils.initial_pose import randomize_initial_joints
-from utils.mikasa.assisted_grasp import AssistedGrasp
+from utils.mikasa.assisted_grasp import AssistedGrasp, AssistedGraspConfig
 from utils.robocasa_utils import (load_objaverse_actor, objaverse_index, parking_pose,
                                   require_get_fixture, restore_task_tensor)
 
@@ -77,6 +77,14 @@ INSTRUCTIONS = (
     "Empty the shelf row onto the counter (" + PAD_MAP + "), hold on to the prop "
     "from the deepest spot, and put the rest back exactly where each of them was.",
 )
+
+#: The map as `depthrecall-ag-1000ep` was recorded (profile 6, before the shakers' colours
+#: were named), and the instructions built from it.
+PAD_MAP_V1 = ("ketchup on the red pad, pepper on the green pad, salt on the blue pad, "
+              "mustard on the yellow pad")
+INSTRUCTIONS_V1 = tuple(text.replace(PAD_MAP, PAD_MAP_V1) for text in INSTRUCTIONS)
+#: `instruction_version` -> the instructions: 1 as recorded, 2 the current text.
+INSTRUCTION_VERSIONS = {1: INSTRUCTIONS_V1, 2: INSTRUCTIONS}
 
 #: The staging pads' plate size. One pad per prop, in that prop's colour; the episode
 #: draws which counter slot each pad lies on. Decoration with a job: the pads are where
@@ -404,13 +412,21 @@ class DepthRecallV1Task(BaseEnv):
     cfg = DepthRecallV1Config()
 
     def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0,
-                 assisted_grasp: bool = False, **kwargs):
+                 assisted_grasp: bool = False, assisted_grasp_hand_collides: bool = False,
+                 instruction_version: int = 2, **kwargs):
         """``assisted_grasp=True`` welds a prop to the hand by OmniGibson's rule
         (`utils/mikasa/assisted_grasp.py`). Off by default: it changes the physics, so
-        demos and evaluations made with it are a different task and must say so."""
+        demos and evaluations made with it are a different task and must say so.
+        ``assisted_grasp_hand_collides`` picks its drive (`AssistedGraspConfig`): the direct
+        one by default, as `depthrecall-ag-1000ep` was recorded. ``instruction_version`` 1 is
+        the text that dataset was recorded with (`INSTRUCTION_VERSIONS`)."""
         self.cfg.validate()
+        if instruction_version not in INSTRUCTION_VERSIONS:
+            raise ValueError(f"instruction_version must be one of {sorted(INSTRUCTION_VERSIONS)}")
         self.scene_idx = scene_idx
         self.assisted_grasp = bool(assisted_grasp)
+        self.assisted_grasp_hand_collides = bool(assisted_grasp_hand_collides)
+        self.instruction_version = int(instruction_version)
         self._ag = None
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
@@ -588,7 +604,8 @@ class DepthRecallV1Task(BaseEnv):
         # diagnose scripts; a counter that advanced on every call would be wrong twice.
         self.last_eval_step = torch.full((n,), -1, dtype=torch.int32, device=dev)
         # The props and the agent exist now; the drives are made once per build.
-        self._ag = AssistedGrasp(self, self.props) if self.assisted_grasp else None
+        cfg = AssistedGraspConfig(hand_collides=self.assisted_grasp_hand_collides)
+        self._ag = AssistedGrasp(self, self.props, cfg) if self.assisted_grasp else None
         return super()._after_reconfigure(options)
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
@@ -855,7 +872,7 @@ class DepthRecallV1Task(BaseEnv):
 
     def get_language_instruction(self, **kwargs):
         """One phrasing: the text names the chore, never which prop came from where."""
-        return [INSTRUCTIONS[0]] * self.num_envs
+        return [INSTRUCTION_VERSIONS[self.instruction_version][0]] * self.num_envs
 
     def _get_obs_extra(self, info: dict) -> dict:
         """The memory fence.
