@@ -164,6 +164,17 @@ def verify_env(env, profile):
 
 
 
+def profile_instructions(profile):
+    """The texts the profile's env can give: its `instruction_version` of the task's
+    INSTRUCTION_VERSIONS when it names one (the text a dataset was recorded with), else
+    the task's current INSTRUCTIONS; plus CabinetSearch's nudge phrasings."""
+    _, module, _ = TASKS[profile_name(profile["env_id"])]
+    task = importlib.import_module(module)
+    version = profile["env_kwargs"].get("instruction_version")
+    texts = task.INSTRUCTIONS if version is None else task.INSTRUCTION_VERSIONS[version]
+    return set(texts) | set(getattr(task, "INSTRUCTIONS_NUDGE", ()))
+
+
 def validate_instructions(profile, tokenizer):
     """Check full language strings with the supplied PaliGemma tokenizer."""
     if tokenizer is None:
@@ -171,9 +182,7 @@ def validate_instructions(profile, tokenizer):
             raise ValueError("Collection requires --tokenizer (PaliGemma SentencePiece)")
         return None  # Existing CabinetSearch runs remain resumable.
     import sentencepiece as spm
-    _, module, _ = TASKS[profile_name(profile["env_id"])]
-    task = importlib.import_module(module)
-    texts = set(task.INSTRUCTIONS) | set(getattr(task, "INSTRUCTIONS_NUDGE", ()))
+    texts = profile_instructions(profile)
     sp = spm.SentencePieceProcessor(model_file=str(tokenizer))
     counts = {text: len(sp.encode(text.strip() + "\n", add_bos=True)) for text in sorted(texts)}
     if max(counts.values()) > profile["data"]["max_instruction_tokens"]:

@@ -37,3 +37,14 @@ def test_instruction_version_1_is_the_recorded_text(name, module):
     scene = pytest.importorskip(module)
     assert scene.INSTRUCTION_VERSIONS[1][0] == RECORDED[name]
     assert scene.INSTRUCTION_VERSIONS[2] == scene.INSTRUCTIONS != scene.INSTRUCTION_VERSIONS[1]
+
+
+@pytest.mark.parametrize("name", sorted(RECORDED))
+def test_the_campaign_checks_the_profiles_own_text(name):
+    """`validate_instructions` must vouch for the text the profile's env gives, or every
+    episode fails its collection contract ("Task instruction was not checked")."""
+    pytest.importorskip("mani_skill")
+    pinned = profile.read_json(profile.PROFILE.with_name(f"{name}_profile.json"))
+    assert RECORDED[name] in profile.profile_instructions(pinned)
+    current = dict(pinned, env_kwargs={k: v for k, v in pinned["env_kwargs"].items() if k != "instruction_version"})
+    assert RECORDED[name] not in profile.profile_instructions(current)
