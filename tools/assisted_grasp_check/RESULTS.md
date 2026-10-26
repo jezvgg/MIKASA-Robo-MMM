@@ -222,3 +222,47 @@ Same 15 seeds as the BIMBO validation (5 + 10), physics only (`fix19/run.sh`):
 | episode length | | +10-25 frames at 10 Hz |
 
 `MIKASA_NUDGE_LEVEL_ROOM_M=0` is the profile-18 preparation at the dock.
+
+## One branch: the proxy for CabinetSearch only (2026-10-26)
+
+The owner: «Можно же применить прокси только к задаче cabinetsearch, проблема же была из-за ручек
+дверцей шкафов», then «Да» to the plan below. Every collection now rebuilds its dataset on this
+branch:
+
+- `AssistedGraspTask.HAND_COLLIDES` picks the drive per task: False (the direct drive) by default,
+  True for `CabinetSearchTask` and its five-compartment subclass; `gym.make(...,
+  assisted_grasp_hand_collides=...)` overrides it, and DepthRecall takes the same kwarg.
+- SeasonDish and DepthRecall take `instruction_version`: 1 is the text their datasets were recorded
+  with, 2 (the default) names the shakers' colours (2026-10-22). `profile_instructions` makes the
+  campaign vouch for the profile's own version.
+- The five collection profiles say both (`assisted_grasp_hand_collides`, `instruction_version`),
+  without a version bump: they rebuild the data they were collected with.
+
+The hand inside the graspable objects under the direct drive, `hand_overlap_replay.py` on 100
+episodes per dataset (0, 10, ..., 990), this branch:
+
+| Dataset | Replays succeed | Max 12D state error | Hand inside an object |
+|---|---|---|---|
+| samedrawer-ag-1000ep | 100/100 | 0.0 | never (0.0 mm, drawers and apple) |
+| seasondish-ag-1000ep | 100/100 | 0.0 | never |
+| depthrecall-ag-1000ep | 100/100 | 0.0 | never |
+
+Re-collection, the planner from scratch: development campaigns with each dataset's profile and the
+seeds of its episodes 5, 55, ..., 955, through the held 10 Hz replay, against the published episodes
+(a development-campaign script on the collection server):
+
+| Dataset | Episodes bit-identical (10 Hz actions and 12D states) | Instruction |
+|---|---|---|
+| samedrawer-ag-1000ep (profile 21) | 20/20 | as published |
+| seasondish-ag-1000ep (profile 26) | 20/20 | as published (version 1) |
+| depthrecall-ag-1000ep (profile 6) | 20/20 | as published (version 1) |
+| cabinetsearch5-ag-1000ep (profile 7) | 20/20 | as published |
+
+`cabinetsearch-ag-1000ep` (profile 16, four compartments) is not rebuilt here: the profile file now
+holds profile 19, and the task is fixed at five compartments (the owner, 2026-10-25). Tests: 330
+passed, 4 skipped (`utils`, `tests/test_episode_replay.py`); `test_closing_on_a_prop_attaches_by_the_rule`,
+which failed under the proxy, passes with SeasonDish back on its direct drive.
+
+Policies trained on SameDrawer, SeasonDish or DepthRecall are now evaluated by default in the physics
+their data was recorded with; under the direct drive the hand cannot collide with those tasks'
+graspable objects (the fingers still do), which the data above never needed.
