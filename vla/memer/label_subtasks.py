@@ -21,9 +21,11 @@ apart on camera. The copy's task text (`meta/tasks.parquet`, `meta/episodes`) is
 the environments' current instruction the same way (`TASK_TEXT`). If any episode's events do
 not fit its task's sequence, nothing is written (LeRobot v3 indexes frames globally, so an
 episode cannot simply be dropped): the report lists them and the rules get fixed first.
-`--check` writes only the report.
+`--check` writes only the report. CabinetSearch5 (since 2026-10-26) also reads the oracle's
+event log (`--events`): its first compartment is opened and shut on one grip, so no gripper
+edge marks where the close begins.
 
-usage: label_subtasks.py <task> <dataset dir> <params.json> <out dir> [--check]
+usage: label_subtasks.py <task> <dataset dir> <params.json> <out dir> [--check] [--events PATTERN]
 """
 from __future__ import annotations
 
@@ -39,7 +41,7 @@ import pandas as pd
 
 DRIVE_GAP = 5          # frames (0.5 s): the oracle's legs of one drive are 0.1-0.2 s apart
 DRAWERS = {0: "bottom", 1: "third from the top", 2: "second from the top", 3: "top"}
-ORDINAL = ["first", "second", "third", "fourth"]
+ORDINAL = ["first", "second", "third", "fourth", "fifth"]
 PAD_COLOURS = ["red", "green", "blue", "yellow"]   # prop i's pad (depth_recall_v1.PAD_MAP)
 SPOKEN = {"salt": "white salt shaker", "pepper": "black pepper shaker"}   # depth_recall_v1 PropSpec.spoken
 # The recorded task text -> the environment's current INSTRUCTIONS[0] (season_dish.py,
@@ -110,7 +112,21 @@ def first_after(items, t):
     raise Unfit(f"nothing after frame {t}")
 
 
-def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict) -> list[tuple[int, str]]:
+def oracle_events(pattern: str, seed: int) -> list[tuple[int, dict]]:
+    """[(stored frame, event)] of the oracle's phase log for one seed (20 Hz steps -> 10 Hz frames)."""
+    hits = glob.glob(os.path.expanduser(pattern.format(seed=seed)))
+    if len(hits) != 1:
+        raise Unfit(f"{len(hits)} event logs for seed {seed}")
+    out = []
+    for line in Path(hits[0]).read_text().splitlines():
+        ev = json.loads(line)
+        if ev.get("event") == "phase":
+            out.append((int(ev["step"]) // 2, ev))
+    return out
+
+
+def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict,
+             events: list[tuple[int, dict]] | None = None) -> list[tuple[int, str]]:
     """[(start frame, label)], starts increasing from 0."""
     n = len(a)
     D, G = drives(a), grasps(a)
@@ -147,8 +163,16 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict) -> list[tuple[int
         # Rounds are cut at the arrivals on the floor mark. In a round the first grasp is the
         # handle (open: grasp, pull, release); every later one is the fist closing the door,
         # re-pushes included (the oracle's "one re-push"); the last release ends the close.
+        # CabinetSearch5's first compartment (cab_1, one door) is shut on the grip that opened
+        # it: there the close starts at the oracle's "swing shut on the bar" (`--events`).
         order, cube = p["search_order"], p["cube_cab"]
         rounds = order[:order.index(cube) + 1]
+        shut = []
+        if events is not None:
+            visited = [ev["compartment"] for _, ev in events if ev.get("message") == "round"]
+            if visited != [p["compartments"][c] for c in rounds]:
+                raise Unfit(f"oracle rounds {visited} != search order {rounds}")
+            shut = [f for f, ev in events if ev.get("message") == "swing shut on the bar"]
         home = np.asarray(p["home_xy"])
         inside = np.linalg.norm(g[:, :2] - home, axis=1) <= p["home_radius"]
         arrivals = [t for t in range(n) if inside[t] and (t == 0 or not inside[t - 1])]
@@ -160,13 +184,16 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict) -> list[tuple[int
             last = r == len(rounds) - 1
             lo, hi = arrivals[r], (n if last else arrivals[r + 1])
             gr = [x for x in G if lo < x[0] < hi]
-            if len(gr) < (1 if last else 2):
+            bar = [f for f in shut if lo < f < hi]
+            if len(gr) < (1 if last or bar else 2):
                 raise Unfit(f"round {r}: {len(gr)} grasps")
             out += [(start, "go to the floor mark"), (lo + 1, f"open the {name}")]
             if last:
                 out.append((gr[0][1] + 1, "push the cola can"))
             else:
-                out.append((gr[0][1] + 1, f"close the {name}"))
+                if bar and not any(c < bar[0] <= o for c, o in gr):
+                    raise Unfit(f"round {r}: shut on the bar at frame {bar[0]}, grasps {gr}")
+                out.append((bar[0] if bar else gr[0][1] + 1, f"close the {name}"))
                 start = gr[-1][1] + 1
         return out
     if task == "depthrecall":
@@ -227,6 +254,8 @@ def main():
     ap.add_argument("params", type=Path)
     ap.add_argument("out", type=Path)
     ap.add_argument("--check", action="store_true", help="report only, write no dataset")
+    ap.add_argument("--events", default="", help="the oracle's events.jsonl, '{seed}' in the path "
+                    "(CabinetSearch5: .../cabinet_search5-*/oracle/{seed}/events.jsonl)")
     args = ap.parse_args()
     src, dst = args.dataset, args.out
     params = {int(k): v for k, v in json.loads(args.params.read_text()).items()}
@@ -242,7 +271,9 @@ def main():
         try:
             if int(e) not in params:
                 raise Unfit("no task parameters")
-            lab = per_frame(segments(args.task, a, g, params[int(e)]), len(a))
+            p = params[int(e)]
+            ev = oracle_events(args.events, p["seed"]) if args.events else None
+            lab = per_frame(segments(args.task, a, g, p, ev), len(a))
         except Unfit as exc:
             report["unfit"][int(e)] = str(exc)
             continue
