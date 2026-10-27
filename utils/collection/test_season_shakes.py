@@ -1,6 +1,7 @@
 """SeasonDish with the number card and the shakes (owner 2026-10-27): the counter, the wrist geometry,
 the planner's shake sequence on stubs, and the scene's wiring (cue, count, success, fail)."""
 import math
+import os
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,6 +12,9 @@ import torch
 from planners.oracle.wrist_pour import (SHAKE_AMPLITUDE_DEG, inversion_angles, lean_after, pour_and_shake,
                                         shake_geometry_ok)
 from utils.mikasa.shake_counter import step_shakes
+
+#: The scene tests read poses only; any renderer will do ("none" crashes SAPIEN 3.0.3's URDF loader on ds_fetch).
+RENDER = os.environ.get("SEASON_TEST_RENDER", "sapien_cuda")
 
 CFG = SimpleNamespace(shake_out_deg=20., shake_return_deg=10., pour_axis_body=[0, 0, 1], pour_xy_radius=.1,
                       pour_min_clearance=.05, pour_max_clearance=.3, hold_steps=20)
@@ -138,7 +142,7 @@ def env():
     import my_scenes  # noqa: F401
     try:
         e = gym.make("MikasaSeasonDish-v0", num_envs=1, robot_uids="ds_fetch", control_mode="pd_joint_pos",
-                     obs_mode="state", sim_backend="cpu", scene_idx=0, assisted_grasp=False,
+                     obs_mode="state", sim_backend="cpu", render_backend=RENDER, scene_idx=0, assisted_grasp=False,
                      sim_config={"control_freq": 20, "sim_freq": 100})
     except Exception as error:   # no RoboCasa assets / no renderer here
         pytest.skip(f"MikasaSeasonDish-v0 unavailable: {error}")
