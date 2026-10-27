@@ -12,8 +12,11 @@ from planners.oracle import oracle_common as common
 
 #: Wrist roll each shake swings away from upside down and back (the owner, 2026-10-27: +-30 deg).
 SHAKE_AMPLITUDE_DEG = 30.0
-#: Lean kept clear of the task's shake thresholds by the planned rest and shake poses, degrees.
+#: Lean kept clear of the task's shake thresholds by the planned rest and shake poses, degrees: the
+#: route preview (a model of the held condiment) keeps 3, the pour itself (the measured one) 1.5, so a
+#: degree of model-to-physics drift does not refuse at the bowl a pour the preview accepted.
 SHAKE_LEAN_MARGIN_DEG = 3.0
+SHAKE_LEAN_MARGIN_EXECUTED_DEG = 1.5
 
 
 def rotation(axis, angle):
@@ -76,7 +79,8 @@ def inversion_angles(axis, object_axis):
     return sorted((x for x in values if abs(x) <= 2 * math.pi + 1e-9), key=lambda x: (abs(x), x < 0))
 
 
-def shake_geometry_ok(axis, object_axis, delta, cfg, amplitude_deg=SHAKE_AMPLITUDE_DEG):
+def shake_geometry_ok(axis, object_axis, delta, cfg, amplitude_deg=SHAKE_AMPLITUDE_DEG,
+                      margin_deg=SHAKE_LEAN_MARGIN_DEG):
     """Does turning to `delta` rest the condiment inside the counter's rest band, and does each
     +-`amplitude_deg` swing from there lean it past the shake threshold, with the margin?
 
@@ -91,8 +95,7 @@ def shake_geometry_ok(axis, object_axis, delta, cfg, amplitude_deg=SHAKE_AMPLITU
     a = math.radians(amplitude_deg)
     rest = lean_after(axis, object_axis, delta)
     swing = min(lean_after(axis, object_axis, delta + a), lean_after(axis, object_axis, delta - a))
-    return (rest <= cfg.shake_return_deg - SHAKE_LEAN_MARGIN_DEG
-            and swing >= cfg.shake_out_deg + SHAKE_LEAN_MARGIN_DEG)
+    return rest <= cfg.shake_return_deg - margin_deg and swing >= cfg.shake_out_deg + margin_deg
 
 
 def _over_bowl(task, end, bowl):
@@ -109,7 +112,8 @@ def _plan_shakes(planner, task, q, wrist_index, axis, pivot, obj, bowl, amplitud
     line = lambda goal, start: planner.planner.plan_qpos_line(
         goal, start, time_step=task.control_timestep, ref_yaw=float(start[2]), qpos_step=0.02)
     for delta in inversion_angles(axis, object_axis):
-        if not shake_geometry_ok(axis, object_axis, delta, task.cfg, amplitude_deg):
+        if not shake_geometry_ok(axis, object_axis, delta, task.cfg, amplitude_deg,
+                                 margin_deg=SHAKE_LEAN_MARGIN_EXECUTED_DEG):
             continue
         ends = [pivot + rotation(axis, d) @ (obj[:3, 3] - pivot) for d in (delta, delta + a, delta - a)]
         if not all(_over_bowl(task, end, bowl) for end in ends):
