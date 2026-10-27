@@ -7,7 +7,8 @@ import sapien
 
 from planners.oracle.upright_payload import kinematics, upright_path, elbow_only
 from planners.oracle.path_clearance import path_clear
-from planners.oracle.wrist_pour import rotation, tilt_angles
+from planners.oracle.wrist_pour import (SHAKE_AMPLITUDE_DEG, inversion_angles, rotation,
+                                        shake_geometry_ok, tilt_angles)
 from robots.fetch.utils import unwrap_toward
 
 
@@ -16,8 +17,17 @@ def held_transform(task, target):
             * target.pose[0].sp).to_transformation_matrix().astype(float)
 
 
+def shaking(task):
+    """Is this the shaking task (an upside-down pour and +-30 deg shakes, 2026-10-27)?"""
+    return hasattr(task.cfg, 'shake_out_deg')
+
+
 def pour_targets(planner, task, q, hand_object):
-    """Cheap endpoint geometry and joint-budget checks; no path or IK calls."""
+    """Cheap endpoint geometry and joint-budget checks; no path or IK calls.
+
+    Yields (goal, reserve): the one-tip pour's 165 deg goal and its reserve, or for the shaking task
+    the upside-down goal and, as rows of `reserve`, both shake swings, so the roll window and the
+    joint limits are checked for the whole pour before the robot commits to the transfer."""
     p = planner.planner
     fk = kinematics(planner, task)
     wrist = fk.matrix(q, 'wrist_roll_link')
@@ -34,7 +44,25 @@ def pour_targets(planner, task, q, hand_object):
     def note(key, delta):
         if reasons is not None:
             reasons.append(f"{key}{'+' if delta > 0 else '-'}")
-    for delta in tilt_angles(axis, obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body), 165.):
+    object_axis = obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body)
+    if shaking(task):
+        amplitude = math.radians(SHAKE_AMPLITUDE_DEG)
+        for delta in inversion_angles(axis, object_axis):
+            if not shake_geometry_ok(axis, object_axis, delta, task.cfg):
+                note('shake_lean', delta); continue
+            ends = [pivot + rotation(axis, d) @ (obj[:3, 3] - pivot) for d in (delta, delta + amplitude, delta - amplitude)]
+            if any(np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius for end in ends):
+                note('miss_xy', delta); continue
+            if not all(task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve for end in ends):
+                note('miss_height', delta); continue
+            goal = q.copy(); goal[index] += delta
+            swings = np.vstack([goal, goal]); swings[0, index] += amplitude; swings[1, index] -= amplitude
+            reserve = np.vstack([goal + 0., swings]); reserve[0, index] += np.sign(delta) * wrist_reserve
+            if not p.accepts(np.vstack([q, goal, reserve])):
+                note('roll_window', delta); continue
+            yield goal, reserve
+        return
+    for delta in tilt_angles(axis, object_axis, 165.):
         end = pivot + rotation(axis, delta) @ (obj[:3, 3] - pivot)
         if np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius:
             note('miss_xy', delta); continue
@@ -56,10 +84,27 @@ def preview_pour(planner, task, q, hand_object):
                                     ref_yaw=float(q[2]), qpos_step=.02)
         except RuntimeError:
             continue
-        if path.get('status') == 'Success' and path_clear(planner, q, path['position']):
-            path['preview_reserve_qpos'] = reserve
-            return path
+        if path.get('status') != 'Success' or not path_clear(planner, q, path['position']):
+            continue
+        if shaking(task) and not _swings_clear(planner, task, goal, np.atleast_2d(reserve)[1:]):
+            continue
+        path['preview_reserve_qpos'] = reserve
+        return path
     return None
+
+
+def _swings_clear(planner, task, rest, swings):
+    """Both shake swings from the upside-down rest plan as clear wrist-only lines."""
+    p = planner.planner
+    for swing in swings:
+        try:
+            path = p.plan_qpos_line(swing, rest, time_step=task.control_timestep,
+                                    ref_yaw=float(rest[2]), qpos_step=.02)
+        except RuntimeError:
+            return False
+        if path.get('status') != 'Success' or not path_clear(planner, rest, path['position']):
+            return False
+    return True
 
 
 def hover_goals(p, current, tcp, *, n_init=32, preferred=None, mode='dual'):
@@ -166,7 +211,7 @@ def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferr
                 planner._pour_reasons = []
                 arc = preview_pour(planner, task, reached, hand_object)
                 if arc is not None and p.accepts(np.vstack([path['position'], arc['position'],
-                                                           arc['preview_reserve_qpos'][moves]]), move_group=True):
+                                                           np.atleast_2d(arc['preview_reserve_qpos'])[:, moves]]), move_group=True):
                     return dict(approach=path, pour=arc, hover_extra=extra, hover_back=back, hover_spin=spin, hover_yaw_anchor=math.degrees(yaw_anchor), hover_ik_records=ik_records, hover_goal=goal.tolist())
                 failures.append(dict(stage='wrist_pour',reason='pour:' + ','.join(sorted(set(planner._pour_reasons))) or 'pour_line_refused',
                                      extra=extra,back=back,spin=spin))

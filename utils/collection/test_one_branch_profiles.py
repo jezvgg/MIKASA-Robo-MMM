@@ -5,8 +5,9 @@ import pytest
 from utils.collection import profile
 
 #: profile -> (assisted_grasp_hand_collides, instruction_version or None): the proxy for
-#: CabinetSearch only; instruction_version 1 where the dataset predates the colour names.
-EXPECTED = {"same_drawer": (False, None), "season_dish": (False, 1), "depth_recall": (False, 1),
+#: CabinetSearch only; instruction_version 1 where the dataset predates the colour names, 3 for
+#: SeasonDish's shaking task (profile 27, owner 2026-10-27).
+EXPECTED = {"same_drawer": (False, None), "season_dish": (False, 3), "depth_recall": (False, 1),
             "cabinet_search": (True, None), "cabinet_search5": (True, None)}
 
 #: The texts the published datasets carry (meta/tasks of seasondish-ag-1000ep and
@@ -36,10 +37,11 @@ def test_instruction_version_1_is_the_recorded_text(name, module):
     pytest.importorskip("mani_skill")
     scene = pytest.importorskip(module)
     assert scene.INSTRUCTION_VERSIONS[1][0] == RECORDED[name]
-    assert scene.INSTRUCTION_VERSIONS[2] == scene.INSTRUCTIONS != scene.INSTRUCTION_VERSIONS[1]
+    latest = scene.INSTRUCTION_VERSIONS[max(scene.INSTRUCTION_VERSIONS)]
+    assert latest == scene.INSTRUCTIONS != scene.INSTRUCTION_VERSIONS[1]
 
 
-@pytest.mark.parametrize("name", sorted(RECORDED))
+@pytest.mark.parametrize("name", ["depth_recall"])
 def test_the_campaign_checks_the_profiles_own_text(name):
     """`validate_instructions` must vouch for the text the profile's env gives, or every
     episode fails its collection contract ("Task instruction was not checked")."""
@@ -48,3 +50,13 @@ def test_the_campaign_checks_the_profiles_own_text(name):
     assert RECORDED[name] in profile.profile_instructions(pinned)
     current = dict(pinned, env_kwargs={k: v for k, v in pinned["env_kwargs"].items() if k != "instruction_version"})
     assert RECORDED[name] not in profile.profile_instructions(current)
+
+
+def test_season_dish_collects_the_shaking_task_text():
+    """Profile 27 pins the shaking task's text (version 3), and the campaign vouches for it alone."""
+    pytest.importorskip("mani_skill")
+    from my_scenes import season_dish
+    pinned = profile.read_json(profile.PROFILE.with_name("season_dish_profile.json"))
+    texts = profile.profile_instructions(pinned)
+    assert season_dish.INSTRUCTIONS[0] in texts and RECORDED["season_dish"] not in texts
+    assert "number" in season_dish.INSTRUCTIONS[0] and "shake" in season_dish.INSTRUCTIONS[0]

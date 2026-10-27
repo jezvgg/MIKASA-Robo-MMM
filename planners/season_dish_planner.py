@@ -1,15 +1,17 @@
 """Action-only oracle for SeasonDish and its blind control.
 
-Read the fixed fridge picture, then travel to the condiment station with the arm
-in the canonical rest pose. The scene hides the picture at control step 100.
-The blind control replaces the remembered answer with a seeded uniform choice.
+Read the fixed fridge picture and the number card next to it, then travel to the
+condiment station with the arm in the canonical rest pose. The scene hides both at
+control step 100. The blind control replaces the remembered condiment and number with
+seeded uniform choices.
 Grasp with an upright wrist camera and a consistent elbow/wrist branch, lift
 clear of the neighbouring condiment, and fold to the compact upright carry pose when the bowl needs a drive.
 Track the condiment before the grasp and the bowl afterwards.
 
 Drive to the bowl with the same compact pose, move to an upright hover, then
-rotate only wrist_roll on a collision-checked joint line. The other arm and torso
-commands stay fixed throughout the pour and hold. All paths obey the recorded roll
+rotate only wrist_roll on collision-checked joint lines: upside down, then one +-30 deg
+swing and back per shake (`wrist_pour.pour_and_shake`, the owner's task since
+2026-10-27). The other arm and torso commands stay fixed throughout the pour and hold. All paths obey the recorded roll
 history. Execution noise is limited to transfer motions; contacts and pouring
 are clean. Poll the environment's hold counter until success or the horizon.
 
@@ -890,11 +892,18 @@ def navigation_posture(env, planner, task, target):
         return planner.follow_forward_path_w_refinement(path, refine=True)
 
 
+def cue_point(task):
+    """Where the cue is looked at: midway between the picture and the number card (the same
+    point for every answer), or the picture where a task has no card."""
+    focus = getattr(task, "cue_focus", None)
+    return _np(task.fridge_pictures.home)[0, :3] if focus is None else _np(focus)[0, :3]
+
+
 def cue_head_target(task):
-    """Aim the unchanged DSFetch cameras at the fixed fridge picture."""
+    """Aim the unchanged DSFetch cameras at the fixed fridge cue."""
     from planners.oracle.head_tracking import HeadTracker
     tracker = HeadTracker(task.agent, task.control_timestep)
-    tracker.target = _np(task.fridge_pictures.home)[0, :3]
+    tracker.target = cue_point(task)
     return tuple(tracker.desired())
 
 
@@ -920,6 +929,21 @@ def choose_target(info, blind: bool, rng: np.random.Generator) -> bool:
     if blind:
         return bool(rng.integers(2))
     return bool(_np(info["target_is_shaker"]).reshape(-1)[0])
+
+
+def choose_shakes(info, blind: bool, rng: np.random.Generator, counts) -> int:
+    """How many times to shake: the number from `info`, or arm B's uniform draw over `counts`
+    (drawn after `choose_target`, from the same generator).
+
+    Example:
+        >>> choose_shakes({"num_shakes": np.array([3])}, blind=False, rng=np.random.default_rng(0), counts=(1, 2, 3))
+        3
+        >>> choose_shakes({}, blind=True, rng=np.random.default_rng(0), counts=(1, 2, 3)) in (1, 2, 3)
+        True
+    """
+    if blind:
+        return int(counts[int(rng.integers(len(counts)))])
+    return int(_np(info["num_shakes"]).reshape(-1)[0])
 
 
 def grasp_geometry(task, obb, ee_direction, target_closing, grasp_info=default_grasp_info):
@@ -1333,7 +1357,7 @@ def _solve(
     # Look at the fixed fridge picture, independent of which condiment it names.
     # Thus head proprioception does not encode the answer after the cue disappears.
     pan, tilt = cue_head_target(task)
-    planner.track_target(_np(task.fridge_pictures.home)[0, :3])
+    planner.track_target(cue_point(task))
     say(env, "fridge cue observation", phase="fridge_cue_observation")
     gaze = planner.hold_head(pan=pan, tilt=tilt, t=20, ramp=10)
     if gaze == -1:
@@ -1345,8 +1369,9 @@ def _solve(
 
     # -- STAGE 1: the privileged read (or the blind draw) ---------------------------
     target_is_shaker = choose_target(info, blind, rng)
+    shakes = choose_shakes(info, blind, rng, task.cfg.shake_counts)
     target = task.shaker if target_is_shaker else task.condiment_bottle
-    say(env, "target chosen", target_is_shaker=target_is_shaker, blind=bool(blind))
+    say(env, "target chosen", target_is_shaker=target_is_shaker, shakes=shakes, blind=bool(blind))
     planner.track_target(lambda: _np(target.pose.p)[0])
     # Both answers use the same physical station dock.
     dock = _np(task._station_dock_np)[0].astype(np.float64)
@@ -1570,8 +1595,8 @@ def _solve(
             return fail(env, str(error))
         if not _flag(res[-1], "distractor_ok"):
             return fail(env, "distractor moved during upright transfer")
-        from planners.oracle.wrist_pour import pour_with_wrist
-        return pour_with_wrist(env, planner, task, target, target_degrees=165.0)
+        from planners.oracle.wrist_pour import pour_and_shake
+        return pour_and_shake(env, planner, task, target, shakes)
 
 
 def parse_args(argv=None):
@@ -1589,7 +1614,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--blind",
         action="store_true",
-        help="arm B of the control experiment: ignore the cue, take a uniformly random condiment (seeded)",
+        help="arm B of the control experiment: ignore the cue, take a uniformly random condiment and number (seeded)",
     )
     parser.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None,
                         help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
