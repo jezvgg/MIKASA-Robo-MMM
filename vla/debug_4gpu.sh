@@ -19,7 +19,9 @@
 # CHECKPOINTS=0 (default): nothing is saved: every run is set to save past its end and is stopped
 # once it has logged its steps. CHECKPOINTS=1 saves and evaluates; it needs ~7 GB (low), ~9 GB
 # (high), ~36 GB (mvla) free in our 400 GB, and deletes each checkpoint after its check unless KEEP=1.
-# Peak GPU memory (nvidia-smi every 10 s) and host memory (every 30 s) are logged per run.
+# Peak GPU memory (nvidia-smi every 10 s) and host memory (every 30 s) are logged per run, and
+# vla/mem_guard.py stops a run whose container memory passes 80% of its limit (past the limit the
+# pod is killed); a stopped run fails its stage.
 # usage: nohup vla/debug_4gpu.sh [work dir, default ~/debug4] > log 2>&1 < /dev/null &
 set -uo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -30,7 +32,8 @@ TASKS="samedrawer seasondish cabinetsearch depthrecall takeitback veggie"
 DATA=${MEMER_DATA_ROOT:-$HOME/datasets/memer}
 SFT_ROOT=${SFT_ROOT:-$HOME/datasets/memer_sft}
 HIGH_DATASETS=${HIGH_DATASETS:-memer_samedrawer,memer_seasondish,memer_cabinetsearch,memer_depthrecall}
-LOW_STEPS=${LOW_STEPS:-500}; HIGH_STEPS=${HIGH_STEPS:-60}; HIGH_EVAL=${HIGH_EVAL:-999}
+LOW_STEPS=${LOW_STEPS:-500}; LOW_SAVE=${LOW_SAVE:-200}; LOW_FRAMES=${LOW_FRAMES:-50}
+HIGH_STEPS=${HIGH_STEPS:-60}; HIGH_EVAL=${HIGH_EVAL:-999}
 MVLA_EPISODES=${MVLA_EPISODES:-3}; MVLA_STEPS=${MVLA_STEPS:-300}; MVLA_BS=${MVLA_BS:-32 16 8 4 2}
 MVLA_HELD_OUT=${MVLA_HELD_OUT:-990,991}
 ENDLESS=10000000   # steps and save interval of a run that is stopped from outside
@@ -43,8 +46,9 @@ watch_start() {  # watch_start NAME: GPU and host memory logs for one run
   nvidia-smi --query-gpu=timestamp,index,memory.used,utilization.gpu --format=csv,noheader -l 10 \
     > "$LOGS/$1.gpu.csv" 2>/dev/null &
   GPU_LOGGER=$!
-  (while :; do printf '%s %s\n' "$(date '+%T')" "$(free -g | awk '/Mem:/{print "used", $3, "GB, available", $7, "GB"}')"; sleep 30; done) \
-    > "$LOGS/$1.host.log" 2>&1 &
+  (while :; do printf '%s %s, container anon %s GiB\n' "$(date '+%T')" \
+    "$(free -g | awk '/Mem:/{print "used", $3, "GB, available", $7, "GB"}')" \
+    "$(awk '/^anon /{printf "%.0f", $2 / 2^30}' /sys/fs/cgroup/memory.stat)"; sleep 30; done) > "$LOGS/$1.host.log" 2>&1 &
   HOST_LOGGER=$!
 }
 watch_stop() {  # watch_stop NAME: stop the loggers and report the peaks
@@ -52,17 +56,21 @@ watch_stop() {  # watch_stop NAME: stop the loggers and report the peaks
   awk -F', ' '{gsub(/ MiB/, "", $3); if ($3 > peak[$2]) peak[$2] = $3; if ($4+0 > 0) {busy[$2] += $4; n[$2]++}}
     END {for (g in peak) printf "GPU%s %.1f GB (mean util %d%%)  ", g, peak[g] / 1024, n[g] ? busy[g] / n[g] : 0; print ""}' \
     "$LOGS/$1.gpu.csv" | sed 's/^/  peak GPU memory: /' | tee -a "$REPORT"
-  awk '{if ($3 > m) m = $3} END {print "  peak host memory used: " m " GB (machine total, other users included)"}' "$LOGS/$1.host.log" | tee -a "$REPORT"
+  awk '{if ($3 > m) m = $3; if ($(NF - 1) > c) c = $(NF - 1)} END {print "  peak host memory used: " m " GB (machine total, other users included); container anon " c " GiB"}' \
+    "$LOGS/$1.host.log" | tee -a "$REPORT"
 }
 
 # run_until NAME N COUNTER -- CMD...: run CMD in its own process group (log $LOGS/NAME.log) with
 # the loggers on; with CHECKPOINTS=0 stop it once `COUNTER` (a shell snippet printing the number of
-# steps logged so far) reaches N. Returns CMD's exit code, or 0 when it was stopped at N.
+# steps logged so far) reaches N. Returns CMD's exit code, or 0 when it was stopped at N, or 1 when
+# the memory guard stopped it.
 run_until() {
-  local name=$1 n=$2 counter=$3 pid rc=0; shift 4
+  local name=$1 n=$2 counter=$3 pid guard rc=0; shift 4
   watch_start "$name"
   setsid "$@" > "$LOGS/$name.log" 2>&1 &
   pid=$!
+  python3 "$REPO/vla/mem_guard.py" "$pid" > "$LOGS/$name.guard.log" 2>&1 &
+  guard=$!
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$CHECKPOINTS" = 0 ] && [ "$(eval "$counter" 2>/dev/null || echo 0)" -ge "$n" ]; then
       say "$name: $n steps logged; stopping the run"
@@ -72,6 +80,8 @@ run_until() {
     sleep 15
   done
   if [ "$CHECKPOINTS" = 1 ] || ! [ "$(eval "$counter" 2>/dev/null || echo 0)" -ge "$n" ]; then wait "$pid"; rc=$?; fi
+  wait "$guard"
+  if grep -q GUARD "$LOGS/$name.guard.log"; then say "$name: $(grep GUARD "$LOGS/$name.guard.log")"; rc=1; fi
   watch_stop "$name"
   return $rc
 }
@@ -87,7 +97,7 @@ low() {
   say "low: $cfg on 4 GPUs, $LOW_STEPS steps (log $LOGS/low_train.log)"
   run_until low_train "$LOW_STEPS" "grep -oE 'Step [0-9]+:' '$LOGS/low_train.log' | tail -1 | grep -oE '[0-9]+'" -- \
     env CUDA_VISIBLE_DEVICES=0,1,2,3 "$py" -m mikasa_pi05 train "$cfg" --exp-name "$exp" --overwrite \
-      --num-train-steps "$steps" --save-interval "$([ "$CHECKPOINTS" = 0 ] && echo $ENDLESS || echo 200)" \
+      --num-train-steps "$steps" --save-interval "$([ "$CHECKPOINTS" = 0 ] && echo $ENDLESS || echo "$LOW_SAVE")" \
       --params-only-checkpoints --no-snapshots
   local rc=$?
   [ $rc -eq 0 ] || { say "low: training FAILED (exit $rc)"; tail -n 30 "$LOGS/low_train.log" >> "$REPORT"; return 1; }
@@ -102,7 +112,7 @@ EOF
   if [ "$CHECKPOINTS" = 1 ]; then
     ckpt=$(find "$ck" -mindepth 1 -maxdepth 1 -type d -regex '.*/[0-9]+' | sort -V | tail -1)
     say "low: checkpoint $ckpt ($(du -sh "$ckpt" | cut -f1)); open-loop check on held-out 980-999 (log $LOGS/low_check.log)"
-    if CUDA_VISIBLE_DEVICES=0 "$py" "$REPO/vla/pi05_first_frame/tests/check_memer_action_error.py" "$cfg" "$ckpt" 50 \
+    if CUDA_VISIBLE_DEVICES=0 "$py" "$REPO/vla/pi05_first_frame/tests/check_memer_action_error.py" "$cfg" "$ckpt" "$LOW_FRAMES" \
         > "$LOGS/low_check.log" 2>&1; then
       grep -E '^[a-z]+ +(held-out|training)|^example prompt|frames per task' "$LOGS/low_check.log" | sed 's/^/  /' | tee -a "$REPORT"
     else
