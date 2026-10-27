@@ -16,7 +16,7 @@ the sub-reasons of the two big refusals, and the successes' episode length again
 """
 import collections, glob, json, os, re, statistics, sys
 
-HORIZON = 1100  # season_dish_profile.json task.horizon (profile 26)
+HORIZON = 1100  # profile 26's task.horizon; each run's own is read from its run.json
 
 
 def stage(msg):
@@ -75,7 +75,14 @@ def read(run):
             (episode(os.path.dirname(p)) for p in sorted(glob.glob(os.path.join(run, "oracle", "*", "result.json"))))}
 
 
-def summary(rows):
+def horizon(run):
+    try:
+        return int(json.load(open(os.path.join(run, "run.json")))["signature"]["profile"]["task"]["horizon"])
+    except (OSError, KeyError, ValueError):
+        return HORIZON
+
+
+def summary(rows, limit=HORIZON):
     verdicts = collections.Counter(v for v, *_ in rows.values())
     stages = collections.Counter(n for v, n, *_ in rows.values() if v != "success")
     route, grasp, outcome = collections.Counter(), collections.Counter(), collections.Counter()
@@ -92,7 +99,7 @@ def summary(rows):
                 grasp_outcome=dict(outcome),
                 refusal_step_median={k: statistics.median(v) for k, v in steps.items() if k != "success" and v},
                 success_steps=dict(median=statistics.median(ok), max=max(ok),
-                                   within_100_of_horizon=sum(s > HORIZON - 100 for s in ok)) if ok else None)
+                                   horizon=limit, within_100_of_horizon=sum(s > limit - 100 for s in ok)) if ok else None)
 
 
 def show(title, s):
@@ -106,7 +113,7 @@ def show(title, s):
         print("   grasp refusals:", s["grasp_outcome"], "| candidates' last stage:", s["grasp_candidate_last"])
     if s["success_steps"]:
         print(f"   successes: median {s['success_steps']['median']} steps, max {s['success_steps']['max']}, "
-              f"{s['success_steps']['within_100_of_horizon']} within 100 steps of the {HORIZON}-step horizon")
+              f"{s['success_steps']['within_100_of_horizon']} within 100 steps of the {s['success_steps']['horizon']}-step horizon")
 
 
 def compare(base, new):
@@ -139,10 +146,10 @@ if __name__ == "__main__":
     for run in args:
         rows = read(run)
         pooled.update({(run, s): r for s, r in rows.items()})
-        result[run] = summary(rows)
+        result[run] = summary(rows, horizon(run))
         show(run, result[run])
     if len(args) > 1:
-        result["pooled"] = summary(pooled)
+        result["pooled"] = summary(pooled, horizon(args[0]))
         show("pooled", result["pooled"])
     if out:
         with open(out, "w") as f:
