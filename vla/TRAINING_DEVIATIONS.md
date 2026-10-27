@@ -103,14 +103,15 @@ are byte-identical.
 
 ## Not settled: training length on our data
 
-The step counts were set for the authors' datasets. Ours have 4,844,230 frames (6000 episodes,
-~80 s each), so the same steps see each frame far fewer times:
+The step counts were set for the authors' datasets. Ours have 5,141,099 frames (6000 episodes,
+~86 s each; 4,844,230 before CabinetSearch became five compartments), so the same steps see each
+frame far fewer times:
 
 | | samples (steps x batch) | our epochs | authors' epochs (estimate) |
 |---|---|---|---|
 | MemER high (code) | 1500 x 128 = 192k | 0.04 | ~6 (50 dusting episodes, ~31k frames) |
-| MemER low (Table 5) | 18,000 x 128 = 2.3M | 0.48 | ~10-20 (3 tasks x ~62 episodes) |
-| MemoryVLA (MIKASA) | 20,000 x 256 = 5.1M (ours 128: 2.6M) | 1.06 (ours 0.53) | ~50 (5 tasks x 250 short episodes) |
+| MemER low (Table 5) | 18,000 x 128 = 2.3M | 0.45 | ~10-20 (3 tasks x ~62 episodes) |
+| MemoryVLA (MIKASA) | 20,000 x 256 = 5.1M (ours 128: 2.6M) | 1.00 (ours 0.50) | ~50 (5 tasks x 250 short episodes) |
 
 Matching the authors' epochs would take 10-150x their steps. The owner decides between the
 literal steps, more steps, or fewer episodes per task.
