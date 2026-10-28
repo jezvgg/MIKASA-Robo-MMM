@@ -156,8 +156,11 @@ class SeasonDishConfig:
     initial_torso_jitter_m: float = 0.01
     initial_head_jitter_rad: float = 0.05
 
-    cue_steps: int = 100
-    "The fridge picture is visible at steps 0 through 99 and absent at step 100."
+    cue_steps: int = 50
+    """The fridge picture and the number card are visible at steps 0 through 49 and absent at
+    step 50: 2.5 s (owner 2026-10-28 «давай сократим до 50 шагов»; 100 until then). The head
+    settles on them by step ~20 (measured on 20 recorded episodes), so the cameras hold a
+    steady view for ~30 steps, 15 frames at 10 Hz."""
     fridge_picture_width: float = 0.3
     fridge_start_distance: float = 0.9
 
@@ -1375,7 +1378,7 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
            in that order, and no key is ever named for the target.
         2. **Conditional keys.** The observation space is frozen from the t=0
            observation (sapien_env.py:330, :377). Emitting the cue only during the
-           cue phase changes the dict shape at step 100. It is always emitted, and
+           cue phase changes the dict shape at `cue_steps`. It is always emitted, and
            masked to zeros instead.
         3. **Obs mode.** _get_obs_extra runs in every mode, so an ungated cue hands
            an image policy the answer in clean symbolic form and the marker becomes

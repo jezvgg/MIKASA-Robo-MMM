@@ -127,12 +127,14 @@ def pause_check(actions, profile=None):
     raw = metrics(a)
     profile = profile or {}
     exception = profile.get("quality_exceptions", {}).get("D6", {})
+    cue = exception.get("initial_observation_control_steps")
+    # 100 control steps until profile 28 (2026-10-28), 50 since: the cue's own length, at 10 Hz.
     approved = (profile.get("env_id") == "MikasaSeasonDish-v0"
                 and profile.get("profile_version", 0) >= 4
-                and exception.get("initial_observation_control_steps") == 100
+                and (cue == 100 or (cue == 50 and profile.get("profile_version", 0) >= 28))
                 and exception.get("phase") == "fridge_cue_observation"
                 and exception.get("preserve_all_frames") is True)
-    frames = 50 if approved else 0
+    frames = cue // 2 if approved else 0
     # The shaking task (profile 27, owner 2026-10-28) ends with the condiment held upright and
     # still; that final hold is excluded as the cue is, and its own length stays under D6's limit.
     final = (-(-int(exception.get("final_hold_control_steps", 0)) // 2)

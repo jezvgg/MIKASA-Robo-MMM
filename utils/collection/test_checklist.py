@@ -93,3 +93,14 @@ def test_the_shaking_task_excludes_its_final_upright_hold_and_only_that():
     a[100:110] = a[100]                                    # a pause before the hold still counts
     a[150:160] = a[150]
     assert not pause_check(a, profile)["passed"]
+
+
+def test_profile_28_excludes_its_shorter_cue_and_only_profile_28_may():
+    from utils.collection.checklist import pause_check
+    a = np.zeros((150, 13)); a[:, 7] = 1
+    a[25:, 0] = np.arange(125) * .01
+    d6 = {"initial_observation_control_steps": 50, "phase": "fridge_cue_observation", "preserve_all_frames": True}
+    profile = {"env_id": "MikasaSeasonDish-v0", "profile_version": 28, "quality_exceptions": {"D6": d6}}
+    check = pause_check(a, profile)
+    assert check["passed"] and check["excluded_initial_frames"] == 25
+    assert not pause_check(a, dict(profile, profile_version=27))["passed"]
