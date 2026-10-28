@@ -31,6 +31,13 @@ GPU count:
   0.99), as their `pi05_droid_finetune` leaves them.
 - MemER: the code release has no model merging (the paper's 0.2 pre + 0.8 fine-tuned); the code
   recipe is followed, so no merging.
+- MemER high level, frame rate: the paper feeds the recent frames at 2 Hz (section 4), the code
+  takes every 5th frame, and the authors' released data is 15 Hz, so their code runs at 3 Hz. Our
+  data is 10 Hz, so the same stride gives the paper's 2 Hz (window 3.5 s; subtask target 1.0 s ahead).
+- MemER high level, chat roles: qwen-vl-finetune renders the export's `system` turn as an assistant
+  turn (`qwenvl/data/data_processor.py:160`), so the system prompt is in the loss, while the
+  authors' eval defaults to the `system` role (`memer_eval/contract.py:63`). Training is left as
+  theirs; evaluation should compare both roles (`--system-role assistant`).
 
 ## Changed, and why
 
@@ -124,7 +131,17 @@ We use their MIKASA script's `--future_action_window_size 3` (chunk 4). The pape
 benchmark, MIKASA-Robo included (App. C.1, Table 8: "Action chunking size 16"); `train.py` defaults to
 15 (chunk 16), and so does their long-episode script `train_real.sh`, whose memory settings we
 already take. At our 10 Hz a chunk of 4 is 0.4 s and a chunk of 16 is 1.6 s (MemER low: 15 = 1.5 s).
-The debug runs so far used 4. The owner or the supervisor decides.
+The debug runs so far used 4. The owner proposes 50 (2026-10-28); the report for approval
+suggests training 50 and executing the first 8-16 (SmolVLA, BPP and pi0 predict long and execute
+short; executing all 50 has no precedent and loses in SmolVLA, 51.8 vs 82.8).
+
+Memory cadence, found 2026-10-28 and open at any chunk: with `--dataloader_type stream` training
+writes one memory entry per frame with the frame index as its time (`vla/datasets/datasets.py:362-372`),
+while inference writes one entry per `predict_action` call with the call count as its time
+(`vla/memory_vla.py:828-836`), i.e. once per executed chunk. Executing k actions makes inference
+memory k times sparser than training: 4x now, 50x for chunk 50 executed in full. The authors' group
+loader on MIKASA and LIBERO is about 1x; their real-world stream recipe is 10x. muVLA (arXiv
+2606.12497, sections 4-5) reports this mismatch breaking memory (LIBERO-Long 95.8 -> 5.4).
 
 ## Evaluation protocol (not training, for later)
 
