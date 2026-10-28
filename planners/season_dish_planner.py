@@ -1581,12 +1581,13 @@ def _solve(
                     planner.planner.update_from_simulation()
                     current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
                     with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-                        direct = plan_loaded_hover(planner, task, current, held_transform(task, target), preferred=route['hover'])
+                        direct = plan_loaded_hover(planner, task, current, held_transform(task, target), preferred=route['hover'],
+                                                   more=True)
                     if direct is None:
                         return fail(env, "no upright hover with a complete wrist-only pour",
                                     hover=hover_summary(planner))
                 say(env, "hover over bowl", route_prechecked=True, extra=direct['hover_extra'],
-                    back=direct['hover_back'], spin_deg=direct['hover_spin'])
+                    back=direct['hover_back'], spin_deg=direct['hover_spin'], shift_m=direct.get('hover_shift'))
                 with transfer_phase(planner, "carry condiment over bowl"):
                     res = planner.follow_forward_path_w_refinement(direct['approach'], refine=True)
                 if res == -1 or common.stopped_by_horizon(planner):
