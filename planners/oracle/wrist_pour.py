@@ -11,6 +11,8 @@ a swing past upside down is never accepted: the +-30 deg version was refused on 
 (2026-10-28), and the owner chose the one-sided swing.
 """
 import math
+from contextlib import contextmanager
+
 import numpy as np
 
 from planners.oracle import oracle_common as common
@@ -24,6 +26,11 @@ SHAKE_AMPLITUDE_DEG = 30.0
 #: leans exactly `shake_return_deg` less the margin: the least roll that still re-arms the counter.
 SHAKE_LEAN_MARGIN_DEG = 3.0
 SHAKE_LEAN_MARGIN_EXECUTED_DEG = 1.5
+#: Speed and acceleration limits the shake legs are timed with, rad/s and rad/s^2. The planner's own,
+#: 0.9 and 0.9 (robots/fetch/extand.py's default, no rule in BIBLE or the checklist), took ~2.8 s per
+#: shake; the owner asked for sharper shakes (2026-10-28 «можно более резко трясти?»). 2.0 stays under
+#: the URDF's 2.268 for the wrist joints.
+SHAKE_SPEED, SHAKE_ACCELERATION = 2.0, 8.0
 
 
 def rotation(axis, angle):
@@ -99,6 +106,19 @@ def shake_geometry_ok(axis, object_axis, delta, cfg, amplitude_deg=SHAKE_AMPLITU
     return rest <= cfg.shake_return_deg - margin_deg + 1e-6 and swing >= cfg.shake_out_deg + margin_deg
 
 
+@contextmanager
+def sharp(planner):
+    """Time the lines planned inside with the shake legs' limits (mplib's TOPP reads them off the planner)."""
+    p = planner.planner
+    speed, acceleration = p.joint_vel_limits, p.joint_acc_limits
+    p.joint_vel_limits = np.full(len(speed), SHAKE_SPEED)
+    p.joint_acc_limits = np.full(len(acceleration), SHAKE_ACCELERATION)
+    try:
+        yield
+    finally:
+        p.joint_vel_limits, p.joint_acc_limits = speed, acceleration
+
+
 def _over_bowl(task, end, bowl):
     clearance = end[2] - bowl[2]
     return (np.linalg.norm(end[:2] - bowl[:2]) <= task.cfg.pour_xy_radius
@@ -122,7 +142,9 @@ def _plan_shakes(planner, task, q, wrist_index, axis, pivot, obj, bowl, amplitud
         rest = q.copy(); rest[wrist_index] += delta
         out = q.copy(); out[wrist_index] += swing
         try:
-            legs = {"in": line(rest, q), "out": line(out, rest), "back": line(rest, out)}
+            legs = {"in": line(rest, q)}
+            with sharp(planner):
+                legs.update(out=line(out, rest), back=line(rest, out))
         except RuntimeError:
             continue
         if all(leg.get('status') == 'Success' for leg in legs.values()):
@@ -165,7 +187,7 @@ def pour_and_shake(env, planner, task, target, shakes, amplitude_deg=SHAKE_AMPLI
     try:
         log('pour', motion='wrist_roll_only', target_degrees=round(rest_tilt, 2), shakes=int(shakes),
             amplitude_deg=float(amplitude_deg), sides=1, wrist_start=float(q[wrist_index]),
-            wrist_goal=float(rest[wrist_index]))
+            wrist_goal=float(rest[wrist_index]), shake_speed=SHAKE_SPEED, shake_acceleration=SHAKE_ACCELERATION)
         result = planner.follow_forward_path_w_refinement(legs["in"], refine=True)
         if stopped(result):
             return result

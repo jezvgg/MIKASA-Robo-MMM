@@ -9,7 +9,8 @@ import pytest
 import sapien
 import torch
 
-from planners.oracle.wrist_pour import (SHAKE_AMPLITUDE_DEG, SHAKE_LEAN_MARGIN_DEG, SHAKE_LEAN_MARGIN_EXECUTED_DEG,
+from planners.oracle.wrist_pour import (SHAKE_ACCELERATION, SHAKE_AMPLITUDE_DEG, SHAKE_LEAN_MARGIN_DEG,
+                                        SHAKE_LEAN_MARGIN_EXECUTED_DEG,
                                         lean_after, pour_and_shake, rest_angles, shake_geometry_ok, swing_angle)
 from utils.mikasa.shake_counter import step_shakes
 
@@ -106,7 +107,8 @@ def stub(line_status="Success", grasped=True, shake_count=lambda wrist: 0):
         return {'shake_count': np.array([counts["n"]]), 'grasp_target': np.array([True]),
                 'success': np.array([True]), 'pour_hold': np.array([CFG.hold_steps + 2])}
 
-    planner = SimpleNamespace(planner=SimpleNamespace(update_from_simulation=lambda: None, plan_qpos_line=line),
+    planner = SimpleNamespace(planner=SimpleNamespace(update_from_simulation=lambda: None, plan_qpos_line=line,
+                                                      joint_vel_limits=np.full(7, .9), joint_acc_limits=np.full(7, .9)),
                               fixed_action_targets={9: .42}, truncated=False)
 
     def follow(path, *, refine):
@@ -129,6 +131,21 @@ def test_every_leg_is_planned_before_the_first_moves_and_each_shake_swings_back_
     moves = [c[1] for c in calls if c[0] == 'move']
     assert moves == pytest.approx([rest, rest - 30, rest, rest - 30, rest, rest - 30, rest])
     assert p.fixed_action_targets == {9: .42}
+
+
+def test_only_the_shake_legs_are_timed_sharp_and_the_planner_limits_come_back():
+    p, task, target, calls = stub()
+    timed = []
+    line = p.planner.plan_qpos_line
+
+    def timing_line(goal, current, **kwargs):
+        timed.append(float(p.planner.joint_acc_limits[0]))
+        return line(goal, current, **kwargs)
+
+    p.planner.plan_qpos_line = timing_line
+    pour_and_shake(SimpleNamespace(), p, task, target, shakes=1)
+    assert timed == [.9, SHAKE_ACCELERATION, SHAKE_ACCELERATION]          # in, out, back
+    assert list(p.planner.joint_vel_limits) == [.9] * 7 and list(p.planner.joint_acc_limits) == [.9] * 7
 
 
 def test_a_refused_leg_fails_before_any_motion():
