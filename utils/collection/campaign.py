@@ -14,8 +14,10 @@ from .profile import TASKS, load_profile, runtime_signature, validate_instructio
 
 def campaign(root, *, start_seed, num_seeds, purpose, jobs, through, timeout,
              skip_native_rgb=False, profile=None, tokenizer=None, seed_manifest=None):
-    if not 1 <= jobs <= 8:
-        raise ValueError("Use 1–8 workers")
+    # 8 until 2026-10-28; the pod came back with 48 CPUs and 4 GPUs and the owner asked for a
+    # four times faster collection («Я перезапускаю под на x4 компьюта»).
+    if not 1 <= jobs <= 16:
+        raise ValueError("Use 1–16 workers")
     if seed_manifest is None:
         if start_seed is None or num_seeds is None or num_seeds < 1 or start_seed < 0:
             raise ValueError("Positive candidate count and nonnegative start seed required")
