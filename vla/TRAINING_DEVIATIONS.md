@@ -43,6 +43,7 @@ GPU count:
 | Normalization bounds: each task's min/max instead of its 1st/99th percentile for every normalized channel (base velocities and arm/head/torso deltas; `vla/memoryvla/set_norm_bounds.py` edits q01/q99 in the authors' cached `dataset_statistics_*.json`; their code is unchanged) | MemoryVLA | their BOUNDS_Q99 clips each task to its percentiles; on our data that erases DepthRecall's turn (q01 = q99 = 0) and cuts TakeItBack's drives from 0.90 to 0.155 m/s; a 20k-step one-GPU check with their bounds indeed never turned and never drove faster than 0.17. Supervisor 2026-10-22: "do not clip the real important actions". Min/max clips nothing; it is what GR00T N1.5 uses for a mobile base and OpenVLA-OFT for joints and base (ALOHA; R1Pro in BEHAVIOR). The action contract's fixed -1/+1 for the base (the BEHAVIOR baselines' way) was tried first: at 10k debug steps it turned the model's residual noise into large base commands on still frames, so the narrower per-task scale was chosen (2026-10-23). Survey: `artifacts/base-normalization.md` |
 | Memory settings for long episodes: `--dataloader_type stream --mem_length 256` from the authors' `script/train/real_world/train_real.sh` in their MIKASA recipe (OpenVLA init and the 4-step window kept) | MemoryVLA | supervisor 2026-10-22 ("take the authors' settings for long episodes"). The paper (App. G, Tab. 9-10) ties memory length to episode length and uses 256 for its long real tasks (median 236, up to 902 frames after filtering); ours run 452-1373 frames (median per task), MIKASA's 60-90 |
 | Shuffle buffer of 500 episodes per rank instead of their 64,000 (`vla/memoryvla/train.sh`, `SHUFFLE`) | MemoryVLA | the stream dataloader shuffles whole episodes (their `make_interleaved_episodic_dataset` leaves out the frame flatten, and images are decoded after the shuffle), so the number counts encoded episodes, ~50 MB each of ours (RLDS: 6.0 GB for 120 episodes). Their 64,000 comes from the group-dataloader MIKASA script and would mean ~3 TB per rank: on 2026-10-27 the four ranks filled ~640 GB in 90 s and the pod was killed at its 728 GiB limit. Their stream script (`train_real.sh`) uses 32,000, with the comment to lower it if memory is limited; 500 is ~25 GB per rank and covers 8% of our 6000 episodes on each rank |
+| Dataloader workers per GPU: 4 instead of their 8 (`vla/memer/train_high.sh`, `WORKERS`) | MemER high | each worker of their Qwen loader turns its copy-on-write view of the parsed `train.json` into a private copy within ~10 min (Python's reference counts write to every page): ~21 GiB per worker for four tasks, plateaus 260 / 345 / 429 GiB at 2 / 3 / 4 workers (`vla/memer/probe_loader_mem.sh`); their 8 killed the pod on 2026-10-27. The sampler runs in the main process, so the samples and their order do not depend on it, only the loading speed does. Six tasks of the every-frame export need fewer (estimate ~430 GiB at 2, ~545 at 3; the guard stops at 582) |
 | Subtask boundaries from the oracle's recorded events; subtask names and keyframe rules written by us | MemER | theirs: operator key presses and their own per-task rules (App. E); every task needs its own. Approved list: ~/Downloads/memer_subtasks_2026-10-20.txt |
 | A keyframe before a sample's first subsampled frame moves to that frame instead of being dropped (`vla/memer/patches/memer-0001-early-keyframes.patch`, one line in their `generate_sft_data.py`) | MemER high | owner 2026-10-22; without it SameDrawer's cue reaches 20% of the samples that need it. See "Early keyframes" below |
 | Data: 6 tasks x 1000 oracle episodes, no interventions | all | our benchmark. MemER: 3 tasks x 50 demos (+10-15 interventions for the low level); MemoryVLA on MIKASA-Robo: 5 tasks x 250 demos at 128x128 |
@@ -116,6 +117,14 @@ frame far fewer times:
 
 Matching the authors' epochs would take 10-150x their steps. The owner decides between the
 literal steps, more steps, or fewer episodes per task.
+
+## Not settled: MemoryVLA's chunk length
+
+We use their MIKASA script's `--future_action_window_size 3` (chunk 4). The paper says 16 for every
+benchmark, MIKASA-Robo included (App. C.1, Table 8: "Action chunking size 16"); `train.py` defaults to
+15 (chunk 16), and so does their long-episode script `train_real.sh`, whose memory settings we
+already take. At our 10 Hz a chunk of 4 is 0.4 s and a chunk of 16 is 1.6 s (MemER low: 15 = 1.5 s).
+The debug runs so far used 4. The owner or the supervisor decides.
 
 ## Evaluation protocol (not training, for later)
 
