@@ -23,7 +23,7 @@ def card(digit: int) -> Image.Image:
     border = SIZE // 32
     draw.rectangle([border // 2, border // 2, SIZE - 1 - border // 2, SIZE - 1 - border // 2],
                    outline=(40, 40, 40), width=border)
-    font = ImageFont.truetype(str(FONT), int(SIZE * 0.78))
+    font = ImageFont.truetype(str(FONT), int(SIZE * 1.0))
     left, top, right, bottom = draw.textbbox((0, 0), str(digit), font=font)
     x = (SIZE - (right - left)) / 2 - left
     y = (SIZE - (bottom - top)) / 2 - top

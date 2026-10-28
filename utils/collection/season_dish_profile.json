@@ -76,7 +76,7 @@
     ],
     "shake_out_deg": 20.0,
     "shake_return_deg": 10.0,
-    "digit_card_width": 0.2,
+    "digit_card_width": 0.3,
     "digit_card_side": "below",
     "digit_card_gap": 0.03
   },

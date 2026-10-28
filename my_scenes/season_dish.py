@@ -170,13 +170,14 @@ class SeasonDishConfig:
     now, perhaps up to 9 later; a card exists for every digit 1-9."""
     shake_out_deg: float = 20.0
     """Lean from straight down at which an armed shaker over the bowl counts one shake
-    (`utils/mikasa/shake_counter.py`). The oracle shakes +-30 deg of wrist roll."""
+    (`utils/mikasa/shake_counter.py`). The oracle swings the wrist roll 30 deg back toward upright."""
     shake_return_deg: float = 10.0
     """Lean from straight down the shaker must come back within before the next shake counts."""
-    digit_card_width: float = 0.20
+    digit_card_width: float = 0.30
     """Side of the square number card, metres (the condiment picture is `fridge_picture_width`).
     Rendered 2026-10-27 from both head cameras at the cue gaze: 0.15 was a ~10 px digit, 0.20 reads
-    on every seed tried."""
+    on every seed tried. 0.30, the picture's own size, with the digit drawn 1.3x taller on the card
+    (owner 2026-10-28 «сделай цифру побольше»)."""
     digit_card_side: str = "below"
     """Where the card hangs: 'below' or 'above' the picture. Below (2026-10-27): above, the resting
     arm covers part of the card in both head cameras; below, neither."""
@@ -417,7 +418,7 @@ class SeasonDishConfig:
 
         Example:
             >>> round(SeasonDishConfig().digit_card_offset(), 3)
-            -0.28
+            -0.33
         """
         reach = 0.5 * self.fridge_picture_width + self.digit_card_gap + 0.5 * self.digit_card_width
         return -reach if self.digit_card_side == "below" else reach
