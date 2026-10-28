@@ -285,9 +285,7 @@ def export(root, output, repo_id, tokenizer, seeds=None, *, video_profile="refer
         control_hz=20,
         policy_hz=10,
         action_repeat=2,
-        resampling=("first_target_two_step_hold_physically_validated"
-                    if run["signature"]["profile"]["data"].get("action_execution", "hold") == "hold"
-                    else "first_target_then_midpoint_gripper_held_physically_validated"),
+        resampling="first_target_two_step_hold_physically_validated",
         policy_inputs=["observation.state", "task"]
         + [f"observation.images.{name}" for name in CAMERAS],
         debug_only_fields=["global_state"],

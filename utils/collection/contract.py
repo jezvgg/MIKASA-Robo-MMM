@@ -56,52 +56,6 @@ def check_actions(actions: np.ndarray) -> None:
         raise ValueError("Normalized gripper/base channels exceed [-1, 1]")
 
 
-#: How a 10 Hz target becomes two 20 Hz control steps (profile data.action_execution). "hold" repeats it.
-#: "midpoint" (SeasonDish from profile 29, owner 2026-10-28 «20 герц же получаются из 10 усреднением» → «Усреднение»)
-#: executes it, then the midpoint to the next target; the gripper holds its target, since a half-way gripper command
-#: would start the fingers one step before the recorded switch (checklist D7). The last target, with no next, is held.
-EXECUTIONS = ("hold", "midpoint")
-
-
-def midpoint_actions(targets: np.ndarray) -> np.ndarray:
-    """The 20 Hz steps of 10 Hz targets under "midpoint" execution.
-
-    Example:
-        >>> a = np.zeros((3, 13), np.float32); a[:, 0] = [0., 1., 3.]; a[:, 7] = [-1., 1., 1.]
-        >>> m = midpoint_actions(a); m[:, 0].tolist(), m[:, 7].tolist()
-        ([0.0, 0.5, 1.0, 2.0, 3.0, 3.0], [-1.0, -1.0, 1.0, 1.0, 1.0, 1.0])
-    """
-    targets = np.asarray(targets, dtype=np.float32)
-    check_actions(targets)
-    following = np.concatenate([targets[1:], targets[-1:]])
-    middle = (targets + following) * np.float32(0.5)
-    middle[:, 7] = targets[:, 7]
-    steps = np.empty((2 * len(targets), targets.shape[1]), dtype=np.float32)
-    steps[0::2], steps[1::2] = targets, middle
-    return steps
-
-
-def control_actions(actions: np.ndarray, execution: str = "hold", length: int | None = None) -> np.ndarray:
-    """The 20 Hz steps a validated replay executes for a recording's 20 Hz `actions` (each pair's first is the 10 Hz
-    target). `length` > the replay of `actions` pads it with the last target held, as the midpoint replay may run on
-    after the source until the task's final hold succeeds (`pipeline.validate_one`).
-
-    Example:
-        >>> a = np.zeros((4, 13), np.float32); a[:, 0] = [0., 0., 2., 2.]; a[:, 7] = 1.
-        >>> control_actions(a, "midpoint", length=6)[:, 0].tolist()
-        [0.0, 1.0, 2.0, 2.0, 2.0, 2.0]
-    """
-    if execution not in EXECUTIONS:
-        raise ValueError(f"Unknown action execution: {execution}")
-    targets = np.asarray(actions)[::ACTION_REPEAT]
-    if length is not None and length > ACTION_REPEAT * len(targets):
-        extra = (length - ACTION_REPEAT * len(targets) + ACTION_REPEAT - 1) // ACTION_REPEAT
-        targets = np.concatenate([targets, np.repeat(targets[-1:], extra, axis=0)])
-    if execution == "hold":
-        return np.repeat(np.asarray(targets, dtype=np.float32), ACTION_REPEAT, axis=0) if length else held_actions(actions)
-    return midpoint_actions(targets)
-
-
 def held_actions(actions: np.ndarray) -> np.ndarray:
     """First target of each pair, held for two 20 Hz steps (10 Hz policy).
 
@@ -184,9 +138,8 @@ def recording_info(path: Path, *, stage: str) -> dict:
             np.testing.assert_array_equal(traj["proprio"][:], qpos[:, 3:])
             np.testing.assert_array_equal(traj["global_state"][:], qpos[:, :3])
         if not native:
-            execution = contract.get("action_execution", "hold")
-            if n % ACTION_REPEAT or not np.array_equal(actions, control_actions(actions, execution)):
-                raise ValueError(f"Actions were not validated with the {execution} execution of 10 Hz targets")
+            if n % ACTION_REPEAT or not np.array_equal(actions, held_actions(actions)):
+                raise ValueError("Actions were not validated with two-step holds")
         if stage in {"rgb", "native_rgb"}:
             qpos = traj["obs/agent/qpos"]
             if qpos.shape != (n + 1, 15):
