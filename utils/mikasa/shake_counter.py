@@ -54,3 +54,45 @@ def step_shakes(count: torch.Tensor, armed: torch.Tensor, swung: torch.Tensor, l
     swung = swung | (armed & out)
     count = count + (swung & at_rest).to(count.dtype)
     return count, armed | at_rest, swung & ~at_rest
+
+
+def step_upright_hold(hold: torch.Tensor, inside: torch.Tensor, grace: torch.Tensor, low: torch.Tensor,
+                      high: torch.Tensor, tilt_deg: torch.Tensor, ok: torch.Tensor, enter_deg: float,
+                      leave_deg: float, grace_steps: int, still_deg: float):
+    """One control step of the final hold, upright again after the last shake (owner 2026-10-28: micro-jitter
+    is fine, reasonably upright is enough): the new (hold, inside, grace, low, high).
+
+    `ok` says the count is right and the condiment is held. The condiment is *inside* once its tilt from
+    upright is within `enter_deg`, and stays inside until it passes `leave_deg`. Inside, a step counts
+    toward `hold` while every counted tilt stays within `still_deg` of the others (low/high track them);
+    a step that breaks that restarts the count from itself, so turning upright through the cone is not
+    yet a hold. Up to `grace_steps` consecutive steps outside neither count nor reset; the next resets.
+
+    Example (enter 15, leave 20, grace 2, still 5):
+        >>> def run(tilts, ok=True):
+        ...     h, i, g = torch.zeros(1, dtype=torch.int32), torch.zeros(1, dtype=torch.bool), torch.zeros(1, dtype=torch.int32)
+        ...     lo, hi = torch.full((1,), math.inf), torch.full((1,), -math.inf)
+        ...     for t in tilts:
+        ...         h, i, g, lo, hi = step_upright_hold(h, i, g, lo, hi, torch.tensor([float(t)]), torch.tensor([ok]), 15., 20., 2, 5.)
+        ...     return int(h[0])
+        >>> run([14, 11, 8, 5, 3, 2, 2, 2, 2])    # turning upright: counts once it settles
+        4
+        >>> run([2] * 5 + [25, 25] + [2] * 5)     # two steps out: kept
+        10
+        >>> run([2] * 5 + [25, 25, 25] + [2] * 5) # three: reset
+        5
+        >>> run([18, 18]), run([14, 18, 18])      # 18 enters nothing, but does not leave
+        (0, 3)
+        >>> run([2] * 5, ok=False)
+        0
+    """
+    inside = ok & torch.where(inside, tilt_deg <= leave_deg, tilt_deg <= enter_deg)
+    lo, hi = torch.minimum(low, tilt_deg), torch.maximum(high, tilt_deg)
+    still = hi - lo <= still_deg
+    reset = ~inside & (grace + 1 > grace_steps)
+    hold = torch.where(inside, torch.where(still, hold + 1, torch.ones_like(hold)),
+                       torch.where(reset, torch.zeros_like(hold), hold))
+    low = torch.where(inside, torch.where(still, lo, tilt_deg), torch.where(reset, torch.full_like(low, math.inf), low))
+    high = torch.where(inside, torch.where(still, hi, tilt_deg), torch.where(reset, torch.full_like(high, -math.inf), high))
+    grace = torch.where(inside | reset, torch.zeros_like(grace), grace + 1)
+    return hold, inside, grace, low, high

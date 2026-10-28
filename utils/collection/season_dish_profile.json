@@ -27,7 +27,7 @@
     "horizon": 2000,
     "cue_steps": 100,
     "delay_steps": 40,
-    "hold_steps": 20,
+    "hold_steps": 10,
     "bowl_along": 0.85,
     "station_along": 0.46,
     "across": -0.1,
@@ -82,7 +82,10 @@
     ],
     "shake_out_deg": 20.0,
     "shake_return_deg": 10.0,
-    "upright_hold_deg": 10.0,
+    "upright_enter_deg": 15.0,
+    "upright_leave_deg": 20.0,
+    "hold_grace_steps": 2,
+    "hold_still_deg": 5.0,
     "digit_card_width": 0.3,
     "digit_card_side": "below",
     "digit_card_gap": 0.03
@@ -292,8 +295,8 @@
       "initial_observation_control_steps": 100,
       "phase": "fridge_cue_observation",
       "preserve_all_frames": true,
-      "final_hold_control_steps": 24,
-      "final_hold_reason": "Owner 2026-10-28 «Исключение для удержания»: the task ends with the condiment held upright and still for hold_steps (20) after the last shake; the last 24 control steps (12 frames at 10 Hz: the hold and the success margin) are excluded from D6, as the cue frames are at the start."
+      "final_hold_control_steps": 14,
+      "final_hold_reason": "Owner 2026-10-28 «Исключение для удержания»: the task ends with the condiment held upright and still for hold_steps (10) after the last shake; the last 14 control steps (7 frames at 10 Hz: the hold and the success margin) are excluded from D6, as the cue frames are at the start."
     }
   },
   "scene_visuals": {
@@ -313,5 +316,5 @@
     "precheck": "full_robot_turn_drive_turn_then_complete_upright_hover_and_wrist_only_pour"
   },
   "one_branch_2026_10_26": "Reproduction on train/vla (owner 2026-10-26, «Можно же применить прокси только к задаче cabinetsearch»): assisted_grasp_hand_collides false is the direct hand -> object drive (utils/mikasa/assisted_grasp.py; the default of every AssistedGraspTask but CabinetSearch). Since profile 27 instruction_version 3 is the shaking task's text; 1 was the text seasondish-ag-1000ep (profile 26) was recorded with.",
-  "task_2026_10_27": "Owner 2026-10-27/28: a number card (1-9, 0.30 m) hangs next to the condiment picture and disappears with it; the robot turns the remembered condiment upside down over the bowl, shakes it that many times, turns it upright again and holds it still 1 s («вернуть вверх, как была»). A shake is a swing of >= shake_out_deg from upside down over the bowl that comes back within shake_return_deg; it counts when it comes back, so the final turn upright is not one. The owner asked for two-sided tilts; checklist D2 allows only one-sided wrist-roll shakes (option 2), each a 30 deg swing back toward upright and return. Exactly the number then upright for hold_steps succeeds; one shake more fails the episode (`fail`). Horizon 2000 for nine. Replaces the one-tip task of profile 26, whose dataset seasondish-ag-1000ep train/vla 0864fb1 rebuilds."
+  "task_2026_10_27": "Owner 2026-10-27/28: a number card (1-9, 0.30 m) hangs next to the condiment picture and disappears with it; the robot turns the remembered condiment upside down over the bowl, shakes it that many times, turns it upright again and holds it still 0.5 s (within 15 deg of upright, leaving past 20, up to 2 steps of jitter, tilt spread <= 5 deg) («вернуть вверх, как была»). A shake is a swing of >= shake_out_deg from upside down over the bowl that comes back within shake_return_deg; it counts when it comes back, so the final turn upright is not one. The owner asked for two-sided tilts; checklist D2 allows only one-sided wrist-roll shakes (option 2), each a 30 deg swing back toward upright and return. Exactly the number then upright and still for hold_steps succeeds; one shake more fails the episode (`fail`). Horizon 2000 for nine. Replaces the one-tip task of profile 26, whose dataset seasondish-ag-1000ep train/vla 0864fb1 rebuilds."
 }

@@ -55,7 +55,7 @@ from mani_skill.utils.structs import Actor, Pose
 
 from utils.initial_pose import randomize_initial_joints
 from utils.mikasa.assisted_grasp import AssistedGraspTask
-from utils.mikasa.shake_counter import lean_from_down_deg, step_shakes
+from utils.mikasa.shake_counter import lean_from_down_deg, step_shakes, step_upright_hold
 from my_scenes.season_salad import decorate_bowl
 from utils.fridge_picture import FridgePictures
 from pathlib import Path
@@ -164,10 +164,10 @@ class SeasonDishConfig:
     delay_steps: int = 40
     "Blank window after the cue. Earliest possible success is cue_steps + delay_steps."
 
-    hold_steps: int = 20
-    """Consecutive steps the condiment must be held upright (`upright_hold_deg`) after the last
-    shake, 1 s at 20 Hz (the owner, 2026-10-27 upside down, 10-28 upright again; 15 when the
-    task was one tip)."""
+    hold_steps: int = 10
+    """Steps the condiment must be held upright and still after the last shake, 0.5 s at 20 Hz
+    (`shake_counter.step_upright_hold`; the owner 2026-10-28: «можно даже замереть на 0.5 секунд»;
+    20 upside down on 10-27, 15 when the task was one tip)."""
 
     # --- the number and the shakes (owner 2026-10-27) ------------------------------
     shake_counts: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9)
@@ -178,9 +178,18 @@ class SeasonDishConfig:
     (`utils/mikasa/shake_counter.py`). The oracle swings the wrist roll 30 deg back toward upright."""
     shake_return_deg: float = 10.0
     """Lean from straight down the shaker must come back within for a shake to count."""
-    upright_hold_deg: float = 10.0
-    """Tilt from straight up within which the condiment counts as upright again after the last
-    shake, for the final hold (owner 2026-10-28: «вернуть вверх, как была», then still ~1 s)."""
+    # The final hold, upright again (owner 2026-10-28: «вернуть вверх, как была»; micro-jitter is
+    # fine, reasonably upright is enough). Numbers from a review by an Opus subagent, checked
+    # against 28 recorded episodes, which end 0.1-0.7 deg from upright.
+    upright_enter_deg: float = 15.0
+    """Tilt from straight up at which the held condiment counts as upright: the carry gate's 15."""
+    upright_leave_deg: float = 20.0
+    """Tilt past which it stops counting as upright once it did (hysteresis against chatter)."""
+    hold_grace_steps: int = 2
+    """Consecutive steps past `upright_leave_deg` that neither count nor reset the hold."""
+    hold_still_deg: float = 5.0
+    """Spread of tilt the counted hold steps may span (still, not turning through the cone). Tilt,
+    not angular velocity: SAPIEN's reads hundreds of deg/s under the grasp constraint."""
     digit_card_width: float = 0.30
     """Side of the square number card, metres (the condiment picture is `fridge_picture_width`).
     Rendered 2026-10-27 from both head cameras at the cue gaze: 0.15 was a ~10 px digit, 0.20 reads
@@ -418,6 +427,9 @@ class SeasonDishConfig:
             self.shake_return_deg, self.shake_out_deg)
         assert self.shake_return_deg <= 180.0 - self.pour_tilt_deg, (
             "the rest pose after a shake must count as poured", self.shake_return_deg, self.pour_tilt_deg)
+        assert 0.0 < self.upright_enter_deg <= self.upright_leave_deg < 90.0, (
+            self.upright_enter_deg, self.upright_leave_deg)
+        assert self.hold_grace_steps >= 0 and self.hold_still_deg > 0.0, (self.hold_grace_steps, self.hold_still_deg)
         assert self.digit_card_side in ("below", "above"), self.digit_card_side
         assert self.digit_card_width > 0 and self.digit_card_gap >= 0
 
@@ -846,6 +858,10 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         self.shake_count = torch.zeros(n, dtype=torch.int32, device=dev)
         self.shake_armed = torch.zeros(n, dtype=torch.bool, device=dev)
         self.shake_swung = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.hold_inside = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.hold_grace = torch.zeros(n, dtype=torch.int32, device=dev)
+        self.hold_low = torch.full((n,), math.inf, device=dev)
+        self.hold_high = torch.full((n,), -math.inf, device=dev)
         self._distractor_home = torch.zeros((n, 3), dtype=torch.float32, device=dev)
         self._marker_home = torch.zeros((n, 3), dtype=torch.float32, device=dev)
         # The bowl where it comes to rest, captured at `cue_steps` (K73).
@@ -1003,6 +1019,10 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
             self.shake_count[env_idx] = 0
             self.shake_armed[env_idx] = False
             self.shake_swung[env_idx] = False
+            self.hold_inside[env_idx] = False
+            self.hold_grace[env_idx] = 0
+            self.hold_low[env_idx] = math.inf
+            self.hold_high[env_idx] = -math.inf
             # Seeded with the drawn pose so `bowl_moved` is defined before `cue_steps`;
             # overwritten with the settled pose at that step (K73).
             self._bowl_settled[env_idx] = bowl_pos[..., :2]
@@ -1282,15 +1302,19 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         self.shake_count = torch.where(advance, count, self.shake_count)
         self.shake_armed = torch.where(advance, armed, self.shake_armed)
         self.shake_swung = torch.where(advance, swung, self.shake_swung)
-        # The hold runs only after the last shake, with the condiment upright again (owner
-        # 2026-10-28) and exactly the number on the card counted.
-        upright = grasp_target & (tilt_rad <= math.radians(self.cfg.upright_hold_deg)) & distractor_ok
-        done_shaking = self.shake_count == self.num_shakes
-        self.pour_hold = torch.where(
-            advance & upright & done_shaking,
-            self.pour_hold + 1,
-            torch.where(advance, torch.zeros_like(self.pour_hold), self.pour_hold),
-        )
+        # The hold runs only after the last shake, with the condiment upright again and still
+        # (owner 2026-10-28) and exactly the number on the card counted.
+        held = grasp_target & distractor_ok & (self.shake_count == self.num_shakes)
+        hold, inside, grace, low, high = step_upright_hold(
+            self.pour_hold, self.hold_inside, self.hold_grace, self.hold_low, self.hold_high,
+            torch.rad2deg(tilt_rad), held, self.cfg.upright_enter_deg, self.cfg.upright_leave_deg,
+            self.cfg.hold_grace_steps, self.cfg.hold_still_deg)
+        self.pour_hold = torch.where(advance, hold, self.pour_hold)
+        self.hold_inside = torch.where(advance, inside, self.hold_inside)
+        self.hold_grace = torch.where(advance, grace, self.hold_grace)
+        self.hold_low = torch.where(advance, low, self.hold_low)
+        self.hold_high = torch.where(advance, high, self.hold_high)
+        upright = self.hold_inside
         self._pour_last_eval_step = torch.where(advance, step, self._pour_last_eval_step)
 
         earliest = self.cfg.cue_steps + self.cfg.delay_steps
@@ -1412,6 +1436,10 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         state["shake_count"] = self.shake_count.clone()
         state["shake_armed"] = self.shake_armed.clone()
         state["shake_swung"] = self.shake_swung.clone()
+        state["hold_inside"] = self.hold_inside.clone()
+        state["hold_grace"] = self.hold_grace.clone()
+        state["hold_low"] = self.hold_low.clone()
+        state["hold_high"] = self.hold_high.clone()
         return state
 
     def set_state_dict(self, state: dict, env_idx: torch.Tensor = None):
@@ -1441,6 +1469,10 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
             "shake_count": "shake_count",
             "shake_armed": "shake_armed",
             "shake_swung": "shake_swung",
+            "hold_inside": "hold_inside",
+            "hold_grace": "hold_grace",
+            "hold_low": "hold_low",
+            "hold_high": "hold_high",
         }
         for key, attr in restore.items():
             if key in state:
