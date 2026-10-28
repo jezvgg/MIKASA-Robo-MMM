@@ -151,7 +151,7 @@
     "navigation_posture": "dair_6168333_tcp_25cm_fixed_named_core_actual_grasp_wrists",
     "pour_motion": "wrist_roll_only_near_upside_down_then_one_sided_shakes",
     "shake_amplitude_deg": 30.0,
-    "shake_motion": "wrist_pour.pour_and_shake: wrist roll to the smallest turn that leaves the condiment shake_return_deg - 3 short of upside down (1.5 at the bowl) and whose 30 deg swing back toward upright leans >= shake_out_deg + 3, rest and swing over the bowl; then per shake out and back on that one side, timed at 2.0 rad/s and 8 rad/s^2 (the planner's 0.9/0.9 elsewhere; owner 2026-10-28 sharper shakes) (checklist D2: each roll joint spans <= pi - 0.05 per episode, so no swing past upside down; owner 2026-10-28 after the +-30 version refused 8/8); every leg planned before the first moves; then hold at the rest",
+    "shake_motion": "wrist_pour.pour_and_shake: wrist roll to the smallest turn that leaves the condiment shake_return_deg - 3 short of upside down (1.5 at the bowl) and whose 30 deg swing back toward upright leans >= shake_out_deg + 3, rest and swing over the bowl; then per shake out and back on that one side, timed at 2.0 rad/s and 8 rad/s^2 (the planner's 0.9/0.9 elsewhere; owner 2026-10-28 sharper shakes); no refinement wait after a leg: it idles at the leg's goal only until the counter has counted (out) or re-armed (back), at most 20 steps (D6) (checklist D2: each roll joint spans <= pi - 0.05 per episode, so no swing past upside down; owner 2026-10-28 after the +-30 version refused 8/8); every leg planned before the first moves; then hold at the rest",
     "cue_observation_steps": 100,
     "left_wall_dock_approach": "diagonal_from_open_aisle_in_canonical_rest",
     "pour_hover_prechecked": true,

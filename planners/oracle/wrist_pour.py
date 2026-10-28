@@ -31,6 +31,10 @@ SHAKE_LEAN_MARGIN_EXECUTED_DEG = 1.5
 #: shake; the owner asked for sharper shakes (2026-10-28 «можно более резко трясти?»). 2.0 stays under
 #: the URDF's 2.268 for the wrist joints.
 SHAKE_SPEED, SHAKE_ACCELERATION = 2.0, 8.0
+#: Control steps the pour may wait after a leg for the shake counter to see it (the arm lags its
+#: command). The legs used to end in the solver's refinement, which waits for the joint itself: 1-3
+#: identical 10 Hz frames a leg, and with nine shakes that alone broke D6's 5 % (2026-10-28).
+SETTLE_STEPS = 20
 
 
 def rotation(axis, angle):
@@ -148,7 +152,7 @@ def _plan_shakes(planner, task, q, wrist_index, axis, pivot, obj, bowl, amplitud
         except RuntimeError:
             continue
         if all(leg.get('status') == 'Success' for leg in legs.values()):
-            return rest, legs
+            return rest, legs, out
     return None
 
 
@@ -173,7 +177,7 @@ def pour_and_shake(env, planner, task, target, shakes, amplitude_deg=SHAKE_AMPLI
     plan = _plan_shakes(planner, task, q, wrist_index, axis, pivot, obj, bowl, amplitude_deg)
     if plan is None:
         return common.fail(env, "season_dish_planner", "no feasible wrist-only shake")
-    rest, legs = plan
+    rest, legs, out = plan
     object_axis = obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body)
     rest_tilt = 180.0 - lean_after(axis, object_axis, rest[wrist_index] - q[wrist_index])
     names = task.agent.controller.controllers['arm'].config.joint_names
@@ -188,14 +192,31 @@ def pour_and_shake(env, planner, task, target, shakes, amplitude_deg=SHAKE_AMPLI
         log('pour', motion='wrist_roll_only', target_degrees=round(rest_tilt, 2), shakes=int(shakes),
             amplitude_deg=float(amplitude_deg), sides=1, wrist_start=float(q[wrist_index]),
             wrist_goal=float(rest[wrist_index]), shake_speed=SHAKE_SPEED, shake_acceleration=SHAKE_ACCELERATION)
-        result = planner.follow_forward_path_w_refinement(legs["in"], refine=True)
+        armed = lambda info: bool(np.asarray(common._np(info['shake_armed'])).any())
+        counted = lambda info: int(common._np(info['shake_count']).item())
+
+        def move(leg, goal, done):
+            """Follow one leg without the refinement's wait, then idle at its goal only until `done`."""
+            result = planner.follow_forward_path_w_refinement(legs[leg], refine=False)
+            planner.fixed_action_targets = dict(fixed)
+            planner.fixed_action_targets[6] = float(goal)   # idle must not chase measured joint lag
+            for _ in range(SETTLE_STEPS):
+                if stopped(result) or done(result[-1]):
+                    break
+                result = planner.idle_steps(t=1)
+            planner.fixed_action_targets = fixed
+            return result
+
+        result = move("in", rest[wrist_index], armed)
         if stopped(result):
             return result
         for k in range(int(shakes)):
-            for leg in ("out", "back"):
-                result = planner.follow_forward_path_w_refinement(legs[leg], refine=True)
-                if stopped(result):
-                    return result
+            result = move("out", out[wrist_index], lambda info, k=k: counted(info) > k)
+            if stopped(result):
+                return result
+            result = move("back", rest[wrist_index], armed)
+            if stopped(result):
+                return result
             info = result[-1]
             log('shake', index=k + 1, shake_count=int(common._np(info['shake_count']).item()))
             if not bool(np.asarray(common._np(info['grasp_target'])).any()):

@@ -104,7 +104,7 @@ def stub(line_status="Success", grasped=True, shake_count=lambda wrist: 0):
         return {'status': line_status, 'goal': goal[12]}
 
     def info():
-        return {'shake_count': np.array([counts["n"]]), 'grasp_target': np.array([True]),
+        return {'shake_count': np.array([counts["n"]]), 'shake_armed': np.array([True]), 'grasp_target': np.array([True]),
                 'success': np.array([True]), 'pour_hold': np.array([CFG.hold_steps + 2])}
 
     planner = SimpleNamespace(planner=SimpleNamespace(update_from_simulation=lambda: None, plan_qpos_line=line,
@@ -146,6 +146,23 @@ def test_only_the_shake_legs_are_timed_sharp_and_the_planner_limits_come_back():
     pour_and_shake(SimpleNamespace(), p, task, target, shakes=1)
     assert timed == [.9, SHAKE_ACCELERATION, SHAKE_ACCELERATION]          # in, out, back
     assert list(p.planner.joint_vel_limits) == [.9] * 7 and list(p.planner.joint_acc_limits) == [.9] * 7
+
+
+def test_a_leg_waits_only_until_the_counter_has_seen_it():
+    """No refinement wait (D6): once the counter has counted an out leg, and re-armed on a back
+    leg, the next leg starts; only the final hold idles."""
+    outs = []
+
+    def count(goal):
+        if math.degrees(goal) < 160.:
+            outs.append(goal)
+        return len(outs)
+
+    p, task, target, calls = stub(shake_count=count)
+    idles, idle = [], p.idle_steps
+    p.idle_steps = lambda t=1: (idles.append(dict(p.fixed_action_targets)), idle(t))[1]
+    pour_and_shake(SimpleNamespace(), p, task, target, shakes=3)
+    assert len(outs) == 3 and len(idles) == 1
 
 
 def test_a_refused_leg_fails_before_any_motion():
