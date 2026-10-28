@@ -25,7 +25,17 @@ episode cannot simply be dropped): the report lists them and the rules get fixed
 event log (`--events`): its first compartment is opened and shut on one grip, so no gripper
 edge marks where the close begins.
 
-usage: label_subtasks.py <task> <dataset dir> <params.json> <out dir> [--check] [--events PATTERN]
+SeasonDish with shaking (profile 28, collected 2026-10-28; scheme A approved by the owner
+2026-10-29) is labelled from its event log (`--events`), which also gives the episode's answer
+(`target chosen`: the shaker and the number N on the card) and the cue's length: one subtask per
+shake, "shake the <shaker> over the bowl (k of N)", each ending when the oracle counts shake k,
+with its last frame a keyframe, the way the authors label repeated subtasks (App. E). The turn
+upside down starts at the `pour` event and ends where the wrist roll first turns back; the turn
+upright starts at the N-th `shake`. Without `--events`, SeasonDish is the profile-26 task (one tip).
+`params` may be `-`: the episodes' seeds are then read from the dataset's
+meta/source_rlds_metadata.json (enough for a task whose answer is in its event log).
+
+usage: label_subtasks.py <task> <dataset dir> <params.json | -> <out dir> [--check] [--events PATTERN]
 """
 from __future__ import annotations
 
@@ -44,6 +54,10 @@ DRAWERS = {0: "bottom", 1: "third from the top", 2: "second from the top", 3: "t
 ORDINAL = ["first", "second", "third", "fourth", "fifth"]
 PAD_COLOURS = ["red", "green", "blue", "yellow"]   # prop i's pad (depth_recall_v1.PAD_MAP)
 SPOKEN = {"salt": "white salt shaker", "pepper": "black pepper shaker"}   # depth_recall_v1 PropSpec.spoken
+SHAKE_TEXT = ("Remember whether the picture on the fridge shows the white salt shaker or the black pepper "
+              "shaker, and the number next to it. After the picture disappears, take that shaker, turn it "
+              "upside down over the bowl, shake it as many times as the number showed and turn it upright "
+              "again, leaving the other shaker untouched.")
 # The recorded task text -> the environment's current INSTRUCTIONS[0] (season_dish.py,
 # depth_recall_v1.py). The datasets were collected before the shakers' colours were named.
 TASK_TEXT = {
@@ -54,6 +68,8 @@ TASK_TEXT = {
         "Remember whether the picture on the fridge shows the white salt shaker or the black "
         "pepper shaker. After the picture disappears, take that shaker and tip it over the bowl "
         "to season the dish, leaving the other shaker untouched.",
+        # profile 28 (shaking): recorded with the current instruction already
+        SHAKE_TEXT: SHAKE_TEXT,
     },
     "depthrecall": {
         "Take the props out of the cabinet onto the counter pads (ketchup on the red pad, pepper "
@@ -66,7 +82,8 @@ TASK_TEXT = {
 }
 KEYFRAME_RULES = {
     "samedrawer": [{"pattern": "^close the .* drawer$", "select": "first"}],
-    "seasondish": [{"exact": "look at the picture on the fridge", "select": "last"}],
+    "seasondish": [{"exact": "look at the picture on the fridge", "select": "last"},
+                   {"pattern": r"^shake the .* over the bowl \(\d+ of \d+\)$", "select": "last"}],
     "cabinetsearch": [{"pattern": "^open the .* cabinet from the left$", "select": "last"}],
     "depthrecall": [{"pattern": "^take the .* to the .* pad$", "select": "first"}],
     "veggie": [{"exact": "look at the picture on the fridge", "select": "last"}],
@@ -125,6 +142,49 @@ def oracle_events(pattern: str, seed: int) -> list[tuple[int, dict]]:
     return out
 
 
+def seasondish_shake(a: np.ndarray, D, G, events: list[tuple[int, dict]]) -> list[tuple[int, str]]:
+    """Profile 28: cue, drive, grasp, carry, turn upside down, N shakes, turn upright and hold."""
+    by: dict[str, list] = {}
+    for f, ev in events:
+        by.setdefault(ev.get("message"), []).append((f, ev))
+    one = {}
+    for m in ("target chosen", "fridge cue observation complete", "pour", "held"):
+        if len(by.get(m, [])) != 1:
+            raise Unfit(f"{len(by.get(m, []))} '{m}' events")
+        one[m] = by[m][0]
+    n_shakes = int(one["target chosen"][1]["shakes"])
+    shakes = [f for f, _ in by.get("shake", [])]
+    if [ev["index"] for _, ev in by.get("shake", [])] != list(range(1, n_shakes + 1)) \
+            or one["held"][1].get("shake_count") != n_shakes or not one["held"][1].get("success"):
+        raise Unfit(f"N = {n_shakes}, shake events {[ev.get('index') for _, ev in by.get('shake', [])]}, "
+                    f"held {one['held'][1].get('shake_count')}")
+    c = SPOKEN["salt" if one["target chosen"][1]["target_is_shaker"] else "pepper"]
+    cue_end = int(one["fridge cue observation complete"][1]["control_steps"]) // 2
+    if len(G) != 1:
+        raise Unfit(f"{len(G)} grasps")
+    g1 = G[0]
+    d = [x for x in D if x[1] < g1[0]]
+    if not d:
+        raise Unfit("no drive before the grasp")
+    pour, ev = one["pour"]
+    if pour <= g1[0] + 1:
+        raise Unfit("no transfer before the pour")
+    # Upside down: the first frame after the pour where the wrist roll (channel 6) stops moving
+    # towards the pour's goal, past half the turn.
+    roll, sign = a[:, 6], np.sign(ev["wrist_goal"] - ev["wrist_start"])
+    half = abs(ev["wrist_goal"] - ev["wrist_start"]) / 2
+    down = next((f for f in range(pour, shakes[0]) if abs(roll[f] - roll[pour]) > half
+                 and sign * (roll[f + 1] - roll[f]) <= 1e-4), None)
+    if down is None:
+        raise Unfit("the wrist never turns back before the first shake")
+    out = [(0, "look at the picture on the fridge"), (cue_end, "go to the condiment station"),
+           (d[-1][1] + 1, f"pick up the {c}"), (g1[0] + 1, f"bring the {c} to the bowl"),
+           (pour, f"turn the {c} upside down over the bowl")]
+    out += [(start, f"shake the {c} over the bowl ({k} of {n_shakes})")
+            for k, start in enumerate([down] + shakes[:-1], 1)]
+    return out + [(shakes[-1], f"turn the {c} upright and hold it")]
+
+
 def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict,
              events: list[tuple[int, dict]] | None = None) -> list[tuple[int, str]]:
     """[(start frame, label)], starts increasing from 0."""
@@ -140,6 +200,8 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict,
         return [(0, f"close the {k} drawer"), (d1[0], "go to the far counter"),
                 (d1[1] + 1, "pick up the apple"), (g1[0] + 1, "place the apple on the plate"),
                 (g1[1] + 1, "go back to the drawers"), (d2[1] + 1, f"open the {k} drawer")]
+    if task == "seasondish" and events is not None:
+        return seasondish_shake(a, D, G, events)
     if task == "seasondish":
         c = SPOKEN["salt" if p["target_is_shaker"] else "pepper"]
         cue_end = p["cue_steps"] // 2        # control steps -> stored 10 Hz frames
@@ -251,14 +313,18 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("task", choices=sorted(KEYFRAME_RULES))
     ap.add_argument("dataset", type=Path)
-    ap.add_argument("params", type=Path)
+    ap.add_argument("params", type=Path, help="task_params.py output, or - (seeds from the dataset)")
     ap.add_argument("out", type=Path)
     ap.add_argument("--check", action="store_true", help="report only, write no dataset")
     ap.add_argument("--events", default="", help="the oracle's events.jsonl, '{seed}' in the path "
                     "(CabinetSearch5: .../cabinet_search5-*/oracle/{seed}/events.jsonl)")
     args = ap.parse_args()
     src, dst = args.dataset, args.out
-    params = {int(k): v for k, v in json.loads(args.params.read_text()).items()}
+    if str(args.params) == "-":
+        meta = json.loads((src / "meta/source_rlds_metadata.json").read_text())
+        params = {int(e): {"seed": int(s)} for e, s in zip(meta["episode_indices"], meta["episode_seeds"])}
+    else:
+        params = {int(k): v for k, v in json.loads(args.params.read_text()).items()}
     files = sorted(glob.glob(f"{src}/data/*/*.parquet"))
     frames = pd.concat(pd.read_parquet(f, columns=["episode_index", "frame_index", "action", "global_state"])
                        for f in files)
