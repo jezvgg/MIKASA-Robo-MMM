@@ -411,6 +411,24 @@ def assert_signature(run):
         raise ValueError("Source, robot, task settings or engine changed since run creation")
 
 
+def worker_env(seed, environ=None):
+    """The worker's environment: with several devices in CUDA_VISIBLE_DEVICES each worker gets one, by
+    seed, so the renderers spread over the GPUs (owner 2026-10-28 «попробуй разложить по gpu»); with one
+    or none the worker inherits it unchanged. Physics runs on the CPU, so the device only renders.
+
+    Example:
+        >>> [worker_env(s, {"CUDA_VISIBLE_DEVICES": "0,1,2,3"})["CUDA_VISIBLE_DEVICES"] for s in (8, 9, 10, 11, 12)]
+        ['0', '1', '2', '3', '0']
+        >>> worker_env(8, {"CUDA_VISIBLE_DEVICES": "0"}) is None
+        True
+    """
+    environ = os.environ if environ is None else environ
+    devices = [d for d in environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if d.strip()]
+    if len(devices) < 2:
+        return None
+    return dict(environ, CUDA_VISIBLE_DEVICES=devices[int(seed) % len(devices)])
+
+
 def run_worker(root, phase, seed, timeout=1800):
     directory = episode_path(root, phase, seed).parent
     directory.mkdir(parents=True, exist_ok=True)
@@ -437,8 +455,8 @@ def run_worker(root, phase, seed, timeout=1800):
         start = time.monotonic()
         with (directory / "worker.log").open("w") as log:
             try:
-                process = subprocess.run(command, cwd=REPO, stdout=log,
-                                         stderr=subprocess.STDOUT, timeout=timeout)
+                process = subprocess.run(command, cwd=REPO, stdout=log, stderr=subprocess.STDOUT,
+                                         timeout=timeout, env=worker_env(seed))
                 reason = f"worker_exit_{process.returncode}"
             except subprocess.TimeoutExpired:
                 reason = "timeout"
