@@ -127,12 +127,14 @@ class SeasonDishConfig:
     you can see `success=False` but not which of six criteria missed.
     """
 
-    horizon: int = int(os.environ.get("MIKASA_HORIZON", "1300"))
+    horizon: int = int(os.environ.get("MIKASA_HORIZON", "1600"))
     """Episode length. Must equal max_episode_steps in the decorator.
 
-    **1300 since 2026-10-27 (the shakes), was 1100.** On the one-tip task the successes of
-    seasondish-ag-1000ep took median 905 steps and 294 of 1044 ended within 100 steps of
-    1100; the shakes add about 20 steps each and the hold 5 more.
+    **1600 since 2026-10-28 (up to 9 shakes), 1300 on 10-27, was 1100.** On the one-tip task
+    the successes of seasondish-ag-1000ep took median 905 steps and 294 of 1044 ended within
+    100 steps of 1100. Measured on the shaking pour (2026-10-28, sharp legs): the turn over
+    takes ~90 steps, each shake ~31 and the hold ~22, and the pour started as late as step
+    970, so nine shakes end near step 1390.
 
     Overridable with `MIKASA_HORIZON` (default unchanged, so the registered task is
     byte-identical unless it is set). K79g needs the horizon out of the way to test the
@@ -165,9 +167,9 @@ class SeasonDishConfig:
     1 s at 20 Hz (the owner, 2026-10-27; 15 when the task was one tip)."""
 
     # --- the number and the shakes (owner 2026-10-27) ------------------------------
-    shake_counts: tuple[int, ...] = (1, 2, 3)
-    """The numbers the fridge card can show, drawn uniformly per episode. The owner: 1-3 for
-    now, perhaps up to 9 later; a card exists for every digit 1-9."""
+    shake_counts: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9)
+    """The numbers the fridge card can show, drawn uniformly per episode: 1-9 (the owner,
+    2026-10-28 «только цифры 1-9»; 1-3 on 10-27)."""
     shake_out_deg: float = 20.0
     """Lean from straight down at which an armed shaker over the bowl counts one shake
     (`utils/mikasa/shake_counter.py`). The oracle swings the wrist roll 30 deg back toward upright."""

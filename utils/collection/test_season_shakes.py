@@ -181,7 +181,7 @@ def env():
 def test_the_number_is_drawn_per_seed_independently_of_the_condiment_and_shown_with_the_picture(env):
     task = env.unwrapped
     seen = set()
-    for seed in range(12):
+    for seed in range(60):
         env.reset(seed=seed)
         n = int(task.num_shakes.item())
         assert n in task.cfg.shake_counts
