@@ -1,7 +1,7 @@
 {
   "profile_version": 27,
   "env_id": "MikasaSeasonDish-v0",
-  "task_variant": "salt_pepper_fridge_picture_number_1_9_upside_down_shake_30_tilt_155",
+  "task_variant": "salt_pepper_fridge_picture_number_1_9_upside_down_shake_30_then_upright_hold",
   "robot_reference": {
     "repository": "https://github.com/jezvgg/MIKASA-Robo-MMM",
     "commit": "4c5c8b3de941565ee2d57b153a10254fe64c2849",
@@ -24,7 +24,7 @@
     "instruction_version": 3
   },
   "task": {
-    "horizon": 1600,
+    "horizon": 2000,
     "cue_steps": 100,
     "delay_steps": 40,
     "hold_steps": 20,
@@ -82,6 +82,7 @@
     ],
     "shake_out_deg": 20.0,
     "shake_return_deg": 10.0,
+    "upright_hold_deg": 10.0,
     "digit_card_width": 0.3,
     "digit_card_side": "below",
     "digit_card_gap": 0.03
@@ -149,9 +150,9 @@
     "gripper_switch_control_step_parity": 0,
     "motion_revision": "bounded_legacy_carry_or_direct_dual_hover_2026_09_28",
     "navigation_posture": "dair_6168333_tcp_25cm_fixed_named_core_actual_grasp_wrists",
-    "pour_motion": "wrist_roll_only_near_upside_down_then_one_sided_shakes",
+    "pour_motion": "wrist_roll_only_near_upside_down_one_sided_shakes_then_upright",
     "shake_amplitude_deg": 30.0,
-    "shake_motion": "wrist_pour.pour_and_shake: wrist roll to the smallest turn that leaves the condiment shake_return_deg - 3 short of upside down (1.5 at the bowl) and whose 30 deg swing back toward upright leans >= shake_out_deg + 3, rest and swing over the bowl; then per shake out and back on that one side, timed at 2.0 rad/s and 8 rad/s^2 (the planner's 0.9/0.9 elsewhere; owner 2026-10-28 sharper shakes); no refinement wait after a leg: it idles at the leg's goal only until the counter has counted (out) or re-armed (back), at most 20 steps (D6) (checklist D2: each roll joint spans <= pi - 0.05 per episode, so no swing past upside down; owner 2026-10-28 after the +-30 version refused 8/8); every leg planned before the first moves; then hold at the rest",
+    "shake_motion": "wrist_pour.pour_and_shake: wrist roll to the smallest turn that leaves the condiment shake_return_deg - 3 short of upside down (1.5 at the bowl) and whose 30 deg swing back toward upright leans >= shake_out_deg + 3, rest and swing over the bowl; then per shake out and back on that one side (checklist D2: each roll joint spans <= pi - 0.05 per episode, so no swing past upside down; owner 2026-10-28 after the +-30 version refused 8/8); then the wrist back to its value before the pour, the condiment upright, and hold. All legs at the planner's own 0.9 rad/s, 0.9 rad/s^2 (owner 2026-10-28: no speed change); every leg planned before the first moves; no refinement wait after a leg: it idles at the leg's goal only until the counter has seen it (swung, counted, upright), at most 20 steps (D6)",
     "cue_observation_steps": 100,
     "left_wall_dock_approach": "diagonal_from_open_aisle_in_canonical_rest",
     "pour_hover_prechecked": true,
@@ -290,7 +291,9 @@
       "reason": "Owner explicitly requires the complete five-second initial fridge cue observation.",
       "initial_observation_control_steps": 100,
       "phase": "fridge_cue_observation",
-      "preserve_all_frames": true
+      "preserve_all_frames": true,
+      "final_hold_control_steps": 24,
+      "final_hold_reason": "Owner 2026-10-28 «Исключение для удержания»: the task ends with the condiment held upright and still for hold_steps (20) after the last shake; the last 24 control steps (12 frames at 10 Hz: the hold and the success margin) are excluded from D6, as the cue frames are at the start."
     }
   },
   "scene_visuals": {
@@ -310,5 +313,5 @@
     "precheck": "full_robot_turn_drive_turn_then_complete_upright_hover_and_wrist_only_pour"
   },
   "one_branch_2026_10_26": "Reproduction on train/vla (owner 2026-10-26, «Можно же применить прокси только к задаче cabinetsearch»): assisted_grasp_hand_collides false is the direct hand -> object drive (utils/mikasa/assisted_grasp.py; the default of every AssistedGraspTask but CabinetSearch). Since profile 27 instruction_version 3 is the shaking task's text; 1 was the text seasondish-ag-1000ep (profile 26) was recorded with.",
-  "task_2026_10_27": "Owner 2026-10-27: a number card (1-9 since 10-28, 0.30 m since 10-28) hangs next to the condiment picture and disappears with it; the robot turns the remembered condiment upside down over the bowl and shakes it that many times, then holds it upside down 1 s. The owner asked for two-sided tilts (a tilt, back to zero, a tilt the other way is two shakes); checklist D2 allows only one-sided wrist-roll shakes (10-28, option 2), each a 30 deg swing back toward upright and return; horizon 1600 for nine. Exactly the number succeeds; one shake more fails the episode (`fail`). Replaces the one-tip task of profile 26, whose dataset seasondish-ag-1000ep train/vla 0864fb1 rebuilds."
+  "task_2026_10_27": "Owner 2026-10-27/28: a number card (1-9, 0.30 m) hangs next to the condiment picture and disappears with it; the robot turns the remembered condiment upside down over the bowl, shakes it that many times, turns it upright again and holds it still 1 s («вернуть вверх, как была»). A shake is a swing of >= shake_out_deg from upside down over the bowl that comes back within shake_return_deg; it counts when it comes back, so the final turn upright is not one. The owner asked for two-sided tilts; checklist D2 allows only one-sided wrist-roll shakes (option 2), each a 30 deg swing back toward upright and return. Exactly the number then upright for hold_steps succeeds; one shake more fails the episode (`fail`). Horizon 2000 for nine. Replaces the one-tip task of profile 26, whose dataset seasondish-ag-1000ep train/vla 0864fb1 rebuilds."
 }

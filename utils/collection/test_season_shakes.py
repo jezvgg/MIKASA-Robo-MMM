@@ -9,8 +9,7 @@ import pytest
 import sapien
 import torch
 
-from planners.oracle.wrist_pour import (SHAKE_ACCELERATION, SHAKE_AMPLITUDE_DEG, SHAKE_LEAN_MARGIN_DEG,
-                                        SHAKE_LEAN_MARGIN_EXECUTED_DEG,
+from planners.oracle.wrist_pour import (SHAKE_AMPLITUDE_DEG, SHAKE_LEAN_MARGIN_DEG, SHAKE_LEAN_MARGIN_EXECUTED_DEG,
                                         lean_after, pour_and_shake, rest_angles, shake_geometry_ok, swing_angle)
 from utils.mikasa.shake_counter import step_shakes
 
@@ -22,10 +21,10 @@ CFG = SimpleNamespace(shake_out_deg=20., shake_return_deg=10., pour_axis_body=[0
 
 
 def run_counter(leans, held=True):
-    count, armed = torch.zeros(1, dtype=torch.int32), torch.zeros(1, dtype=torch.bool)
+    count, armed, swung = torch.zeros(1, dtype=torch.int32), torch.zeros(1, dtype=torch.bool), torch.zeros(1, dtype=torch.bool)
     over = torch.tensor([held])
     for lean in leans:
-        count, armed = step_shakes(count, armed, torch.tensor([float(lean)]), over, 20., 10.)
+        count, armed, swung = step_shakes(count, armed, swung, torch.tensor([float(lean)]), over, 20., 10.)
     return int(count[0]), bool(armed[0])
 
 
@@ -33,15 +32,20 @@ def test_turning_the_shaker_over_is_not_a_shake():
     assert run_counter([180, 120, 60, 25, 12, 4]) == (0, True)
 
 
-def test_each_excursion_from_upside_down_is_one_shake_either_side():
+def test_each_excursion_from_upside_down_that_comes_back_is_one_shake():
     over = [180, 90, 5]
     assert run_counter(over + [30, 2]) == (1, True)
-    assert run_counter(over + [30, 2, 30, 2]) == (2, True)      # the owner's "tilt, back, tilt the other way"
+    assert run_counter(over + [30, 2, 30, 2]) == (2, True)
     assert run_counter(over + [30, 2, 30, 2, 30, 2]) == (3, True)
 
 
-def test_a_swing_without_coming_back_counts_once():
-    assert run_counter([180, 5, 30, 15, 30, 15, 30]) == (1, False)
+def test_a_swing_counts_only_when_it_comes_back():
+    assert run_counter([180, 5, 30, 15, 30, 15, 30]) == (0, True)
+    assert run_counter([180, 5, 30, 15, 30, 2]) == (1, True)
+
+
+def test_turning_it_upright_again_after_the_last_shake_is_not_a_shake():
+    assert run_counter([180, 90, 5, 30, 2, 30, 2, 60, 120, 180]) == (2, True)
 
 
 def test_nothing_counts_off_the_bowl():
@@ -104,11 +108,11 @@ def stub(line_status="Success", grasped=True, shake_count=lambda wrist: 0):
         return {'status': line_status, 'goal': goal[12]}
 
     def info():
-        return {'shake_count': np.array([counts["n"]]), 'shake_armed': np.array([True]), 'grasp_target': np.array([True]),
+        return {'shake_count': np.array([counts["n"]]), 'shake_armed': np.array([True]), 'shake_swung': np.array([True]),
+                'upright': np.array([True]), 'grasp_target': np.array([True]),
                 'success': np.array([True]), 'pour_hold': np.array([CFG.hold_steps + 2])}
 
-    planner = SimpleNamespace(planner=SimpleNamespace(update_from_simulation=lambda: None, plan_qpos_line=line,
-                                                      joint_vel_limits=np.full(7, .9), joint_acc_limits=np.full(7, .9)),
+    planner = SimpleNamespace(planner=SimpleNamespace(update_from_simulation=lambda: None, plan_qpos_line=line),
                               fixed_action_targets={9: .42}, truncated=False)
 
     def follow(path, *, refine):
@@ -126,36 +130,22 @@ def test_every_leg_is_planned_before_the_first_moves_and_each_shake_swings_back_
     p, task, target, calls = stub()
     pour_and_shake(SimpleNamespace(), p, task, target, shakes=3)
     planned = [c for c in calls if c[0] == 'plan']
-    assert len(planned) == 3 and calls[:3] == planned                 # in, out, back
+    assert len(planned) == 4 and calls[:4] == planned                 # in, out, back, home
     rest = 180. - (10. - SHAKE_LEAN_MARGIN_EXECUTED_DEG)
     moves = [c[1] for c in calls if c[0] == 'move']
-    assert moves == pytest.approx([rest, rest - 30, rest, rest - 30, rest, rest - 30, rest])
+    assert moves == pytest.approx([rest, rest - 30, rest, rest - 30, rest, rest - 30, rest, 0.], abs=1e-9)
     assert p.fixed_action_targets == {9: .42}
 
 
-def test_only_the_shake_legs_are_timed_sharp_and_the_planner_limits_come_back():
-    p, task, target, calls = stub()
-    timed = []
-    line = p.planner.plan_qpos_line
-
-    def timing_line(goal, current, **kwargs):
-        timed.append(float(p.planner.joint_acc_limits[0]))
-        return line(goal, current, **kwargs)
-
-    p.planner.plan_qpos_line = timing_line
-    pour_and_shake(SimpleNamespace(), p, task, target, shakes=1)
-    assert timed == [.9, SHAKE_ACCELERATION, SHAKE_ACCELERATION]          # in, out, back
-    assert list(p.planner.joint_vel_limits) == [.9] * 7 and list(p.planner.joint_acc_limits) == [.9] * 7
-
-
 def test_a_leg_waits_only_until_the_counter_has_seen_it():
-    """No refinement wait (D6): once the counter has counted an out leg, and re-armed on a back
-    leg, the next leg starts; only the final hold idles."""
+    """No refinement wait (D6): once the counter has seen a leg (swung on an out leg, counted on a
+    back leg, upright on the way home), the next leg starts; only the final hold idles."""
     outs = []
 
-    def count(goal):
-        if math.degrees(goal) < 160.:
+    def count(goal):                                   # a shake counts when it comes back
+        if 100. < math.degrees(goal) < 160.:
             outs.append(goal)
+            return len(outs) - 1
         return len(outs)
 
     p, task, target, calls = stub(shake_count=count)
@@ -246,14 +236,17 @@ def test_count_success_and_fail_in_the_scene(env, monkeypatch):
         return int(task.num_shakes.item()), info
 
     n, _ = episode([0])
-    swing = [180, 90, 5] + [30, 2] * n          # the last rest step is the hold's first
-    n, info = episode(swing + [2] * (task.cfg.hold_steps - 2))
+    shaken = [180, 90, 5] + [30, 2] * n
+    upright = [90] + [180] * task.cfg.hold_steps          # turned upright again, then held
+    n, info = episode(shaken + upright[:-1])
     assert int(info["shake_count"].item()) == n and not info["success"].item()
-    n, info = episode(swing + [2] * (task.cfg.hold_steps - 1))
-    assert info["success"].item() and not info["fail"].item()
-    n, info = episode([180, 90, 5] + [30, 2] * (n - 1) + [2] * task.cfg.hold_steps)  # one shake short
+    n, info = episode(shaken + upright)
+    assert info["success"].item() and not info["fail"].item() and int(info["shake_count"].item()) == n
+    n, info = episode(shaken + [2] * 2 * task.cfg.hold_steps)       # held upside down instead
+    assert int(info["shake_count"].item()) == n and not info["success"].item()
+    n, info = episode([180, 90, 5] + [30, 2] * (n - 1) + upright)  # one shake short
     assert int(info["shake_count"].item()) == n - 1 and not info["success"].item() and not info["fail"].item()
-    n, info = episode(swing + [30, 2] + [2] * task.cfg.hold_steps)
+    n, info = episode(shaken + [30, 2] + upright)
     assert info["fail"].item() and not info["success"].item() and int(info["shake_count"].item()) == n + 1
 
 
@@ -262,8 +255,9 @@ def test_the_counter_survives_a_state_round_trip(env):
     env.reset(seed=3)
     task.shake_count[:] = 2
     task.shake_armed[:] = True
+    task.shake_swung[:] = True
     state = task.get_state_dict()
     env.reset(seed=4)
     task.set_state_dict(state)
-    assert int(task.shake_count.item()) == 2 and bool(task.shake_armed.item())
+    assert int(task.shake_count.item()) == 2 and bool(task.shake_armed.item()) and bool(task.shake_swung.item())
     assert int(task.num_shakes.item()) == int(state["num_shakes"].item())

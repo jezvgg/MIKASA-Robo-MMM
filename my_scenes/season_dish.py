@@ -3,8 +3,9 @@
 The chore: a bowl waits on the counter and two condiments stand at a station
 further along it. A photo on the fridge shows which condiment the dish needs, with a
 card showing a number next to it, then both disappear. The robot must fetch **that**
-condiment, turn it upside down over the bowl, shake it **that** many times and hold it
-there (the owner's task since 2026-10-27; before, one tip past an angle was the pour).
+condiment, turn it upside down over the bowl, shake it **that** many times, turn it
+upright again and hold it still (the owner's task since 2026-10-27, upright at the end
+since 10-28; before, one tip past an angle was the pour).
 
 What makes it a memory task rather than a pick-and-place with a colour:
 
@@ -78,8 +79,8 @@ from utils.robocasa_utils import (
 INSTRUCTIONS = (
     "Remember whether the picture on the fridge shows the white salt shaker or the "
     "black pepper shaker, and the number next to it. After the picture disappears, take "
-    "that shaker, turn it upside down over the bowl and shake it as many times as the "
-    "number showed, leaving the other shaker untouched.",
+    "that shaker, turn it upside down over the bowl, shake it as many times as the "
+    "number showed and turn it upright again, leaving the other shaker untouched.",
 )
 #: The text `seasondish-ag-1000ep` was recorded with (profile 26: one tip, before the colours were named).
 INSTRUCTIONS_V1 = (
@@ -127,14 +128,15 @@ class SeasonDishConfig:
     you can see `success=False` but not which of six criteria missed.
     """
 
-    horizon: int = int(os.environ.get("MIKASA_HORIZON", "1600"))
+    horizon: int = int(os.environ.get("MIKASA_HORIZON", "2000"))
     """Episode length. Must equal max_episode_steps in the decorator.
 
-    **1600 since 2026-10-28 (up to 9 shakes), 1300 on 10-27, was 1100.** On the one-tip task
-    the successes of seasondish-ag-1000ep took median 905 steps and 294 of 1044 ended within
-    100 steps of 1100. Measured on the shaking pour (2026-10-28, sharp legs): the turn over
-    takes ~90 steps, each shake ~31 and the hold ~22, and the pour started as late as step
-    970, so nine shakes end near step 1390.
+    **2000 since 2026-10-28 (up to 9 shakes, upright again at the end), 1300 on 10-27, was
+    1100.** On the one-tip task the successes of seasondish-ag-1000ep took median 905 steps
+    and 294 of 1044 ended within 100 steps of 1100. Measured on the shaking pour at the
+    planner's own speed (2026-10-28): the turn over takes ~90 steps, each shake ~60, the turn
+    upright again ~90 and the hold ~22, and the pour started as late as step 970, so nine
+    shakes end near step 1710.
 
     Overridable with `MIKASA_HORIZON` (default unchanged, so the registered task is
     byte-identical unless it is set). K79g needs the horizon out of the way to test the
@@ -163,8 +165,9 @@ class SeasonDishConfig:
     "Blank window after the cue. Earliest possible success is cue_steps + delay_steps."
 
     hold_steps: int = 20
-    """Consecutive steps the shaker must stay upside down over the bowl after the last shake,
-    1 s at 20 Hz (the owner, 2026-10-27; 15 when the task was one tip)."""
+    """Consecutive steps the condiment must be held upright (`upright_hold_deg`) after the last
+    shake, 1 s at 20 Hz (the owner, 2026-10-27 upside down, 10-28 upright again; 15 when the
+    task was one tip)."""
 
     # --- the number and the shakes (owner 2026-10-27) ------------------------------
     shake_counts: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9)
@@ -174,7 +177,10 @@ class SeasonDishConfig:
     """Lean from straight down at which an armed shaker over the bowl counts one shake
     (`utils/mikasa/shake_counter.py`). The oracle swings the wrist roll 30 deg back toward upright."""
     shake_return_deg: float = 10.0
-    """Lean from straight down the shaker must come back within before the next shake counts."""
+    """Lean from straight down the shaker must come back within for a shake to count."""
+    upright_hold_deg: float = 10.0
+    """Tilt from straight up within which the condiment counts as upright again after the last
+    shake, for the final hold (owner 2026-10-28: «вернуть вверх, как была», then still ~1 s)."""
     digit_card_width: float = 0.30
     """Side of the square number card, metres (the condiment picture is `fridge_picture_width`).
     Rendered 2026-10-27 from both head cameras at the cue gaze: 0.15 was a ~10 px digit, 0.20 reads
@@ -839,6 +845,7 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         self._digit_index = torch.zeros(n, dtype=torch.long, device=dev)
         self.shake_count = torch.zeros(n, dtype=torch.int32, device=dev)
         self.shake_armed = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.shake_swung = torch.zeros(n, dtype=torch.bool, device=dev)
         self._distractor_home = torch.zeros((n, 3), dtype=torch.float32, device=dev)
         self._marker_home = torch.zeros((n, 3), dtype=torch.float32, device=dev)
         # The bowl where it comes to rest, captured at `cue_steps` (K73).
@@ -995,6 +1002,7 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
             self.pour_hold[env_idx] = 0
             self.shake_count[env_idx] = 0
             self.shake_armed[env_idx] = False
+            self.shake_swung[env_idx] = False
             # Seeded with the drawn pose so `bowl_moved` is defined before `cue_steps`;
             # overwritten with the settled pose at that step (K73).
             self._bowl_settled[env_idx] = bowl_pos[..., :2]
@@ -1269,15 +1277,17 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         advance = step != self._pour_last_eval_step
         lean_deg = lean_from_down_deg(tilt_rad)
         held_over_bowl = grasp_target & over_bowl & height_ok & distractor_ok
-        count, armed = step_shakes(self.shake_count, self.shake_armed, lean_deg, held_over_bowl,
-                                   self.cfg.shake_out_deg, self.cfg.shake_return_deg)
+        count, armed, swung = step_shakes(self.shake_count, self.shake_armed, self.shake_swung, lean_deg,
+                                          held_over_bowl, self.cfg.shake_out_deg, self.cfg.shake_return_deg)
         self.shake_count = torch.where(advance, count, self.shake_count)
         self.shake_armed = torch.where(advance, armed, self.shake_armed)
-        # The hold runs only after the last shake: back near upside down (armed) with
-        # exactly the number on the card counted.
-        done_shaking = self.shake_armed & (self.shake_count == self.num_shakes)
+        self.shake_swung = torch.where(advance, swung, self.shake_swung)
+        # The hold runs only after the last shake, with the condiment upright again (owner
+        # 2026-10-28) and exactly the number on the card counted.
+        upright = grasp_target & (tilt_rad <= math.radians(self.cfg.upright_hold_deg)) & distractor_ok
+        done_shaking = self.shake_count == self.num_shakes
         self.pour_hold = torch.where(
-            advance & pour_now & done_shaking,
+            advance & upright & done_shaking,
             self.pour_hold + 1,
             torch.where(advance, torch.zeros_like(self.pour_hold), self.pour_hold),
         )
@@ -1301,6 +1311,8 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
             "num_shakes": self.num_shakes,
             "shake_count": self.shake_count,
             "shake_armed": self.shake_armed,
+            "shake_swung": self.shake_swung,
+            "upright": upright,
             "lean_deg": lean_deg,
             "tilted": tilted,
             "tilt_rad": tilt_rad,
@@ -1399,6 +1411,7 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         state["digit_index"] = self._digit_index.clone()
         state["shake_count"] = self.shake_count.clone()
         state["shake_armed"] = self.shake_armed.clone()
+        state["shake_swung"] = self.shake_swung.clone()
         return state
 
     def set_state_dict(self, state: dict, env_idx: torch.Tensor = None):
@@ -1427,6 +1440,7 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
             "digit_index": "_digit_index",
             "shake_count": "shake_count",
             "shake_armed": "shake_armed",
+            "shake_swung": "shake_swung",
         }
         for key, attr in restore.items():
             if key in state:
