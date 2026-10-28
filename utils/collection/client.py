@@ -13,9 +13,11 @@ from .contract import (
     CAMERAS,
     CONTROL_FPS,
     CONTROL_MODE,
+    EXECUTIONS,
     POLICY_FPS,
     ROBOT,
     check_actions,
+    midpoint_actions,
 )
 
 
@@ -60,43 +62,49 @@ def policy_observation(obs: dict, instruction: str) -> dict:
 
 
 def execute_actions(
-    env, actions: np.ndarray, *, repeat=ACTION_REPEAT, stop_on_success=False
+    env, actions: np.ndarray, *, repeat=ACTION_REPEAT, stop_on_success=False, execution="hold"
 ) -> dict:
     """Execute absolute targets, unchanged, at a fixed number of control ticks.
 
     Both replay validation and the evaluation client use this function. It never
-    clips or averages the recorded targets. Callers decide whether completing a
-    task should end a model rollout early or a recording should play to its end.
+    clips the recorded targets. 10 Hz targets (`repeat` 2) run two control steps
+    each: held (`execution` "hold"), or the target then the midpoint to the next
+    ("midpoint", `contract.midpoint_actions`; the profile's data.action_execution).
+    Callers decide whether completing a task should end a model rollout early or a
+    recording should play to its end.
     """
     actions = np.asarray(actions, dtype=np.float32)
     check_actions(actions)
     if repeat not in (1, ACTION_REPEAT):
         raise ValueError("Only native 20 Hz and two-step 10 Hz targets are supported")
+    if execution not in EXECUTIONS or (repeat == 1 and execution != "hold"):
+        raise ValueError(f"Unsupported action execution {execution!r} at repeat {repeat}")
     steps = 0
-    total = len(actions) * repeat
-    for action in actions:
-        for _ in range(repeat):
-            obs, _, terminated, truncated, info = env.step(action)
-            steps += 1
-            success = scalar_bool(info["success"])
-            status = "completed"
-            if scalar_bool(truncated):
-                status = "truncated"
-            elif scalar_bool(terminated) and (
-                not success or scalar_bool(info.get("fail", False))
-            ):
-                status = "terminated"
-            elif stop_on_success and success:
-                status = "success"
-            if status != "completed":
-                return dict(
-                    obs=obs,
-                    info=info,
-                    success=success,
-                    status=status,
-                    control_steps=steps,
-                    completed=steps == total,
-                )
+    control = (actions if repeat == 1 else np.repeat(actions, repeat, axis=0) if execution == "hold"
+               else midpoint_actions(actions))
+    total = len(control)
+    for action in control:
+        obs, _, terminated, truncated, info = env.step(action)
+        steps += 1
+        success = scalar_bool(info["success"])
+        status = "completed"
+        if scalar_bool(truncated):
+            status = "truncated"
+        elif scalar_bool(terminated) and (
+            not success or scalar_bool(info.get("fail", False))
+        ):
+            status = "terminated"
+        elif stop_on_success and success:
+            status = "success"
+        if status != "completed":
+            return dict(
+                obs=obs,
+                info=info,
+                success=success,
+                status=status,
+                control_steps=steps,
+                completed=steps == total,
+            )
     return dict(
         obs=obs,
         info=info,
@@ -117,8 +125,10 @@ def run_policy_episode(
     execute_horizon: int = 10,
     stop_on_success: bool = True,
     clip_actions: bool = False,
+    execution: str = "hold",
 ) -> dict:
-    """Run recorded or learned actions through the same client and executor."""
+    """Run recorded or learned actions through the same client and executor. `execution` is the dataset's
+    (its profile's data.action_execution); under "midpoint" each chunk's last target is held."""
     if max_policy_steps < 1 or execute_horizon < 1:
         raise ValueError("Policy horizon and rollout length must be positive")
     if policy.get_server_metadata().get("mikasa_data") != policy_metadata():
@@ -137,7 +147,7 @@ def run_policy_episode(
             bounded = np.clip(actions, env.action_space.low, env.action_space.high)
             clipped += int(np.any(bounded != actions, axis=1).sum())
             actions = bounded
-        result = execute_actions(env, actions, stop_on_success=stop_on_success)
+        result = execute_actions(env, actions, stop_on_success=stop_on_success, execution=execution)
         steps += result["control_steps"]
         requests += 1
         obs = result["obs"]

@@ -77,6 +77,7 @@ def collection_contract(base, *, run: dict, seed: int, stage: str, source=None, 
         "global_state_use": "debug_only_never_policy_input",
         "policy_fps": CONTROL_FPS if native else POLICY_FPS,
         "action_repeat": 1 if native else ACTION_REPEAT,
+        "action_execution": "hold" if native else action_execution(run),
         "source_action_repeat": run["signature"]["profile"]["data"].get("source_action_repeat", 1),
         "instruction": instruction,
         "language_validation": language,
@@ -84,7 +85,8 @@ def collection_contract(base, *, run: dict, seed: int, stage: str, source=None, 
         "state_joint_names": [j.name for j in base.agent.robot.get_active_joints()],
         "source": source,
         "source_steps": source_steps,
-        "resampling": "none" if native else "first_target_two_step_hold",
+        "resampling": ("none" if native else "first_target_two_step_hold" if action_execution(run) == "hold"
+                       else "first_target_then_midpoint_gripper_held"),
     }
 
 
@@ -278,6 +280,16 @@ def initial_state_matches(group: h5py.Group, state: dict) -> bool:
     return True
 
 
+#: Pairs of the last 10 Hz target a midpoint replay may add after the source ran out: it lags the held oracle by up to a
+#: control step per leg, so the task's final hold can complete a few steps after the oracle's recording ended.
+MIDPOINT_TAIL_PAIRS = 20
+
+
+def action_execution(run: dict) -> str:
+    """How the run's 10 Hz targets execute at 20 Hz: the profile's data.action_execution, "hold" by default."""
+    return run["signature"]["profile"]["data"].get("action_execution", "hold")
+
+
 def validate_one(root: Path, run: dict, seed: int, *, native=False) -> dict:
     from utils.mikasa.seeding import seed_everything
 
@@ -299,7 +311,15 @@ def validate_one(root: Path, run: dict, seed: int, *, native=False) -> dict:
             repeat = 1 if native else ACTION_REPEAT
             if not initial_state_matches(traj["env_states"], base.get_state_dict()):
                 return {"status": "initial_state_mismatch"}
-        result = execute_actions(env, actions, repeat=repeat)
+        execution = "hold" if native else action_execution(run)
+        result = execute_actions(env, actions, repeat=repeat, execution=execution)
+        if execution == "midpoint":
+            for _ in range(MIDPOINT_TAIL_PAIRS):
+                if result["success"] or result["status"] != "completed":
+                    break
+                steps = result["control_steps"]
+                result = execute_actions(env, actions[-1:], repeat=repeat, execution=execution)
+                result["control_steps"] += steps
         success = result["completed"] and result["success"] and result["status"] == "completed"
         if result["status"] != "completed":
             status = result["status"]

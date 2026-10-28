@@ -1,7 +1,7 @@
 {
-  "profile_version": 28,
+  "profile_version": 29,
   "env_id": "MikasaSeasonDish-v0",
-  "task_variant": "salt_pepper_fridge_picture_number_1_9_cue50_upside_down_shake_30_then_upright_hold",
+  "task_variant": "salt_pepper_fridge_picture_number_1_9_cue50_upside_down_shake_30_then_upright_hold_midpoint20hz",
   "robot_reference": {
     "repository": "https://github.com/jezvgg/MIKASA-Robo-MMM",
     "commit": "4c5c8b3de941565ee2d57b153a10254fe64c2849",
@@ -100,7 +100,9 @@
     "lerobot_format": "v3.0",
     "rgb_only": true,
     "max_instruction_tokens": 100,
-    "source_action_repeat": 2
+    "source_action_repeat": 2,
+    "action_execution": "midpoint",
+    "action_execution_note": "Owner 2026-10-28 «20 герц же получаются из 10 усреднением» → «Усреднение»: each 10 Hz target executes for one control step, then the midpoint to the next target (the gripper holds its target, checklist D7); the last target is held. The oracle plans with held targets; the validated replay, the rgb render and the dataset use this execution, and policies must be evaluated with it (client.execute_actions execution='midpoint')."
   },
   "cameras": {
     "left_base_camera_link": {

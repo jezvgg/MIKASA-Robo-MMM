@@ -103,7 +103,7 @@ def collection(root, output):
 
 def check(root, output):
     """Check completed H5, phase lineage and task waypoint-noise samples."""
-    from .contract import (CAMERAS, check_actions, episode_summary, held_actions,
+    from .contract import (CAMERAS, check_actions, control_actions, episode_summary, held_actions,
                            recording_info)
 
     run = read_json(root / "run.json")
@@ -162,7 +162,8 @@ def check(root, output):
                 if result.get("success_once") != summary["success_once"]:
                     raise ValueError(f"Worker ever-success disagrees with H5: {path}")
                 if phase != "oracle" and source_actions is not None and result["status"] == "success":
-                    expected = source_actions if phase in {"native", "native_rgb"} else held_actions(source_actions)
+                    expected = (source_actions if phase in {"native", "native_rgb"} else control_actions(
+                        source_actions, contract.get("action_execution", "hold"), length=len(actions)))
                     np.testing.assert_array_equal(actions, expected)
                 if phase in {"rgb", "native_rgb"}:
                     if set(traj["obs/sensor_data"]) != set(CAMERAS):

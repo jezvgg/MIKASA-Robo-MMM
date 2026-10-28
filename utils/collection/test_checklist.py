@@ -104,3 +104,25 @@ def test_profile_28_excludes_its_shorter_cue_and_only_profile_28_may():
     check = pause_check(a, profile)
     assert check["passed"] and check["excluded_initial_frames"] == 25
     assert not pause_check(a, dict(profile, profile_version=27))["passed"]
+
+
+def test_midpoint_execution_steps_each_target_then_halfway_to_the_next_and_holds_the_gripper():
+    from utils.collection.client import execute_actions
+
+    class Env:
+        def __init__(self):
+            self.seen = []
+
+        def step(self, action):
+            self.seen.append(np.array(action))
+            return None, 0., False, False, {"success": np.array([len(self.seen) == 6])}
+
+    a = np.zeros((3, 13), np.float32); a[:, 0] = [0., 1., 3.]; a[:, 7] = [-1., 1., 1.]
+    env = Env()
+    result = execute_actions(env, a, execution="midpoint")
+    seen = np.array(env.seen)
+    assert result["completed"] and result["success"] and result["control_steps"] == 6
+    assert seen[:, 0].tolist() == [0., .5, 1., 2., 3., 3.] and seen[:, 7].tolist() == [-1., -1., 1., 1., 1., 1.]
+    held = Env()
+    execute_actions(held, a)
+    assert np.array(held.seen)[:, 0].tolist() == [0., 0., 1., 1., 3., 3.]
