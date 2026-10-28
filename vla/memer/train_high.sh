@@ -7,10 +7,11 @@
 # checkpoint-* resumes from it: the authors' train_qwen.py does that itself. vla/mem_guard.py stops
 # the run when the container's memory passes 80% of its limit (past it the pod is killed); each
 # dataloader worker holds a private copy of the annotations (~21 GiB for four tasks), so WORKERS
-# sets the memory: their 8 per GPU killed the pod on 2026-10-27, 4 fits.
+# sets the memory: their 8 per GPU killed the pod on 2026-10-27; 2 (the owner's choice, 2026-10-29)
+# fits six tasks with the most room (~380 GiB of the 582 the guard allows), at ~15% slower steps than 4.
 # usage: train_high.sh <MEMER_SFT_ROOT holding <task>/train.json> <output dir> <max steps> [save steps]
 # env: GPUS (4), BS (4), DATASETS (comma list; default the six memer_<task>), LR (6e-5),
-#      SAVE_ONLY_MODEL (0), WORKERS (dataloader workers per GPU, 4; theirs 8), MASTER_PORT (29532)
+#      SAVE_ONLY_MODEL (0), WORKERS (dataloader workers per GPU, 2; theirs 8), MASTER_PORT (29532)
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 export MEMER_SFT_ROOT=$1; OUT=$2; STEPS=$3; SAVE=${4:-500}
@@ -51,6 +52,6 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((GPUS - 1)))} exec "$
   --logging_nan_inf_filter False \
   --model_max_length 8192 \
   --gradient_checkpointing True \
-  --dataloader_num_workers "${WORKERS:-4}" \
+  --dataloader_num_workers "${WORKERS:-2}" \
   --report_to none \
   "${EXTRA[@]}"
