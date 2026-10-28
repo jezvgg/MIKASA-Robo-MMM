@@ -1,20 +1,27 @@
 """Plan a one-joint pour; reject it rather than recruit other arm joints.
 
 Two pours. The one-tip pour turns the wrist until the condiment is tilted `target_degrees` (165) and
-holds. The shaking pour (SeasonDish since 2026-10-27) turns it as close to upside down as the wrist
-axis allows, then swings the wrist `SHAKE_AMPLITUDE_DEG` to one side and back, to the other side and
-back, once per shake, and holds upside down; only wrist_roll moves in either.
+holds. The shaking pour (SeasonDish since 2026-10-27) turns it to just short of upside down, then per
+shake turns it `SHAKE_AMPLITUDE_DEG` back toward upright and returns, and holds there; only wrist_roll
+moves in either.
+
+The shakes go to one side only. Checklist D2 lets each roll joint span at most pi - 0.05 over an
+episode (`roll_paths.RollPathPlanner.accepts`), and turning upside down already takes ~180 deg, so
+a swing past upside down is never accepted: the +-30 deg version was refused on 8 of 8 seeds
+(2026-10-28), and the owner chose the one-sided swing.
 """
 import math
 import numpy as np
 
 from planners.oracle import oracle_common as common
 
-#: Wrist roll each shake swings away from upside down and back (the owner, 2026-10-27: +-30 deg).
+#: Wrist roll each shake swings back toward upright and returns (the owner, 2026-10-27: 30 deg;
+#: one side only since 2026-10-28, see above).
 SHAKE_AMPLITUDE_DEG = 30.0
 #: Lean kept clear of the task's shake thresholds by the planned rest and shake poses, degrees: the
 #: route preview (a model of the held condiment) keeps 3, the pour itself (the measured one) 1.5, so a
-#: degree of model-to-physics drift does not refuse at the bowl a pour the preview accepted.
+#: degree of model-to-physics drift does not refuse at the bowl a pour the preview accepted. The rest
+#: leans exactly `shake_return_deg` less the margin: the least roll that still re-arms the counter.
 SHAKE_LEAN_MARGIN_DEG = 3.0
 SHAKE_LEAN_MARGIN_EXECUTED_DEG = 1.5
 
@@ -56,46 +63,40 @@ def lean_after(axis, object_axis, delta):
     return math.degrees(math.acos(float(np.clip(-v[2], -1.0, 1.0))))
 
 
-def inversion_angles(axis, object_axis):
-    """The turns about `axis` within one turn either way that bring `object_axis` closest to straight
-    down, smallest first. The tilt is cos = c0 + R cos(delta - phase) (see `tilt_angles`), lowest at
-    delta = phase + pi, and turning +-a from there tilts it back by the same amount on both sides,
-    so the shakes are symmetric only around this pose.
+def rest_angles(axis, object_axis, lean_deg):
+    """The turns about `axis` that leave `object_axis` `lean_deg` short of straight down, smallest
+    first: the near side of upside down, where the roll joint spends least of its D2 span.
 
     Example:
-        >>> [round(math.degrees(d)) for d in inversion_angles([1, 0, 0], [0, 0, 1])]
-        [180, -180]
-        >>> inversion_angles([0, 0, 1], [0, 0, 1])
+        >>> [round(math.degrees(d)) for d in rest_angles([1, 0, 0], [0, 0, 1], 7.)][:2]
+        [173, -173]
+        >>> rest_angles([0, 0, 1], [0, 0, 1], 7.)
         []
     """
-    n, v = np.asarray(axis, dtype=float), np.asarray(object_axis, dtype=float)
-    n, v = n / np.linalg.norm(n), v / np.linalg.norm(v)
-    c0 = float(n[2] * (n @ v))
-    c1, c2 = float(v[2] - c0), float(np.cross(n, v)[2])
-    if math.hypot(c1, c2) < 1e-9:
-        return []
-    best = math.atan2(c2, c1) + math.pi
-    values = {round(best + turn * 2 * math.pi, 12) for turn in (-2, -1, 0, 1)}
-    return sorted((x for x in values if abs(x) <= 2 * math.pi + 1e-9), key=lambda x: (abs(x), x < 0))
+    return sorted(tilt_angles(axis, object_axis, 180. - lean_deg), key=lambda x: (round(abs(x), 9), x < 0))
+
+
+def swing_angle(delta, amplitude_deg):
+    """The shake's turn: `amplitude_deg` from the rest turn `delta` back toward the start."""
+    return delta - math.copysign(math.radians(amplitude_deg), delta)
 
 
 def shake_geometry_ok(axis, object_axis, delta, cfg, amplitude_deg=SHAKE_AMPLITUDE_DEG,
                       margin_deg=SHAKE_LEAN_MARGIN_DEG):
-    """Does turning to `delta` rest the condiment inside the counter's rest band, and does each
-    +-`amplitude_deg` swing from there lean it past the shake threshold, with the margin?
+    """Does turning to `delta` rest the condiment inside the counter's rest band, and does the swing
+    `amplitude_deg` back toward upright from there lean it past the shake threshold, with the margin?
 
     Example:
         >>> from types import SimpleNamespace
         >>> cfg = SimpleNamespace(shake_out_deg=20., shake_return_deg=10.)
-        >>> shake_geometry_ok([1, 0, 0], [0, 0, 1], math.pi, cfg)
+        >>> shake_geometry_ok([1, 0, 0], [0, 0, 1], math.radians(173), cfg)
         True
-        >>> shake_geometry_ok([1, 0, 0], [0, 0, 1], math.pi, cfg, amplitude_deg=21.)
+        >>> shake_geometry_ok([1, 0, 0], [0, 0, 1], math.radians(173), cfg, amplitude_deg=15.)
         False
     """
-    a = math.radians(amplitude_deg)
     rest = lean_after(axis, object_axis, delta)
-    swing = min(lean_after(axis, object_axis, delta + a), lean_after(axis, object_axis, delta - a))
-    return rest <= cfg.shake_return_deg - margin_deg and swing >= cfg.shake_out_deg + margin_deg
+    swing = lean_after(axis, object_axis, swing_angle(delta, amplitude_deg))
+    return rest <= cfg.shake_return_deg - margin_deg + 1e-6 and swing >= cfg.shake_out_deg + margin_deg
 
 
 def _over_bowl(task, end, bowl):
@@ -105,25 +106,23 @@ def _over_bowl(task, end, bowl):
 
 
 def _plan_shakes(planner, task, q, wrist_index, axis, pivot, obj, bowl, amplitude_deg):
-    """The first upside-down turn whose rest pose and both swings stay over the bowl and plan as
-    wrist-only lines: (goal, {leg name: path}) or None. Legs: in (q -> rest), out+/back+, out-/back-."""
+    """The first near-upside-down turn whose rest pose and swing stay over the bowl and plan as
+    wrist-only lines: (rest, {leg name: path}) or None. Legs: in (q -> rest), out (rest -> swing), back."""
     object_axis = obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body)
-    a = math.radians(amplitude_deg)
+    margin = SHAKE_LEAN_MARGIN_EXECUTED_DEG
     line = lambda goal, start: planner.planner.plan_qpos_line(
         goal, start, time_step=task.control_timestep, ref_yaw=float(start[2]), qpos_step=0.02)
-    for delta in inversion_angles(axis, object_axis):
-        if not shake_geometry_ok(axis, object_axis, delta, task.cfg, amplitude_deg,
-                                 margin_deg=SHAKE_LEAN_MARGIN_EXECUTED_DEG):
+    for delta in rest_angles(axis, object_axis, task.cfg.shake_return_deg - margin):
+        if not shake_geometry_ok(axis, object_axis, delta, task.cfg, amplitude_deg, margin_deg=margin):
             continue
-        ends = [pivot + rotation(axis, d) @ (obj[:3, 3] - pivot) for d in (delta, delta + a, delta - a)]
+        swing = swing_angle(delta, amplitude_deg)
+        ends = [pivot + rotation(axis, d) @ (obj[:3, 3] - pivot) for d in (delta, swing)]
         if not all(_over_bowl(task, end, bowl) for end in ends):
             continue
         rest = q.copy(); rest[wrist_index] += delta
-        plus = rest.copy(); plus[wrist_index] += a
-        minus = rest.copy(); minus[wrist_index] -= a
+        out = q.copy(); out[wrist_index] += swing
         try:
-            legs = {"in": line(rest, q), "out+": line(plus, rest), "back+": line(rest, plus),
-                    "out-": line(minus, rest), "back-": line(rest, minus)}
+            legs = {"in": line(rest, q), "out": line(out, rest), "back": line(rest, out)}
         except RuntimeError:
             continue
         if all(leg.get('status') == 'Success' for leg in legs.values()):
@@ -132,8 +131,8 @@ def _plan_shakes(planner, task, q, wrist_index, axis, pivot, obj, bowl, amplitud
 
 
 def pour_and_shake(env, planner, task, target, shakes, amplitude_deg=SHAKE_AMPLITUDE_DEG):
-    """Turn the held condiment upside down over the bowl with the wrist alone, shake it `shakes`
-    times (+, back, -, back, ...), and hold it upside down until the task's hold succeeds.
+    """Turn the held condiment just short of upside down over the bowl with the wrist alone, shake it
+    `shakes` times (back toward upright and again), and hold it there until the task's hold succeeds.
 
     Every leg is planned before the first one moves; all other actuator targets stay fixed.
     """
@@ -165,19 +164,18 @@ def pour_and_shake(env, planner, task, target, shakes, amplitude_deg=SHAKE_AMPLI
     stopped = lambda r: (isinstance(r, (int, np.integer)) and r == -1) or common.stopped_by_horizon(planner)
     try:
         log('pour', motion='wrist_roll_only', target_degrees=round(rest_tilt, 2), shakes=int(shakes),
-            amplitude_deg=float(amplitude_deg), wrist_start=float(q[wrist_index]),
+            amplitude_deg=float(amplitude_deg), sides=1, wrist_start=float(q[wrist_index]),
             wrist_goal=float(rest[wrist_index]))
         result = planner.follow_forward_path_w_refinement(legs["in"], refine=True)
         if stopped(result):
             return result
         for k in range(int(shakes)):
-            side = "+" if k % 2 == 0 else "-"
-            for leg in ("out" + side, "back" + side):
+            for leg in ("out", "back"):
                 result = planner.follow_forward_path_w_refinement(legs[leg], refine=True)
                 if stopped(result):
                     return result
             info = result[-1]
-            log('shake', index=k + 1, side=side, shake_count=int(common._np(info['shake_count']).item()))
+            log('shake', index=k + 1, shake_count=int(common._np(info['shake_count']).item()))
             if not bool(np.asarray(common._np(info['grasp_target'])).any()):
                 return result
         # Keep the final wrist target too; idle must not chase measured joint lag.

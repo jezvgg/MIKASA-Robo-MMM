@@ -7,8 +7,8 @@ import sapien
 
 from planners.oracle.upright_payload import kinematics, upright_path, elbow_only
 from planners.oracle.path_clearance import path_clear
-from planners.oracle.wrist_pour import (SHAKE_AMPLITUDE_DEG, inversion_angles, rotation,
-                                        shake_geometry_ok, tilt_angles)
+from planners.oracle.wrist_pour import (SHAKE_AMPLITUDE_DEG, SHAKE_LEAN_MARGIN_DEG, rest_angles, rotation,
+                                        shake_geometry_ok, swing_angle, tilt_angles)
 from robots.fetch.utils import unwrap_toward
 
 
@@ -18,7 +18,7 @@ def held_transform(task, target):
 
 
 def shaking(task):
-    """Is this the shaking task (an upside-down pour and +-30 deg shakes, 2026-10-27)?"""
+    """Is this the shaking task (an upside-down pour and 30 deg shakes, 2026-10-27)?"""
     return hasattr(task.cfg, 'shake_out_deg')
 
 
@@ -26,8 +26,8 @@ def pour_targets(planner, task, q, hand_object):
     """Cheap endpoint geometry and joint-budget checks; no path or IK calls.
 
     Yields (goal, reserve): the one-tip pour's 165 deg goal and its reserve, or for the shaking task
-    the upside-down goal and, as rows of `reserve`, both shake swings, so the roll window and the
-    joint limits are checked for the whole pour before the robot commits to the transfer."""
+    the near-upside-down goal and, as the rows of `reserve`, it and the shake swing, so the roll window
+    and the joint limits are checked for the whole pour before the robot commits to the transfer."""
     p = planner.planner
     fk = kinematics(planner, task)
     wrist = fk.matrix(q, 'wrist_roll_link')
@@ -46,18 +46,18 @@ def pour_targets(planner, task, q, hand_object):
             reasons.append(f"{key}{'+' if delta > 0 else '-'}")
     object_axis = obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body)
     if shaking(task):
-        amplitude = math.radians(SHAKE_AMPLITUDE_DEG)
-        for delta in inversion_angles(axis, object_axis):
+        for delta in rest_angles(axis, object_axis, task.cfg.shake_return_deg - SHAKE_LEAN_MARGIN_DEG):
             if not shake_geometry_ok(axis, object_axis, delta, task.cfg):
                 note('shake_lean', delta); continue
-            ends = [pivot + rotation(axis, d) @ (obj[:3, 3] - pivot) for d in (delta, delta + amplitude, delta - amplitude)]
+            swing = swing_angle(delta, SHAKE_AMPLITUDE_DEG)
+            ends = [pivot + rotation(axis, d) @ (obj[:3, 3] - pivot) for d in (delta, swing)]
             if any(np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius for end in ends):
                 note('miss_xy', delta); continue
             if not all(task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve for end in ends):
                 note('miss_height', delta); continue
             goal = q.copy(); goal[index] += delta
-            swings = np.vstack([goal, goal]); swings[0, index] += amplitude; swings[1, index] -= amplitude
-            reserve = np.vstack([goal + 0., swings]); reserve[0, index] += np.sign(delta) * wrist_reserve
+            out = q.copy(); out[index] += swing
+            reserve = np.vstack([goal + 0., out]); reserve[0, index] += np.sign(delta) * wrist_reserve
             if not p.accepts(np.vstack([q, goal, reserve])):
                 note('roll_window', delta); continue
             yield goal, reserve
@@ -94,7 +94,7 @@ def preview_pour(planner, task, q, hand_object):
 
 
 def _swings_clear(planner, task, rest, swings):
-    """Both shake swings from the upside-down rest plan as clear wrist-only lines."""
+    """The shake swings from the near-upside-down rest plan as clear wrist-only lines."""
     p = planner.planner
     for swing in swings:
         try:

@@ -9,8 +9,8 @@ import pytest
 import sapien
 import torch
 
-from planners.oracle.wrist_pour import (SHAKE_AMPLITUDE_DEG, inversion_angles, lean_after, pour_and_shake,
-                                        shake_geometry_ok)
+from planners.oracle.wrist_pour import (SHAKE_AMPLITUDE_DEG, SHAKE_LEAN_MARGIN_DEG, SHAKE_LEAN_MARGIN_EXECUTED_DEG,
+                                        lean_after, pour_and_shake, rest_angles, shake_geometry_ok, swing_angle)
 from utils.mikasa.shake_counter import step_shakes
 
 #: The scene tests read poses only; any renderer will do ("none" crashes SAPIEN 3.0.3's URDF loader on ds_fetch).
@@ -47,26 +47,35 @@ def test_nothing_counts_off_the_bowl():
     assert run_counter([180, 5, 30, 2, 30, 2], held=False) == (0, False)
 
 
-def test_horizontal_wrist_inverts_at_180_and_swings_symmetrically():
-    deltas = inversion_angles([1, 0, 0], [0, 0, 1])
-    assert [round(math.degrees(d)) for d in deltas] == [180, -180]
-    a = math.radians(SHAKE_AMPLITUDE_DEG)
-    for d in deltas:
-        assert lean_after([1, 0, 0], [0, 0, 1], d) == pytest.approx(0, abs=1e-6)
-        assert lean_after([1, 0, 0], [0, 0, 1], d + a) == pytest.approx(30)
-        assert lean_after([1, 0, 0], [0, 0, 1], d - a) == pytest.approx(30)
+def test_horizontal_wrist_rests_short_of_upside_down_and_swings_back_toward_upright():
+    rest = 10. - SHAKE_LEAN_MARGIN_DEG
+    deltas = rest_angles([1, 0, 0], [0, 0, 1], rest)
+    assert [round(math.degrees(d)) for d in deltas[:2]] == [173, -173]
+    for d in deltas[:2]:
+        swing = swing_angle(d, SHAKE_AMPLITUDE_DEG)
+        assert abs(swing) < abs(d)                                  # toward the start: D2 spends no more
+        assert lean_after([1, 0, 0], [0, 0, 1], d) == pytest.approx(rest)
+        assert lean_after([1, 0, 0], [0, 0, 1], swing) == pytest.approx(rest + SHAKE_AMPLITUDE_DEG)
         assert shake_geometry_ok([1, 0, 0], [0, 0, 1], d, CFG)
 
 
-@pytest.mark.parametrize("incline_deg,ok", [(3., True), (6., False), (12., False)])
-def test_an_inclined_wrist_axis_rests_twice_its_incline_off_upside_down(incline_deg, ok):
+def test_the_whole_roll_fits_checklist_d2():
+    """D2 (`roll_paths.RollPathPlanner.accepts`): span <= pi - 0.05 rad, 177.1 deg."""
+    for margin in (SHAKE_LEAN_MARGIN_DEG, SHAKE_LEAN_MARGIN_EXECUTED_DEG):
+        d = rest_angles([1, 0, 0], [0, 0, 1], 10. - margin)[0]
+        assert math.degrees(abs(d)) <= math.degrees(math.pi - 0.05) - 3.
+
+
+@pytest.mark.parametrize("incline_deg,ok", [(3., True), (4., False), (12., False)])
+def test_an_inclined_wrist_axis_cannot_come_within_twice_its_incline_of_upside_down(incline_deg, ok):
     """The upright shaker's axis sweeps a cone about the wrist axis; with that axis `i` below
-    horizontal the cone passes 2i from straight down, and the rest band is 10 - 3 deg."""
+    horizontal the cone passes 2i from straight down, and the rest leans 10 - 3 deg."""
     tilt = math.radians(incline_deg)
     axis = [math.cos(tilt), 0, -math.sin(tilt)]
-    best = inversion_angles(axis, [0, 0, 1])[0]
-    assert lean_after(axis, [0, 0, 1], best) == pytest.approx(2 * incline_deg, abs=1e-6)
-    assert shake_geometry_ok(axis, [0, 0, 1], best, CFG) is ok
+    deltas = rest_angles(axis, [0, 0, 1], 10. - SHAKE_LEAN_MARGIN_DEG)
+    assert bool(deltas) is ok
+    if ok:
+        assert shake_geometry_ok(axis, [0, 0, 1], deltas[0], CFG)
 
 
 def stub(line_status="Success", grasped=True, shake_count=lambda wrist: 0):
@@ -90,7 +99,7 @@ def stub(line_status="Success", grasped=True, shake_count=lambda wrist: 0):
 
     def line(goal, current, **kwargs):
         np.testing.assert_array_equal(np.delete(goal, 12), np.delete(current, 12))
-        calls.append(('plan', round(math.degrees(goal[12] - current[12]))))
+        calls.append(('plan', math.degrees(goal[12] - current[12])))
         return {'status': line_status, 'goal': goal[12]}
 
     def info():
@@ -101,7 +110,7 @@ def stub(line_status="Success", grasped=True, shake_count=lambda wrist: 0):
                               fixed_action_targets={9: .42}, truncated=False)
 
     def follow(path, *, refine):
-        calls.append(('move', round(math.degrees(path['goal']))))
+        calls.append(('move', math.degrees(path['goal'])))
         assert planner.fixed_action_targets[7] == -1. and 6 not in planner.fixed_action_targets
         counts["n"] = shake_count(path['goal'])
         return (None, 0., False, False, info())
@@ -111,12 +120,14 @@ def stub(line_status="Success", grasped=True, shake_count=lambda wrist: 0):
     return planner, task, target, calls
 
 
-def test_every_leg_is_planned_before_the_first_moves_and_sides_alternate():
+def test_every_leg_is_planned_before_the_first_moves_and_each_shake_swings_back_toward_upright():
     p, task, target, calls = stub()
     pour_and_shake(SimpleNamespace(), p, task, target, shakes=3)
     planned = [c for c in calls if c[0] == 'plan']
-    assert len(planned) == 5 and calls[:5] == planned                 # in, out+, back+, out-, back-
-    assert [c[1] for c in calls if c[0] == 'move'] == [180, 210, 180, 150, 180, 210, 180]
+    assert len(planned) == 3 and calls[:3] == planned                 # in, out, back
+    rest = 180. - (10. - SHAKE_LEAN_MARGIN_EXECUTED_DEG)
+    moves = [c[1] for c in calls if c[0] == 'move']
+    assert moves == pytest.approx([rest, rest - 30, rest, rest - 30, rest, rest - 30, rest])
     assert p.fixed_action_targets == {9: .42}
 
 

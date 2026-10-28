@@ -9,9 +9,9 @@ clear of the neighbouring condiment, and fold to the compact upright carry pose 
 Track the condiment before the grasp and the bowl afterwards.
 
 Drive to the bowl with the same compact pose, move to an upright hover, then
-rotate only wrist_roll on collision-checked joint lines: upside down, then one +-30 deg
-swing and back per shake (`wrist_pour.pour_and_shake`, the owner's task since
-2026-10-27). The other arm and torso commands stay fixed throughout the pour and hold. All paths obey the recorded roll
+rotate only wrist_roll on collision-checked joint lines: to just short of upside down, then one
+30 deg swing back toward upright and return per shake (`wrist_pour.pour_and_shake`, the owner's task
+since 2026-10-27; one-sided because of D2). The other arm and torso commands stay fixed throughout the pour and hold. All paths obey the recorded roll
 history. Execution noise is limited to transfer motions; contacts and pouring
 are clean. Poll the environment's hold counter until success or the horizon.
 
