@@ -95,7 +95,7 @@ class CollectionMotionPlanner(FetchMotionPlanningSapienSolver):
         contact context, and the whole sequence must pass the roll window.
         """
         from contextlib import nullcontext
-        from planners.oracle.straight_paths import straight_plan
+        from planners.oracle.paths import straight_plan
         import mplib
 
         # The caller synchronizes before entering any contact-obstacle context.
@@ -199,7 +199,7 @@ class CollectionMotionPlanner(FetchMotionPlanningSapienSolver):
 
     def prefer_low_roll_ik(self):
         """Prefer low-roll IK goals and reject winding paths before execution."""
-        from planners.oracle.roll_paths import RollPathPlanner
+        from planners.oracle.paths import RollPathPlanner
 
         names = ("upperarm_roll_joint", "forearm_roll_joint", "wrist_roll_joint")
         joints = self.env_agent.robot.active_joints_map

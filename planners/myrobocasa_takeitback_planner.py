@@ -13,7 +13,7 @@ from mani_skill.agents.robots import Fetch
 from my_scenes import MyRoboCasaSceneTakeItBack
 from mani_skill.utils.wrappers import RecordEpisode
 from robots.fetch.extand import FetchMotionPlanningSapienSolver
-from planners.takeitback_common import _grasp_pose, _tcp_at, _tcp_to
+from planners.oracle.oracle_takeitback import _grasp_pose, _tcp_at, _tcp_to
 from utils.logging_utils import PlannerLogger, StreamingVideoRecorder, capture_stdout
 from utils.planners_utils import (
     _rotate_base_to,

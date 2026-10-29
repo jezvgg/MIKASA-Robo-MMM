@@ -147,6 +147,7 @@ import sapien
 from mani_skill.utils.wrappers import RecordEpisode
 
 from planners.oracle import oracle_common as common
+from planners.oracle import oracle_water_plants as water_oracle
 from utils.mikasa.seeding import seed_everything
 
 # The mplib-dependent imports stay deferred inside oracle_common's factories, so
@@ -374,7 +375,7 @@ STATION_NOGO = (0.4132, 0.4156)
 # grip really does slip, and the tilt that counts is still read back from
 # `info["tilt_rad"]` after the move, never inferred from the plan.
 #: Interpolated waypoints each long arm move is broken into. 1 restores the old
-#: single-plan behaviour. See `oracle_common.move_via` for why: a long plan lets
+#: single-plan behaviour. See `oracle_water_plants.move_via` for why: a long plan lets
 #: RRT wander (2557 deg travelled against 858 deg of net change, and a hover that
 #: ends 1.3 deg from where it started after 269 deg of travel), and short hops let
 #: the straight-line screw plan carry more of the path.
@@ -1276,7 +1277,7 @@ def drive_to(env, planner, task, dock_xyyaw, label: str, *, carry: bool = True,
     retry reproducing `d_dock = 1.511, dyaw = 42.9`. That turned out to be the free-arm
     base plan and not the tuck: `BASE_PLAN_MASK` handed a base translation all fifteen
     joints. With `freeze_arm=True` the wrist is not the plan's to move, and the tuck is
-    back on every carrying drive. `oracle_common.capture_refusal` still reads the honest
+    back on every carrying drive. `oracle_water_plants.capture_refusal` still reads the honest
     K51 `rotation sweep hits …` text out of a refusal and chains it into rung 2.)
 
     **On the ladder.** Each rung is a *different* attempt, not another draw of the same
@@ -1367,7 +1368,7 @@ def drive_to(env, planner, task, dock_xyyaw, label: str, *, carry: bool = True,
             # which loses the cup out of the fingers ("carry pose unreachable:
             # object slipped out on the way in", seed 0). Long moves benefit from
             # waypoints; this one does not.
-            res = common.carry_pose(env, planner, task, task.cup, who=WHO,
+            res = water_oracle.carry_pose(env, planner, task, task.cup, who=WHO,
                                     after=refusal, yaws_deg=yaws, upright=True,
                                     ahead=ahead, max_knots=HELD_MAX_KNOTS,
                                     knot_draws=HELD_KNOT_DRAWS)
@@ -1397,7 +1398,7 @@ def drive_to(env, planner, task, dock_xyyaw, label: str, *, carry: bool = True,
                      f"bucket, inside the measured no-go band {STATION_NOGO}", rung=rung)
 
         res = -1
-        with common.capture_refusal() as cap:
+        with water_oracle.capture_refusal() as cap:
             for i, leg in enumerate(legs):
                 # freeze_arm=True (extand.py, BASE_ONLY_PLAN_MASK): a base translation
                 # is spanned by root_x and root_y alone, and with the arm free every
@@ -1514,7 +1515,7 @@ def grasp_the_cup(env, planner, task):
                 _np(task.agent.base_link.pose.p).reshape(-1, 3)[0][:2] - cup_p[:2])), 3),
             grasp=[round(float(v), 3) for v in grasp.p])
 
-        res = common.arm_move(env, planner, reach, who=WHO,
+        res = water_oracle.arm_move(env, planner, reach, who=WHO,
                               stage=f"reach the cup (depth {depth})", tries=3,
                               legs=REACH_LEGS, disable_lift_joint=REACH_FREEZE_TORSO)
         if res != -1 and common.stopped_by_horizon(planner):
@@ -1530,7 +1531,7 @@ def grasp_the_cup(env, planner, task):
         # also refused at this pose. Frozen, the same descent is the arm's to make.
         planned = False
         for frozen in (True, False):
-            res = common.arm_move(env, planner, grasp, who=WHO,
+            res = water_oracle.arm_move(env, planner, grasp, who=WHO,
                                   stage=f"grasp pose (depth {depth}, torso "
                                         f"{'frozen' if frozen else 'free'})",
                                   disable_lift_joint=frozen, tries=3)
@@ -1618,7 +1619,7 @@ def refill(env, planner, task, info, t_tcp_cup, trip: int):
             cup_target=[round(float(v), 3) for v in hover_cup.p],
             bucket_top=round(bucket_top, 3),
             d_base=round(float(np.linalg.norm(base_p[:2] - aim)), 3))
-        res = common.arm_move(env, planner, target_tcp(hover_cup, t_tcp_cup), who=WHO,
+        res = water_oracle.arm_move(env, planner, target_tcp(hover_cup, t_tcp_cup), who=WHO,
                               max_knots=HELD_MAX_KNOTS, knot_draws=HELD_KNOT_DRAWS,
                               stage=f"hover over the bucket ({posture})",
                               legs=WAYPOINT_LEGS)
@@ -1653,7 +1654,7 @@ def refill(env, planner, task, info, t_tcp_cup, trip: int):
             # Torso frozen for the descent, then free: a vertical TCP move is what
             # plan_screw spends the torso on, and the torso is at its floor here.
             for frozen in (True, False):
-                res = common.arm_move(env, planner, target_tcp(dip_cup, t_tcp_cup), who=WHO,
+                res = water_oracle.arm_move(env, planner, target_tcp(dip_cup, t_tcp_cup), who=WHO,
                                       max_knots=HELD_MAX_KNOTS, knot_draws=HELD_KNOT_DRAWS,
                                       stage=f"dip {clearance} (torso {'frozen' if frozen else 'free'})",
                                       disable_lift_joint=frozen, legs=WAYPOINT_LEGS)
@@ -1892,7 +1893,7 @@ def water(env, planner, task, s: int, t_tcp_cup, trip: int):
         say(env, "reach the pour position (level)", site=s, trip=trip,
             cup_target=[round(float(v), 3) for v in target_p],
             clearance=round(float(clearance), 3))
-        res = common.arm_move(
+        res = water_oracle.arm_move(
             env, planner, target_tcp(sapien.Pose(p=target_p, q=q_upright), t_tcp_cup),
             who=WHO, stage=f"pour reach ({clearance})", tries=1,
             max_knots=POUR_MAX_KNOTS, knot_draws=POUR_KNOT_DRAWS)
@@ -1916,7 +1917,7 @@ def water(env, planner, task, s: int, t_tcp_cup, trip: int):
                         pot_top=round(pot_top, 3), clearance=round(float(clearance), 3),
                         tilt_axis=axis_name, commanded_deg=step_to,
                         d_base=round(float(np.linalg.norm(base_p[:2] - aim)), 3))
-                    bite = common.arm_move(
+                    bite = water_oracle.arm_move(
                         env, planner, target_tcp(sapien.Pose(p=target_p, q=q), t_tcp_cup),
                         who=WHO, stage=f"pour bite ({clearance}, {step_to}, {axis_name})",
                         tries=1, disable_lift_joint=True,
@@ -1961,7 +1962,7 @@ def water(env, planner, task, s: int, t_tcp_cup, trip: int):
                         pot_top=round(pot_top, 3), clearance=round(float(clearance), 3),
                         tilt_axis=axis_name, commanded_deg=command,
                         d_base=round(float(np.linalg.norm(base_p[:2] - aim)), 3))
-                    res = common.arm_move(
+                    res = water_oracle.arm_move(
                         env, planner, target_tcp(sapien.Pose(p=target_p, q=q), t_tcp_cup),
                         who=WHO, stage=f"pour ({clearance}, {command}, {axis_name})",
                         tries=1,
@@ -2179,7 +2180,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
                            + np.array([0.0, 0.0, LIFT_AFTER_GRASP]),
                            q=_np(task.agent.tcp.pose.q)[0].astype(np.float64))
         say(env, "lift", height=LIFT_AFTER_GRASP)
-        res = common.arm_move(env, planner, lift, who=WHO, stage="lift", disable_lift_joint=True,
+        res = water_oracle.arm_move(env, planner, lift, who=WHO, stage="lift", disable_lift_joint=True,
                           max_knots=HELD_MAX_KNOTS, knot_draws=HELD_KNOT_DRAWS)
         if res != -1 and common.stopped_by_horizon(planner):
             return res

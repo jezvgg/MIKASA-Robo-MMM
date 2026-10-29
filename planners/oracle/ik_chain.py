@@ -47,9 +47,8 @@ ARM_JOINTS = ("shoulder_pan_joint", "shoulder_lift_joint", "upperarm_roll_joint"
 
 
 def enabled() -> bool:
-    """Off by default; ``MIKASA_IK_CHAIN=1`` turns it on. The owner's call 2026-10-17, after
-    240 fresh SeasonDish (seed, stream) pairs read 201 with the chain against 194 without
-    (planners/oracle/CHAIN_AND_STANCE.md)."""
+    """Off by default; ``MIKASA_IK_CHAIN=1`` turns it on. In 240 fresh SeasonDish
+    (seed, stream) pairs, it succeeded on 201 versus 194 without the chain."""
     return os.environ.get("MIKASA_IK_CHAIN", "0") == "1"
 
 
@@ -214,7 +213,7 @@ def mplib_solver(planner, mask, *, accept=None):
     """A `solve` for `chain_back` on the planner's own IK.
 
     `planner.planner.IK` is mplib's (or the opt-in backend's) collision-checked IK; each
-    solution is unwrapped toward the seed and, like `season_dish_candidates`, kept in its
+    solution is unwrapped toward the seed and, like the SeasonDish candidate search, kept in its
     raw representative when the unwrapped one leaves the episode's roll window.
     """
     import mplib

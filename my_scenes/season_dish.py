@@ -112,6 +112,10 @@ INSTRUCTIONS = (
     "condiment untouched.",
 )
 
+#: `instruction_version` -> the text. This checkout records the text
+#: `seasondish-ag-1000ep` was recorded with, so only version 1 exists.
+INSTRUCTION_VERSIONS = {1: INSTRUCTIONS}
+
 # Where the cue marker goes while it must not be seen. The constant, and the
 # teleport-in-evaluate idiom, are MIKASA-Robo's: memory_envs/chain_rule_transfer.py:47
 # names it HIDDEN_Z, remember_color.py:203 does the lift.
@@ -419,7 +423,11 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
     shaker: Actor
     condiment_bottle: Actor
 
-    def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0, **kwargs):
+    def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0,
+                 instruction_version: int = 1, **kwargs):
+        if instruction_version not in INSTRUCTION_VERSIONS:
+            raise ValueError(f"instruction_version must be one of {sorted(INSTRUCTION_VERSIONS)}")
+        self.instruction_version = int(instruction_version)
         # scene_idx defaults to 0 (K43, 2026-08-18): the pinned kitchen 102 (layout
         # one_wall_small, style industrial) — the same default as the burner and the
         # station tasks, so the three memory tasks are one-kitchen benchmarks by
@@ -835,9 +843,9 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
                         right_j, dtype=self._station_right.dtype, device=self._station_right.device)
                     yaw = float(self._dock_yaw_np[e])
                     # A dock is the counter's standoff **slid along the counter** to the
-                    # object — `dock_p + along * offset`, as `_load_scene` builds it and
-                    # as `oracle_common.dock_for_target` does. Using the objects' own
-                    # midpoint instead puts the base on the counter top: measured, the
+                    # object — `dock_p + along * offset`, as `_load_scene` builds it.
+                    # Using the objects' own midpoint instead puts the base on the
+                    # counter top: measured, the
                     # robot spawned at y = -0.50 (on the surface) rather than -1.25 (in
                     # front of it), and every episode died at the grasp.
                     dp = self._dock_p_np[e][:2]
@@ -1239,8 +1247,8 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
     # -------------------------------------------------------------------- obs --
 
     def get_language_instruction(self, **kwargs):
-        """`INSTRUCTIONS[0]` for every env: the text is the chore, the answer is the cue."""
-        return [INSTRUCTIONS[0]] * self.num_envs
+        """The recorded text for every env: the chore, the answer is the cue."""
+        return [INSTRUCTION_VERSIONS[self.instruction_version][0]] * self.num_envs
 
     def _get_obs_extra(self, info: dict) -> dict:
         """The most dangerous method in the file. Three ways it can leak the answer.

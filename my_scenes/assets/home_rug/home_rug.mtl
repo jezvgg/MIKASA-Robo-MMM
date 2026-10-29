@@ -1,0 +1,8 @@
+newmtl home_rug
+Ka 1 1 1
+Kd 1 1 1
+Ks 0 0 0
+Ns 1
+d 1
+illum 1
+map_Kd home_rug.png

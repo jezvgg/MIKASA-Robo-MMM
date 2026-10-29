@@ -1,8 +1,7 @@
-"""Action-only oracle for SeasonDish and its blind control.
+"""Action-only oracle for the profile-26 SeasonDish task.
 
 Read the fixed fridge picture, then travel to the condiment station with the arm
 in the canonical rest pose. The scene hides the picture at control step 100.
-The blind control replaces the remembered answer with a seeded uniform choice.
 Grasp with an upright wrist camera and a consistent elbow/wrist branch, lift
 clear of the neighbouring condiment, and fold to the compact upright carry pose when the bowl needs a drive.
 Track the condiment before the grasp and the bowl afterwards.
@@ -19,41 +18,731 @@ Gym step tuple. Physical task success comes from the environment's predicates.
 
 from __future__ import annotations
 
-import argparse
+from collections import Counter
+from contextlib import contextmanager
+from functools import wraps
 import math
 import os
-import re
-import sys
+import signal
+import time
+import xml.etree.ElementTree as ET
 
-import gymnasium as gym
+import mplib
 import numpy as np
 import sapien
-import my_scenes  # noqa: F401  (registers benchmark environments)
-
-from mani_skill.utils.wrappers import RecordEpisode
+from transforms3d.euler import euler2mat
+from transforms3d.quaternions import mat2quat
 
 from planners.oracle import oracle_common as common
-from planners.oracle import stance_scan
-from planners.season_dish_stance import choose_station_stance
+from planners.oracle import oracle_season_dish as season
+from planners.oracle.paths import (
+    dense_samples,
+    execute_straight,
+    path_clear,
+    straight_plan,
+)
+from planners.oracle.oracle_season_dish import (
+    ArmKinematics,
+    PlanningBudgetExceeded,
+    SearchBudget,
+    PayloadTiltError,
+    elbow_only,
+    enforce_upright,
+    install,
+    kinematics,
+    measured,
+    preview_roll_history,
+    pour_with_wrist,
+    rotation,
+    tilt_angles,
+    upright_path,
+    upright_wrist_candidates,
+)
+from robots.fetch.utils import attach_object, convert_object_name, unwrap_toward
+from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
-from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 
-# The mplib-dependent imports live inside oracle_common's factories, so this module
-# imports on a Mac and tests/test_season_dish_oracle.py runs the *real* solve()
-# against tools/stub_planner.py (K38).
+install_search_budget = install
 
-from planners.oracle.search_budget import install as install_search_budget, PlanningBudgetExceeded
-from planners.season_dish_paths import CARRY_TARGETS, carry_targets, carry_goal, carry_path, grasp_with_continuation, initial_support_contacts
-from planners.oracle.path_clearance import path_clear
-from planners.oracle.straight_paths import straight_plan, execute_straight
-from planners.oracle.upright_payload import upright_path, elbow_only, enforce_upright, PayloadTiltError
-from planners.season_dish_transfer import plan_loaded_hover, held_transform, plan_bowl_drive, hover_summary
+# SeasonDish transfer and search-budget primitives
+
+# SeasonDish cumulative planning budget. Physics execution is outside this search clock.
+
+
+
+
+# Fixed SeasonDish motion geometry and upright-payload support.
+
+
+
+
+
+
+
+
+
+
+
+
+def held_transform(task, target):
+    return (task.agent.robot.links_map['gripper_link'].pose[0].sp.inv()
+            * target.pose[0].sp).to_transformation_matrix().astype(float)
+
+
+def pour_targets(planner, task, q, hand_object):
+    """Cheap endpoint geometry and joint-budget checks; no path or IK calls."""
+    p = planner.planner
+    fk = kinematics(planner, task)
+    wrist = fk.matrix(q, 'wrist_roll_link')
+    obj = fk.matrix(q) @ hand_object
+    axis, pivot = wrist[:3, 0], wrist[:3, 3]
+    bowl = task.bowl.pose[0].sp.p
+    index = fk.indices['wrist_roll_joint']
+    # Preview needs room for the measured model-to-physics deviation. These
+    # reserves tighten candidate selection; execution and checker stay at 165/155.
+    parameters=getattr(task,'motion_parameters',{})
+    clearance_reserve=float(parameters.get('pour_preview_clearance_reserve_m',0.))
+    wrist_reserve=float(parameters.get('pour_preview_wrist_reserve_rad',0.))
+    reasons = getattr(planner, '_pour_reasons', None)
+    def note(key, delta):
+        if reasons is not None:
+            reasons.append(f"{key}{'+' if delta > 0 else '-'}")
+    for delta in tilt_angles(axis, obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body), 165.):
+        end = pivot + rotation(axis, delta) @ (obj[:3, 3] - pivot)
+        if np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius:
+            note('miss_xy', delta); continue
+        if not task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve:
+            note('miss_height', delta); continue
+        goal = q.copy(); goal[index] += delta
+        reserve=goal.copy();reserve[index]+=np.sign(delta)*wrist_reserve
+        if not p.accepts(np.vstack([q,goal,reserve])):
+            note('roll_window', delta); continue
+        yield goal, reserve
+
+
+@measured
+def preview_pour(planner, task, q, hand_object):
+    p = planner.planner
+    for goal, reserve in pour_targets(planner, task, q, hand_object):
+        try:
+            path = p.plan_qpos_line(goal, q, time_step=task.control_timestep,
+                                    ref_yaw=float(q[2]), qpos_step=.02)
+        except RuntimeError:
+            continue
+        if path.get('status') == 'Success' and path_clear(planner, q, path['position']):
+            path['preview_reserve_qpos'] = reserve
+            return path
+    return None
+
+
+def hover_goals(p, current, tcp, *, n_init=32, preferred=None, mode='dual'):
+    """At most two distinct endpoints and 32 total initial guesses per geometry.
+
+    A dual request reserves one endpoint for each initial-state family. It does
+    not add another endpoint/path budget or retry after a failed continuation.
+    """
+    if mode not in ('current', 'preferred', 'dual'):
+        raise ValueError(f'Unknown hover IK start mode: {mode}')
+    n_init = min(32, max(1, int(n_init)))
+    starts = [('current', current.copy(), n_init)]
+    moves = list(p.move_group_joint_indices)
+    if preferred is not None and mode != 'current':
+        predicted = current.copy()
+        predicted[moves] = preferred['approach']['position'][-1]
+        predicted[:3] = current[:3]
+        starts = [('preferred', predicted, n_init)]
+        if mode == 'dual' and n_init >= 2:
+            first = n_init // 2
+            starts = [('preferred', predicted, first), ('current', current.copy(), n_init-first)]
+    groups, records = [], []
+    for label, initial, budget in starts:
+        status, found = p.IK(p._transform_goal_to_wrt_base(mplib.Pose(tcp.p, tcp.q)),
+                            p.fold_qpos(initial), [True]*3 + [False]*12,
+                            n_init_qpos=budget)
+        records.append(dict(initial=label, initial_guesses=budget, status=status))
+        goals = []
+        if status == 'Success':
+            for raw in np.atleast_2d(found):
+                q = unwrap_toward(raw, p.fold_qpos(current), p.joint_limits)
+                q = p.unfold_qpos(q, ref_yaw=float(current[2])); q[:3] = current[:3]
+                if not any(np.linalg.norm(q[3:13]-v[3:13]) < .12 for v in goals):
+                    goals.append(q)
+            goals.sort(key=lambda q: float(np.linalg.norm(q[3:13]-current[3:13])))
+        groups.append(goals)
+    chosen = []
+    # Take one from each family first, then fill unused slots from those same
+    # already returned endpoints. Nearly identical solutions share one slot.
+    for rank in range(max([len(g) for g in groups] or [0])):
+        for group in groups:
+            if rank < len(group) and not any(np.linalg.norm(group[rank][3:13]-v[3:13]) < .12 for v in chosen):
+                chosen.append(group[rank])
+                if len(chosen) == 2:
+                    return chosen, records
+    return chosen, records
+
+
+@measured
+def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferred=None):
+    """Preview only: neither unsuccessful candidates nor lookahead execute steps."""
+    p = planner.planner
+    failures=[];planner._hover_failures=failures
+    fk = kinematics(planner, task)
+    bowl = task.bowl.pose[0].sp.p.astype(float)
+    hand = fk.matrix(current)
+    obj = hand @ hand_object
+    # A generous geometric rejection avoids repeated IK for the opposite counter.
+    # Use the supplied planning state for hypothetical loaded dock previews too.
+    base = np.r_[p.fold_qpos(current)[:2], task.agent.base_link.pose[0].sp.p[2]]
+    if np.linalg.norm(bowl[:2] - base[:2]) > 1.25:
+        failures.append(dict(stage='reach',reason='bowl_beyond_geometric_bound'))
+        return None
+    local_tcp = (task.agent.robot.links_map['gripper_link'].pose[0].sp.inv()
+                 * task.agent.tcp.pose[0].sp).to_transformation_matrix()
+    obj_inverse = np.linalg.inv(hand_object)
+    moves = list(p.move_group_joint_indices)
+    away = bowl - base; away[2] = 0.; away /= max(np.linalg.norm(away), 1e-9)
+    # Compact carry points the fingers back over the base. The hover must
+    # face the bowl, otherwise all eight IK requests repeat an unreachable
+    # backward-facing reach. Rotate around world up; keep the condiment upright.
+    tcp_now = hand @ local_tcp
+    approach_now = tcp_now[:3,2]
+    yaw_anchor = math.atan2(away[1],away[0]) - math.atan2(approach_now[1],approach_now[0])
+    options=[(0.,0.,0.),(.06,0.,0.),(0.,.06,0.),(-.05,0.,0.),
+             (0.,0.,30.),(0.,0.,-30.),(.06,0.,30.),(.06,0.,-30.)]
+    if preferred is not None:
+        chosen=tuple(preferred[k] for k in ('hover_extra','hover_back','hover_spin'))
+        options=[chosen]+[v for v in options if v!=chosen]
+    with elbow_only(planner, task):
+        for extra, back, spin in options:
+            desired = obj.copy()
+            desired[:3, 3] = bowl - back * away + np.array([0., 0., .20 + extra])
+            desired[:3, :3] = rotation([0., 0., 1.], yaw_anchor + math.radians(spin)) @ obj[:3, :3]
+            tcp = sapien.Pose(desired @ obj_inverse @ local_tcp)
+            mode = getattr(task, 'motion_parameters', {}).get('hover_ik_start', 'dual')
+            goals, ik_records = hover_goals(p, current, tcp, n_init=n_init,
+                                           preferred=preferred, mode=mode)
+            failures.extend(dict(stage='ik', extra=extra, back=back, spin=spin, **v)
+                            for v in ik_records if v['status'] != 'Success')
+            for goal in goals[:2]:
+                goal[:3] = current[:3]
+                path = upright_path(planner, task, current, goal, hand_object)
+                if path is None:
+                    failures.append(dict(stage='upright',reasons=getattr(planner,'_upright_failures',[]),
+                                         extra=extra,back=back,spin=spin))
+                    continue
+                reached = current.copy(); reached[moves] = path['position'][-1]
+                planner._pour_reasons = []
+                arc = preview_pour(planner, task, reached, hand_object)
+                if arc is not None and p.accepts(np.vstack([path['position'], arc['position'],
+                                                           arc['preview_reserve_qpos'][moves]]), move_group=True):
+                    return dict(approach=path, pour=arc, hover_extra=extra, hover_back=back, hover_spin=spin, hover_yaw_anchor=math.degrees(yaw_anchor), hover_ik_records=ik_records, hover_goal=goal.tolist())
+                failures.append(dict(stage='wrist_pour',reason='pour:' + ','.join(sorted(set(planner._pour_reasons))) or 'pour_line_refused',
+                                     extra=extra,back=back,spin=spin))
+    return None
+
+
+@measured
+def preview_base_legs(planner, current, destinations, final_yaw):
+    """Sweep the complete held robot through turn/drive/turn legs, model only."""
+    p = planner.planner
+    poses = [p.fold_qpos(current)]
+
+    def turn(yaw):
+        start = poses[-1]
+        delta = (yaw - start[2] + math.pi) % (2 * math.pi) - math.pi
+        for alpha in np.linspace(0., 1., max(2, int(abs(delta) / .02) + 1))[1:]:
+            q = start.copy(); q[2] += alpha * delta; poses.append(q)
+
+    for destination in destinations:
+        xy = np.asarray(destination)[:2]
+        delta = xy - poses[-1][:2]
+        if np.linalg.norm(delta) > 1e-6:
+            turn(math.atan2(delta[1], delta[0]))
+            start = poses[-1]
+            for alpha in np.linspace(0., 1., max(2, int(np.linalg.norm(delta) / .01) + 1))[1:]:
+                q = start.copy(); q[:2] = start[:2] + alpha * delta; poses.append(q)
+    turn(final_yaw)
+    full = np.asarray([p.unfold_qpos(q, ref_yaw=float(current[2])) for q in poses])
+    if not path_clear(planner, current, full[:, p.move_group_joint_indices]):
+        return None
+    return full[-1]
+
+
+@measured
+def plan_bowl_drive(planner, task, current, hand_object, dock, face):
+    """Keep upright fingers clear of the left wall and preview the final pour."""
+    offsets = (0., .15, .25, .35, .45) if float(dock[0]) < 1. else (0.,)
+    failures = []; planner._route_failures = failures
+    for offset in offsets:
+        candidate = np.asarray(dock).copy(); candidate[0] += offset
+        destinations = [candidate]  # Loaded compact carry goes directly to the bowl.
+        arrival = preview_base_legs(planner, current, destinations, math.atan2(face[1], face[0]))
+        if arrival is None:
+            failures.append(dict(offset_x_m=offset, stage='base_sweep',
+                                 collision=getattr(planner, '_last_path_collision', None)))
+            continue
+        hover = plan_loaded_hover(planner, task, arrival, hand_object)
+        if hover is not None:
+            return dict(dock=candidate, offset_x_m=offset, hover=hover)
+        failures.append(dict(offset_x_m=offset, stage='hover', hover=hover_summary(planner)))
+    return None
+
+
+def hover_summary(planner):
+    """`plan_loaded_hover`'s refusals, counted by stage and reason, for the failure log."""
+    out = {}
+    for f in getattr(planner, '_hover_failures', []):
+        reason = f.get('reason') or f.get('status') or ','.join(
+            str(r.get('reason', r)) if isinstance(r, dict) else str(r) for r in f.get('reasons', [])[:2])
+        key = f"{f.get('stage')}:{str(reason)[:60]}"
+        out[key] = out.get(key, 0) + 1
+    return out
+
+# SeasonDish grasp-candidate generation
+
+TEMPLATES = ((.5, 2.1, 1.8, -2.3, .75, .1),
+             (-.6, .9, 1.8, -3.0, 1.05, 2.4))
+NAMES = ('shoulder_lift_joint', 'upperarm_roll_joint', 'elbow_flex_joint',
+         'forearm_roll_joint', 'wrist_flex_joint', 'wrist_roll_joint')
+GEOMETRIES = ((0.,0.,.20,1),(30.,0.,.20,0),(30.,0.,.10,0),
+              (30.,.01,None,0),(0.,0.,.20,0),(0.,0.,None,0),
+              (-30.,0.,.20,0),(0.,0.,None,1))
+def _wrap(a):
+    return float((a + np.pi) % (2 * np.pi) - np.pi)
+
+
+def unrolled(template):
+    """The same hand pose with the forearm rolled by pi and the wrist flexed the other way.
+
+    For forearm_roll / wrist_flex / wrist_roll, (r1, f, r2) and (r1+pi, -f, r2+pi) put the
+    hand in the identical pose; the shoulder and elbow are unchanged.
+    """
+    sl, ua, el, fa, wf, wr = template
+    return (sl, ua, el, _wrap(fa + np.pi), -wf, _wrap(wr + np.pi))
+
+
+def joint_margin(planner, task, q):
+    """Nearest physical or episode roll limit for the arm, in radians."""
+    names = task.agent.controller.controllers['arm'].config.joint_names
+    ix = [int(task.agent.robot.active_joints_map[n].active_index[0]) for n in names]
+    limits = task.agent.robot.get_qlimits()[0].cpu().numpy().copy()
+    for j, lo, hi in zip(planner._roll_indices, planner._roll_low, planner._roll_high):
+        limits[j] = [max(-np.pi+.05, hi-np.pi+.05),
+                     min(np.pi-.05, lo+np.pi-.05)]
+    q = np.asarray(q)
+    return float(np.minimum(q[ix]-limits[ix,0], limits[ix,1]-q[ix]).min())
+
+
+def distinct_goals(goals, indices, threshold=.12):
+    kept = []
+    for q in goals:
+        if all(np.linalg.norm(q[indices]-g[indices]) >= threshold for g in kept):
+            kept.append(q)
+    return kept
+
+
+def journal(planner, record, stage, reason=None, **details):
+    budget=getattr(planner,'search_budget',None)
+    row = dict(record, candidate_stage=stage, reason=reason,
+               planning_seconds=budget.used if budget is not None else None, **details)
+    planner._candidate_journal.append(row)
+    common.say(planner.env, 'season_dish_planner', 'grasp candidate', **row)
+
+
+def candidates(planner, task, grasp, reach, reasons, *, n_init=32):
+    """Run only the profile-26 legacy, unrolled, eight-geometry IK search."""
+    p = planner.planner
+    current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
+    folded = p.fold_qpos(current)
+    indices = [int(task.agent.robot.active_joints_map[n].active_index[0]) for n in NAMES]
+    wrist = int(task.agent.robot.active_joints_map['wrist_flex_joint'].active_index[0])
+    result = []
+    planner._candidate_journal = []
+    for request, (yaw, dz, torso, template) in enumerate(GEOMETRIES):
+        start = time.perf_counter()
+        rot = rotation([0, 0, 1], np.deg2rad(yaw))
+        orientation = mat2quat(rot @ grasp.to_transformation_matrix()[:3, :3])
+        g = sapien.Pose(grasp.p + [0, 0, dz], orientation)
+        reach_pose = sapien.Pose(g.p + rot @ (reach.p - grasp.p), orientation)
+        initial = folded.copy()
+        initial[indices] = unrolled(TEMPLATES[template])
+        if torso is not None:
+            initial[3] = torso
+        mask = [True] * 3 + [torso is not None] + [False] * 11
+        record = dict(request=request, yaw_deg=yaw, lift_offset_m=dz,
+                      requested_torso_m=torso, template=template, grasp_family='unrolled')
+        status, found = p.IK(
+            p._transform_goal_to_wrt_base(mplib.Pose(reach_pose.p, reach_pose.q)),
+            initial, mask, n_init_qpos=min(32, n_init))
+        reasons[f"ik {(yaw, dz, torso, template)} {status}"] += 1
+        record['ik_seconds'] = time.perf_counter() - start
+        goals = []
+        if found is None:
+            reasons[f"empty IK result {(yaw, dz, torso, template)}"] += 1
+            continue
+        try:
+            solutions = np.asarray(found, dtype=np.float64)
+        except (TypeError, ValueError):
+            reasons[f"invalid IK result {(yaw, dz, torso, template)}"] += 1
+            continue
+        if solutions.size == 0:
+            reasons[f"empty IK result {(yaw, dz, torso, template)}"] += 1
+            continue
+        if solutions.ndim == 1:
+            solutions = solutions.reshape(1, -1)
+        if solutions.ndim != 2:
+            reasons[f"invalid IK result shape {(yaw, dz, torso, template)}"] += 1
+            continue
+        for raw in solutions:
+            if raw.shape != initial.shape or not np.isfinite(raw).all():
+                reasons[f"invalid IK solution {(yaw, dz, torso, template)}"] += 1
+                continue
+            q = unwrap_toward(raw, initial, p.joint_limits)
+            if q.shape != initial.shape:
+                reasons[f"invalid unwrapped IK solution {(yaw, dz, torso, template)}"] += 1
+                continue
+            # Unwrapping toward an artificial IK seed can cross the episode's roll
+            # window even though mplib's original representative is valid.
+            if not p.accepts(q):
+                q = np.asarray(raw, dtype=np.float64).copy()
+            if q[wrist] > -.05:
+                continue
+            if not p.accepts(q):
+                reasons[f"joint limit after unwrap {(yaw, dz, torso, template)}"] += 1
+                continue
+            goals.append(q)
+        goals.sort(key=lambda q: float(np.linalg.norm(q[3:13] - initial[3:13])))
+        ranks = {id(q): rank for rank, q in enumerate(goals)}
+        for q in distinct_goals(goals, indices)[:1]:
+            if any(np.linalg.norm(q[3:13] - old[0][3:13]) < .12 for old in result):
+                journal(planner, dict(record, qpos=q.tolist()), 'deduplicate',
+                        'near_identical_endpoint')
+                continue
+            for idx in p._root_cols():
+                q[idx] = current[idx]
+            detail = dict(record, ik_rank_by_template=ranks[id(q)], torso_m=float(q[3]),
+                          joint_margin_rad=joint_margin(planner, task, q),
+                          qpos=q.tolist(), candidate=len(result))
+            journal(planner, detail, 'ik_selected')
+            result.append((q, g, reach_pose, detail))
+    reasons['bounded candidates'] = len(result)
+    return result
+
+grasp_candidates = candidates
+
+# SeasonDish connected grasp, lift, and carry paths
+
+# Fitted once from pa40l/ManiSkill:dair@6168333 carry_pose geometry on the
+# unchanged DSFetch. TCP is 25 cm in front of the base. Wrists are solved from
+# the measured payload transform, not copied from this reference grasp.
+
+
+# The identical carry hand pose with the forearm unrolled (forearm +pi, wrist flex
+# negated, wrist roll -pi); used with grasp_family="unrolled".
+
+
+
+
+
+UNROLLED_CARRY_TARGETS = dict(torso_lift_joint=.20, shoulder_pan_joint=-.6557497327377413,
+    shoulder_lift_joint=-.12904068645626654, upperarm_roll_joint=1.9212388766147683,
+    elbow_flex_joint=1.6507435522454401, forearm_roll_joint=0.3318092594003974,
+    wrist_flex_joint=1.9402379512175012, wrist_roll_joint=-1.2335926578428361)
+
+
+def carry_goal(task, current):
+    goal = current.copy()
+    for name, value in UNROLLED_CARRY_TARGETS.items():
+        goal[int(task.agent.robot.active_joints_map[name].active_index[0])] = value
+    return goal
+
+
+@measured
+def carry_path(planner, task, current, attachment):
+    path = upright_path(planner, task, current, carry_goal(task,current), attachment, terminal="carry")
+    if path is None:
+        return None
+    reached = current.copy()
+    reached[planner.planner.move_group_joint_indices] = path['position'][-1]
+    hand_tcp = (task.agent.robot.links_map['gripper_link'].pose[0].sp.inv()
+                * task.agent.tcp.pose[0].sp).to_transformation_matrix()
+    base = task.agent.base_link.pose[0].sp.to_transformation_matrix()
+    hand = kinematics(planner,task).matrix(reached)
+    tcp = (np.linalg.inv(base) @ hand @ hand_tcp)[:3,3]
+    payload = (np.linalg.inv(base) @ hand @ attachment)[:3,3]
+    # A second exact-upright wrist branch can put the TCP 85 cm ahead even at
+    # identical shoulder/elbow angles. Reject that branch as noncompact.
+    if not (.10 <= tcp[0] <= .40 and abs(tcp[1]) <= .20
+            and np.linalg.norm(payload[:2]) <= .40):
+        planner._upright_failures.append(dict(reason='noncompact_wrist_branch',
+                                              tcp_in_base=tcp.tolist()))
+        return None
+    path['tcp_in_base'] = tcp.tolist()
+    return path
+
+
+def initial_support_contacts(planner, obj, current):
+    """Exact payload/counter pairs at lift start; never robot or upper fixtures."""
+    p = planner.planner
+    p.robot.set_qpos(p.fold_qpos(current), True)
+    p.planning_world.set_qpos_all(p.fold_qpos(current)[p.move_group_joint_indices])
+    name = convert_object_name(obj._objs[0])
+    pairs = []
+    for collision in p.planning_world.check_collision():
+        pair = (collision.link_name1, collision.link_name2)
+        if name in pair and any("counter_main" in link for link in pair if link != name):
+            pairs.append(pair)
+    return pairs
+
+
+@contextmanager
+def preview_payload(planner, task, obj, grasp, current=None):
+    """Attach only the planning model at a hypothetical grasp; no physics writes."""
+    world = planner.planner.planning_world
+    robot = task.agent.robot._objs[0]
+    hand = next(link for link in robot.links if link.name.endswith('gripper_link'))
+    hand_tcp = task.agent.robot.links_map['gripper_link'].pose[0].sp.inv() * task.agent.tcp.pose[0].sp
+    local = (hand_tcp * grasp.inv() * obj.pose[0].sp if current is None else
+             sapien.Pose(np.linalg.inv(kinematics(planner, task).matrix(current))
+                         @ obj.pose[0].sp.to_transformation_matrix()))
+    touch = [link for link in robot.links if 'gripper' in link.name or 'wrist' in link.name]
+    attach_object(world, obj._objs[0], robot, hand,
+                  pose=mplib.Pose(local.p, local.q), touch_links=touch)
+    try:
+        yield local.to_transformation_matrix()
+    finally:
+        world.detach_object(convert_object_name(obj._objs[0]))
+        planner.planner.update_from_simulation()
+
+
+@measured
+
+
+def monotone_approach(planner, task, start, goal):
+    """Curve joint progress without adding poses, reversing joints or changing IK branch."""
+    p = planner.planner
+    moves = list(p.move_group_joint_indices)
+    groups = [[3], [5, 7], [8, 9], [10, 11, 12]]
+
+    def clear(full):
+        return path_clear(planner, start, full[:, moves])
+
+    count = max(81, int(np.ceil(np.linalg.norm(goal - start) / .025)) + 1)
+    alpha = np.linspace(0., 1., count)[:, None]
+    # Unfold the elbow before advancing/lowering the shoulder. The two schedules are
+    # fixed for each endpoint family, not an episode search grid.
+    schedules = (((2., 4., .5, 1.), (1., 2., .5, 1.)) if goal[7] < 0. else
+                 ((1., 4., .5, 4.), (1., 2., .5, 1.)))
+    for exponents in schedules:
+        if all(e == 1 for e in exponents):
+            continue
+        powers = np.ones(len(start))
+        for idx, e in zip(groups, exponents):
+            powers[idx] = e
+        full = start[None] + (goal - start)[None] * alpha ** powers[None]
+        if not p.accepts(full) or not clear(full):
+            continue
+        try:
+            times, pos, vel, acc, duration = p.TOPP(full[:, moves], task.control_timestep)
+        except RuntimeError:
+            continue
+        timed = np.broadcast_to(start, (len(pos), len(start))).copy()
+        timed[:, moves] = pos
+        if not p.accepts(timed) or not clear(timed):
+            continue
+        return dict(status='Success', time=times, position=pos, velocity=vel,
+                    acceleration=acc, duration=duration, progress_powers=exponents)
+    return None
+
+
+def above_via(planner, task, q, reach, above_m):
+    """Configuration with the same hand orientation `above_m` over the standoff.
+
+    It is the end of a straight vertical screw from the standoff configuration
+    itself with base and torso held, so the elbow/wrist branch and roll angles
+    stay those of `q` by continuity. Returns the full qpos, or None.
+    """
+    pose = sapien.Pose(np.asarray(reach.p) + [0., 0., above_m], reach.q)
+    up = straight_plan(planner, pose, current=q, freeze_lift=True)
+    planner._above_status = dict(statuses=list(map(str, planner._straight_failures)))
+    if up is None:
+        return None
+    via = q.copy()
+    via[list(planner.planner.move_group_joint_indices)] = up['position'][-1]
+    return via
+
+
+
+
+@measured
+def grasp_chain(planner, task, obj, grasp, reach, *, n_init=32):
+    """Find the first profile-26 unrolled grasp with a valid lift/carry continuation."""
+    p = planner.planner
+    current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
+    folded = p.fold_qpos(current)
+    reasons = Counter()
+    planner._chain_reasons = reasons
+    candidates = grasp_candidates(planner, task, grasp, reach, reasons, n_init=n_init)
+    mesh = obj.get_first_collision_mesh(to_world_frame=True)
+    tallest = max(float(a.get_first_collision_mesh(to_world_frame=True).bounds[1, 2])
+                  for a in (task.shaker, task.condiment_bottle))
+    hang = max(0., float(grasp.p[2]) - float(mesh.bounds[0, 2]))
+    floor = max(float(grasp.p[2]) + .04, tallest + hang + .025)
+    height = max(float(grasp.p[2]) + .15, floor)
+    heights = list(dict.fromkeys((height, max(floor, height - .04))))
+    moves = list(p.move_group_joint_indices)
+    other = task.condiment_bottle if obj is task.shaker else task.shaker
+    above_m = .15
+    for q, grasp, reach, record in candidates:
+        candidate_start = time.perf_counter()
+        down = None
+        target = q
+        via = above_via(planner, task, q, reach, above_m)
+        if via is None:
+            journal(planner, record, 'above', 'unreachable', height_m=above_m,
+                    **getattr(planner, '_above_status', {}))
+            continue
+        with season.keepout(planner, [obj, other], pad=[.025, .03]):
+            down = straight_plan(planner, reach, current=via)
+        if down is None:
+            journal(planner, record, 'above', 'descent', statuses=planner._straight_failures)
+            continue
+        target = via
+        q = via.copy()
+        q[moves] = down['position'][-1]
+        contact = straight_plan(planner, grasp, current=q)
+        reasons['contact ' + str(contact is not None)] += 1
+        if contact is None:
+            journal(planner, record, 'contact', 'collision',
+                statuses=planner._straight_failures,
+                collision=getattr(planner, '_last_path_collision', None))
+            continue
+        with season.keepout(planner, [obj, other], pad=[.025, .03]):
+            line = p.plan_qpos_line(target, current, time_step=task.control_timestep,
+                                    ref_yaw=float(current[2]), qpos_step=.02)
+            line_clear = (line.get('status') == 'Success'
+                          and path_clear(planner, current, line['position']))
+        reasons['approach ' + line.get('status', '?')] += 1
+        if not line_clear:
+            with season.keepout(planner, [obj, other], pad=[.025, .03]):
+                line = monotone_approach(planner, task, current, target)
+            if line is None:
+                journal(planner, record, 'approach', 'collision',
+                        collision=getattr(planner, '_last_path_collision', None))
+                continue
+        closed = q.copy()
+        closed[moves] = contact['position'][-1]
+        continuation = None
+        with preview_payload(planner, task, obj, grasp, closed) as attachment, \
+                season.keepout(planner, [other], pad=.03):
+            hand_tcp = (task.agent.robot.links_map['gripper_link'].pose[0].sp.inv()
+                        * task.agent.tcp.pose[0].sp)
+            actual_tcp = sapien.Pose(kinematics(planner, task).matrix(closed)) * hand_tcp
+            for z in heights:
+                lift = sapien.Pose([actual_tcp.p[0], actual_tcp.p[1], z], actual_tcp.q)
+                support = initial_support_contacts(planner, obj, closed)
+                up = straight_plan(planner, lift, current=closed, initial_contacts=support)
+                reasons['lift ' + str(up is not None)] += 1
+                raised = closed.copy()
+                raised[moves] = up['position'][-1]
+                prefix_knots = np.vstack([current[moves], target[moves]]
+                    + ([down['position']] if down is not None else [])
+                    + [q[moves], contact['position'], up['position']])
+                prefix = np.broadcast_to(current, (len(prefix_knots), len(current))).copy()
+                prefix[:, moves] = prefix_knots
+                with preview_roll_history(planner, prefix), elbow_only(planner, task):
+                    fold = carry_path(planner, task, raised, attachment)
+                    direct = None if fold is not None else plan_loaded_hover(planner, task, raised, attachment)
+                    if direct is not None:
+                        fold = direct['approach']
+                reasons['direct pour ' + str(direct is not None)] += 1
+                reasons['upright continuation ' + str(fold is not None)] += 1
+                if fold is None:
+                    journal(planner, record, 'continuation',
+                            'carry_and_direct_pour_unavailable', height_m=z,
+                            upright_reasons=getattr(planner, '_upright_failures', []))
+                    continue
+                continuation = (up, fold, z, direct)
+                break
+        if continuation is None:
+            journal(planner, record, 'rejected', 'no_continuation',
+                    seconds=time.perf_counter() - candidate_start)
+            continue
+        up, fold, z, direct = continuation
+        all_knots = np.vstack([line['position']]
+            + ([down['position']] if down is not None else [])
+            + [contact['position'], up['position'], fold['position']])
+        if direct is not None:
+            all_knots = np.vstack([all_knots, direct['pour']['position']])
+        with elbow_only(planner, task):
+            assert p.accepts(all_knots, move_group=True)
+        result = dict(approach=line, down=down, reach_pose=reach, above_m=above_m,
+                      contact=contact, lift_z=z, grasp_pose=grasp, grasp_qpos=closed,
+                      carry=fold, direct_pour=direct is not None,
+                      progress_powers=line.get('progress_powers'),
+                      total_joint_travel=float(np.abs(np.diff(all_knots, axis=0)).sum()))
+        journal(planner, record, 'accepted', seconds=time.perf_counter() - candidate_start,
+                direct_pour=direct is not None, complete_wrist_pour=direct is not None)
+        return result
+    return None
+
+
+
+def grasp_with_continuation(env, planner, task, obj, grasp, reach):
+    planner.planner.update_from_simulation()
+    chain = grasp_chain(planner, task, obj, grasp, reach)
+    if chain is None:
+        common.say(env, 'season_dish_planner', 'connected grasp/lift/carry refused')
+        return -1, False
+    common.say(env, 'season_dish_planner', 'connected grasp/lift/carry selected',
+               lift_z=chain['lift_z'], joint_travel=chain['total_joint_travel'],
+               grasp_qpos=chain['grasp_qpos'].tolist(), direct_pour=chain['direct_pour'],
+               progress_powers=chain['progress_powers'])
+    result = planner.follow_forward_path_w_refinement(chain['approach'], refine=True)
+    if common.stopped_by_horizon(planner):
+        return result, False
+    if result == -1:
+        return common.fail(env, WHO, 'grasp approach'), False
+    planner.planner.update_from_simulation()
+
+    other = task.condiment_bottle if obj is task.shaker else task.shaker
+    with season.keepout(planner, [obj, other], pad=[.025, .03]):
+        down = straight_plan(planner, chain['reach_pose'])
+    if down is None:
+        return common.fail(env, WHO, 'grasp reach path'), False
+    result = execute_straight(planner, down)
+    if common.stopped_by_horizon(planner):
+        return result, False
+    if result == -1:
+        return common.fail(env, WHO, 'grasp reach execution'), False
+    planner.planner.update_from_simulation()
+
+    path = straight_plan(planner, chain['grasp_pose'])
+    if path is None:
+        return common.fail(env, WHO, 'grasp contact path'), False
+    result = execute_straight(planner, path)
+    if common.stopped_by_horizon(planner):
+        return result, False
+    if result == -1:
+        return common.fail(env, WHO, 'grasp contact execution'), False
+    result = planner.close_gripper(t=8)
+    if common.stopped_by_horizon(planner):
+        return result, False
+    if result == -1:
+        return common.fail(env, WHO, 'close gripper'), False
+    planner.planner.update_from_simulation()
+    if not bool(task.agent.is_grasping(obj).any()):
+        common.say(env, WHO, 'gripper closed without holding target')
+        return result, False
+
+    planner._season_lift_z = chain['lift_z']
+    return result, True
 
 WHO = "season_dish_planner"
 
 # Distance the fingers close over, used to sink the grasp into the object.
-FINGER_LENGTH = common.FINGER_LENGTH
+FINGER_LENGTH = season.FINGER_LENGTH
 
 # Object origin over the bowl origin: the hover, and the pour (inside the predicate's
 # clearance band `pour_min_clearance` 0.05 … `pour_max_clearance` 0.30).
@@ -129,7 +818,6 @@ old single block; the rest is slack for a counter that reset once on a flicker."
 # 174/180** — thirteen seeds worse, grasp failures 5 -> 15. The mechanism is real and the
 # remedy is worse, on the new population as on the old.
 
-ARC_RETREAT_M = 0.10
 
 GRASP_IK_GIVE_UP = 3
 """Consecutive `IK Failed` refusals after which the wrist ladder is abandoned (K79b).
@@ -272,20 +960,6 @@ APPROACH_BY_LINE = os.environ.get("MIKASA_APPROACH_BY_LINE", "1") == "1"
 rest keyframe the screw is refused 200/200 at the shoulder_lift stop and the RRT wanders
 80-110 knots (HP6, 1500-1699) — the arm's "twisting" at every episode's start. 0 = off."""
 
-STRETCH_MAX_CLEARANCE = float(os.environ.get("MIKASA_STRETCH_CLEARANCE", "0"))
-"""Apply `APPROACH_STRETCH` only to grasps this close to the worktop (K87). 0 = all grasps.
-
-The shaker topples in all five stable failures and the condiment bottle in none of them,
-and the reason is not tippiness — the bottle is the more slender of the two (15.7 cm on a
-4.55 cm base against 9.4 on 5.1). It is **grasp clearance**. `max(centre, top - 0.03)`
-puts the shaker's grasp at 0.984 and the bottle's at 1.047, against a worktop at 0.920:
-**6.4 cm against 12.7 cm**. A low grasp holds the wrist near the worktop, which is what
-makes the approach a constrained RRT rather than a screw, and RRT approaches own 4 of the
-5 first slides (K84).
-
-So the slowdown can be spent where the risk is instead of on every leg. An object at rest
-sits on the worktop, so `mesh.bounds[0][2]` is the counter and no new plumbing is needed —
-the same self-gating trick K81 used."""
 
 APPROACH_STRETCH_TAIL = int(os.environ.get("MIKASA_APPROACH_STRETCH_TAIL", "0")) or None
 """Slow only the last N knots of the approach instead of all of them (K86). 0 = all.
@@ -363,34 +1037,6 @@ the target. Closing for the transit halves the swept width exactly where it clip
 one `close_gripper` and one `open_gripper` per rung (about 12 steps) and moves no target
 pose, so it is neither a geometry change nor a timing one."""
 
-APPROACH_STRETCH = int(os.environ.get("MIKASA_APPROACH_STRETCH", "1"))
-"""Command the approach leg this many times slower along the identical path (K84). 1 = shipped.
-
-The experiment K79g named and declared impossible. Its reasoning was right about mplib —
-`joint_vel_limits` are constructor-only and no per-call override exists — but wrong that
-this closes the question: the follower sends one row of `result["position"]` per control
-step, so interpolating rows halves the commanded joint delta per step without changing a
-single waypoint the planner chose. Tracking lag is set by that delta.
-
-Why the approach leg specifically. K81's trajectories show the object's first slide, and
-**4 of the 5 stable failures have it owned by a long RRT approach** (128-252 knots; the
-fifth is a 26-knot screw). That leg is planned with the condiments inflated 3 cm, so its
-*plan* clears the object — what reaches it is the execution, measured at up to 6.4 cm of
-TCP error (K79c). K79f slowed every leg and lost 1 -> 11 truncations; K79h repeated it
-with the horizon raised and lost four seeds anyway. Neither has ever slowed this leg
-alone, which is the version whose cost is bounded: `(factor - 1) * knots` steps on one
-leg, against ~500 of 1100 an episode uses.
-
-**MEASURED 2026-09-05 AND IT LOSES.** The bounded version was finally run, paired, 200
-seeds per arm on the same commit (`runs/2026-09-05-stretch`, seeds 300-499, incomplete 0):
-
-    stretch 1   194/200    missed 3  no plan 3  truncated 0
-    stretch 2   190/200    missed 2  no plan 5  truncated 3
-    b = 7 seeds only the normal speed wins, c = 3 only the slow one
-
-The reasoning was sound and the number says no. The horizon is where it goes: three
-episodes truncate that never truncated before, and the leg it slows is the long one.
-Whatever the executed 6.4 cm of deviation costs, buying it back with steps costs more."""
 
 APPROACH_DRAWS = int(os.environ.get("MIKASA_APPROACH_DRAWS", "1"))
 """RRT draws the approach leg takes before choosing one (K80). 1 = shipped; **3 is worse**.
@@ -612,7 +1258,7 @@ SKIP_TOPDOWN_RESCUE = os.environ.get("MIKASA_SKIP_TOPDOWN", "0") == "1"
 The rung has **never** rescued an episode: 0 successes in 60 attempts across three
 180-seed sweeps, against 231 grasps the side ladder wins. Measured why, at the recorded
 toppled poses of seeds 129/136/177 and with the oracle's own
-`grasp_geometry`/`raise_grasp_to`/`grasp_yaw_candidates`: over six wrist yaws at heights
+`grasp_geometry`/`raise_grasp_to`: the fixed profile-26 side-grasp geometry
 from 2 to 16 cm above the worktop, from the episode-start posture and with
 `n_init_qpos=100`, the family has **0 of 12 poses with IK at every height**. Horizontal
 grasps of a toppled shaker have none either. There is no height to move it to.
@@ -624,26 +1270,7 @@ its start posture through the new `move_to_qpos`. Kept as a flag rather than a d
 because the rung costs episode steps in seeds that are budget-bound, which is the one
 thing about it still worth measuring."""
 
-GRASP_YAWS_DEG = (0.0, 30.0, -30.0, 60.0, -60.0, 90.0)
-"""Wrist yaws tried at the grasp, in order; 0 is the OBB's own choice."""
 
-POUR_TILT_DEG = float(os.environ.get("MIKASA_POUR_TILT_CMD_DEG", "165.0"))
-POUR_TILT_STRONG_DEG = float(os.environ.get("MIKASA_POUR_TILT_STRONG_DEG", "175.0"))
-"""The tilt ladder's two rungs. 65 / 90 until 2026-09-08, when the predicate went from
-55 to 155 deg (the owner: a pour is an inverted shaker): the same 10 deg margin over
-the predicate, and the strong rung near the ceiling (180 = exactly upside down).
-
-The original reasoning, still the reasoning: the second rung is tried only after all
-four first-rung candidates.
-
-The predicate wants 55 deg (`cfg.pour_tilt_deg`) and the oracle commands 65, a 10 deg
-margin — smaller than the tracking error the arm actually shows at full stretch. On
-seed 2 a candidate planned and executed and the bottle came to rest at 47.5 deg: the
-pose was reached as well as the arm could reach it, and the episode was lost by 7.5
-deg. Commanding 90 asks for a pose no predicate needs, so that falling as short as
-seed 2 fell still clears 55. Appended rather than substituted: the four 65 deg
-candidates are what every passing seed uses, and the loop breaks on the first one
-that satisfies the flags."""
 
 # Clearance the lift buys over the tallest condiment (K40): the base turn carries the
 # held object over its neighbour.
@@ -682,10 +1309,6 @@ every level grasp leg refused there, the same seed at a dock 0.15 m further back
 and poured (g62a). 0 = off. The rescue costs a drive and two closings, so it waits for
 STOVE_BACKDOCK_MIN_HITS refusals naming the stove (HP4 @0.15, 1652: one incidental stove
 refusal fired it on a seed the ladder was carrying, and the budget ran out at 298)."""
-GRASP_TORSO_RESERVE = float(os.environ.get("MIKASA_GRASP_TORSO_RESERVE", "0.0"))
-"""EXPERIMENT (off): torso left under its stop before the grasp approach, frozen through
-the reach and grasp legs, so the lift can raise the torso as a joint line. 0 = the shipped
-grasp (the approach may spend the torso to its stop)."""
 LIFT_HANG_AWARE = os.environ.get("MIKASA_LIFT_HANG_AWARE", "1") == "1"
 """The lift also clears the held object's BOTTOM over the tallest neighbour (see the lift):
 K40's 0.10 margin was taken from the TCP, and a 16 cm bottle hangs 13 cm under it. 0 = the
@@ -791,68 +1414,20 @@ def default_planner_factory(env, debug: bool, vis: bool):
     )
 
 
-def default_grasp_info(obb, ee_direction, target_closing) -> dict:
-    """OBB thin-side grasp frame (`oracle_common.default_grasp_info`)."""
-    return common.default_grasp_info(obb, ee_direction, target_closing, FINGER_LENGTH)
 
 
 CYL_FOOTPRINT_TOL = 0.15
-"""Footprint aspect ratio inside which the wrist yaw is treated as free (K59).
 
-Measured on the assets this task loads: the shaker's OBB footprint is 0.0509 x 0.0517 m
-(1.5% apart), the bottle's 0.0455 x 0.0458 m (0.8%). At that margin the `np.argsort`
-in `compute_box_grasp_thin_side_info` is resolving sub-millimetre mesh noise, not a
-shape, and the axis it picks rides the object's uniformly random spawn yaw. Anything
-more elongated than this keeps the OBB thin-side frame, where the jaws genuinely must
-close across the short axis and the yaw is not ours to spend."""
 
 
 def approach_aligned_grasp_info(obb, ee_direction, target_closing) -> dict:
-    """Grasp frame for a body of revolution: approach along `ee_direction`, jaws across it.
-
-    Why (K59): a parallel jaw closing on a 5.1 cm circle grips identically at every
-    yaw, so for these condiments the wrist yaw is a free parameter. `default_grasp_info`
-    spends it anyway — it aims the approach down the OBB's *longer* horizontal axis,
-    which for a near-round footprint is decided by mesh noise and tracks the spawn yaw.
-    Measured over 30 seeds x 2 objects, the angle between that axis and the base->object
-    ray is uniform: mean 46.7 deg, median 46.7, 73% above 30 deg, 8% below 10. The arm
-    was being sent to a wrist yaw ~47 deg off the line it reaches along, for nothing.
-
-    Falls back to `default_grasp_info` when the footprint is elongated (the yaw is not
-    free) or when `ee_direction` has no horizontal part — the top-down rescue rung
-    passes ``[0, 0, -1]`` and must keep the frame it was measured with.
-
-    The grip depth uses the footprint's mean radius rather than the OBB's support width
-    along `approaching`: for a near-circular footprint that width grows toward the OBB
-    corners, which would grip a chord instead of the diameter at 45 deg.
-
-    Example:
-        >>> import numpy as np, trimesh
-        >>> obb = trimesh.primitives.Box(extents=[0.051, 0.052, 0.094])
-        >>> info = approach_aligned_grasp_info(obb, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
-        >>> np.round(info["approaching"], 3).tolist()
-        [1.0, 0.0, 0.0]
-        >>> np.round(info["closing"], 3).tolist()
-        [-0.0, 1.0, 0.0]
-
-        An elongated footprint keeps the OBB frame:
-        >>> box = trimesh.primitives.Box(extents=[0.03, 0.09, 0.10])
-        >>> a = approach_aligned_grasp_info(box, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
-        >>> b = default_grasp_info(box, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
-        >>> bool(np.allclose(a["approaching"], b["approaching"]))
-        True
-    """
+    """Profile-26 side-grasp frame for the fixed near-cylindrical condiment assets."""
     extents = np.asarray(obb.primitive.extents, dtype=np.float64)
     T = np.asarray(obb.primitive.transform, dtype=np.float64)
-    short, long_ = float(min(extents[:2])), float(max(extents[:2]))
     a = np.asarray(ee_direction, dtype=np.float64) * np.array([1.0, 1.0, 0.0])
-    n = float(np.linalg.norm(a))
-    if long_ - short > CYL_FOOTPRINT_TOL * long_ or n < 1e-6:
-        return default_grasp_info(obb, ee_direction, target_closing)
-    approaching = a / n
+    approaching = a / float(np.linalg.norm(a))
     closing = np.array([-approaching[1], approaching[0], 0.0])
-    if target_closing is not None and float(np.asarray(target_closing, dtype=np.float64) @ closing) < 0:
-        closing = -closing  # parallel jaws: theta and theta+180 close identically
+    closing = -closing
     radius = 0.25 * (float(extents[0]) + float(extents[1]))
     center = T[:3, 3] + approaching * (-radius + min(FINGER_LENGTH, radius))
     return dict(approaching=approaching, closing=closing, center=center, extents=extents)
@@ -870,10 +1445,17 @@ def drive_to_counter(env, planner, dock, face, *, loaded=False):
         res = planner.drive_base(target_pos=waypoint,
                                  target_view_vec=np.asarray(dock) - waypoint,
                                  freeze_arm=True)
-        if res == -1 or common.stopped_by_horizon(planner):
+        if common.stopped_by_horizon(planner):
             return res
+        if res == -1:
+            return common.fail(env, WHO, "approach left dock from open aisle")
         planner.planner.update_from_simulation()
-    return planner.drive_base(target_pos=dock, target_view_vec=face, freeze_arm=True)
+    res = planner.drive_base(target_pos=dock, target_view_vec=face, freeze_arm=True)
+    if common.stopped_by_horizon(planner):
+        return res
+    if res == -1:
+        return common.fail(env, WHO, "drive to dock refused")
+    return res
 
 
 def navigation_posture(env, planner, task, target):
@@ -882,7 +1464,7 @@ def navigation_posture(env, planner, task, target):
     current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
     path = carry_path(planner, task, current, held_transform(task, target))
     if path is None:
-        return fail(env, "upright compact carry path refused")
+        return common.fail(env, WHO, "no upright navigation carry path")
     say(env, "compact upright condiment carry", knots=len(path["position"]),
         predicted_max_tilt_deg=path['predicted_max_tilt_deg'], tcp_in_base=path['tcp_in_base'])
     with elbow_only(planner, task), transfer_phase(planner, "fold for navigation"):
@@ -897,180 +1479,22 @@ def cue_head_target(task):
     return tuple(tracker.desired())
 
 
-def wait_cue(env, planner, info):
-    return common.wait_cue(env, planner, info, who=WHO)
 
 
-def choose_target(info, blind: bool, rng: np.random.Generator) -> bool:
-    """`target_is_shaker`: the answer from `info`, or arm B's uniform draw.
-
-    The one line the blind arm replaces (the burner's `choose_target` pattern):
-    arm B ignores the cue and grasps a uniformly random condiment —
-    `rng.integers(2)` from `np.random.default_rng(seed)`, so the draw is
-    deterministic per seed and both objects appear over the eval seeds — and it
-    never touches the key. Called after viewing the fridge picture.
-
-    Example:
-        >>> choose_target({"target_is_shaker": np.array([False])}, blind=False, rng=np.random.default_rng(0))
-        False
-        >>> [choose_target({}, blind=True, rng=np.random.default_rng(s)) for s in range(4)]
-        [True, False, True, True]
-    """
-    if blind:
-        return bool(rng.integers(2))
-    return bool(_np(info["target_is_shaker"]).reshape(-1)[0])
 
 
-def grasp_geometry(task, obb, ee_direction, target_closing, grasp_info=default_grasp_info):
-    return common.grasp_geometry(task, obb, ee_direction, target_closing, grasp_info)
 
 
-def stretch_for(obj, grasp) -> int:
-    """`APPROACH_STRETCH`, or 1 when the grasp is too high off the worktop to need it."""
-    if APPROACH_STRETCH <= 1 or STRETCH_MAX_CLEARANCE <= 0.0:
-        return APPROACH_STRETCH
-    mesh = obj.get_first_collision_mesh(to_world_frame=True)
-    if mesh is None:
-        return APPROACH_STRETCH
-    return APPROACH_STRETCH if (float(grasp.p[2]) - float(mesh.bounds[0][2])) <= STRETCH_MAX_CLEARANCE else 1
 
 
-FULL_DOF_REACH = os.environ.get("MIKASA_FULL_DOF_REACH", "0") == "1"
-"""Let the BASE join the reach when the arm alone cannot plan it. 0 until measured.
-
-Aimed at the measured root of this task's remaining losses rather than at their symptom.
-Four of the five failures on 200 unseen seeds begin with `the object has moved` — and the
-plan is not what touches it: the approach is planned with the condiments inflated 3 cm,
-giving 5.6 cm of proxy radius, against an EXECUTED deviation of 6.4 cm (K79c). That
-deviation is joint lag, and joint lag grows with extension: the 6.4 cm was measured at a
-0.7 m reach. A base that steps in does not need the extension.
-
-Every lever that attacks the symptom has now been measured and none pays: keepout pad at
-5 cm worse (K79c), three approach draws worse (K80), narrow approach a wash, abort on
-touch 0 of 6, the skim refusal keeps only the gross cases, the slowed approach worse and
-truncating. This one attacks the cause — and it is a wash too.
-
-**MEASURED 2026-09-05** (`runs/2026-09-05-fulldof`, paired, 200 seeds per arm, one commit):
-
-    off   194/200    missed 3  no plan 3  truncated 0
-    on    194/200    missed 2  no plan 3  truncated 1
-    b = 1  c = 1
-
-The reasoning holds and the lever does not reach it: `full_dof_reach` fires only AFTER
-the arm-only reach has refused, and the losses here are not refusals — they are reaches
-that succeed and knock the object on the way. To attack the extension it would have to be
-the FIRST reach, not the fallback, and that is a different change with a different cost.
-Left off, and the finding recorded so the next attempt starts from it."""
-
-APPROACH_SKIM_CAP = float(os.environ.get("MIKASA_SD_SKIM_CAP", "0.05"))
-"""Refuse an approach draw that is inside the scene for more than this share of its knots.
-
-The two condiments stand on a counter with nothing to catch them, and an approach that
-runs through the scene does not merely look bad: it MOVES them, and after that no grasp
-exists at all. Measured on HELD seed 204 — the executed draw had 98 of its 191 knots
-intruding (two of the three draws did not plan, so the knife had nothing better to pick),
-the bottle ended 11.2 cm away, every wrist yaw and grip height then refused, and the
-episode was lost with `no plan`. With the refusal the ladder gets an intact scene, plans
-a clean 55-knot path, and the grasp holds.
-
-Asked for HERE and nowhere else. As a global default the same rule refused 257 plans over
-30 DepthRecall episodes and took that task from 26/30 to 13/30: an arm working inside a
-shelf intrudes by this metric as a matter of course, and there the intrusion is the job.
-
-**0.05, not the third I first chose.** A third was read off the gross case — 98 knots of
-191 — and the gross case is not what costs this task its seeds. On the 200-seed verdict
-run EVERY ONE of the five failures executed an intruding path, at 0.12, 0.13, 0.29, 0.05
-and 0.11 of its knots, all comfortably under a third; and only twelve paths in 200
-episodes intrude at all, so the signal sits in five failures of five against seven other
-episodes. Swept paired, 200 seeds per arm on one commit (`runs/2026-09-05-skimcap`,
-`-skimcap2`):
-
-    cap 1/3     194/200      b = 0   c = 2   against 0.05
-    cap 0.05    196/200
-    cap 0.0     195/200      b = 1   c = 0   against 0.05
-
-0.05 takes two seeds and gives none back. Refusing EVERYTHING is worse by one: some
-paths graze the target legitimately at the very end, and refusing those spends a rung for
-nothing."""
 
 
-def held_touch_link(refusal: str, held_stem: str) -> str | None:
-    """The robot link a refusal names against the HELD object, as a name stem, or None.
 
-    `refusal` is the solver's printed status from `capture_refusal("collision ")`, e.g.
-    `collision scene-0-ds_fetch_shoulder_lift_link<->scene-0_condiment_bottle_112 after
-    1 step(s)`; `held_stem` names the held actor ("shaker" / "condiment_bottle").
-    Returns "shoulder_lift_link" when one side is a robot link and the other the held
-    actor; None for any other pair (a wall, a fixture, the distractor).
-
-    Example:
-        >>> held_touch_link("collision scene-0-ds_fetch_shoulder_lift_link<->scene-0_condiment_bottle_112 after 1 step(s)", "condiment_bottle")
-        'shoulder_lift_link'
-        >>> held_touch_link("collision scene-0-ds_fetch_l_gripper_finger_link<->scene-0_wall_left_room_0_31 after", "condiment_bottle") is None
-        True
-    """
-    m = re.search(r"collision\s+(\S+?)<->(\S+?)(?:,|\s|$)", str(refusal))
-    if not m or not held_stem:
-        return None
-    for a, b in ((m.group(1), m.group(2)), (m.group(2), m.group(1))):
-        if "ds_fetch_" in a and held_stem in b and "ds_fetch_" not in b:
-            return a.split("ds_fetch_", 1)[1]
-    return None
-
-
-def back_off_from_the_object(env, planner, task, *, why: str):
-    """Open and back the hand off the object it stands against; the retreat's result.
-
-    Up by ARC_RETREAT_M first (`lift_hand`, a pure screw), else along the hand's own
-    approach axis through `static_manipulation` (which has the RRT fallback). The grasp
-    ladder leaves the hand where its last close missed — against the object — and mplib
-    will not plan out of a start it considers in collision: with the target's own proxy
-    inflated for the approach leg (K76), every later rung is refused at its first step
-    (1679 @0.15, 2026-09-06). The arc always backed off first (K79); the rungs do too.
-
-    Example:
-        >>> r = back_off_from_the_object(env, planner, task, why="a missed close")  # doctest: +SKIP
-        >>> if r != -1 and common.stopped_by_horizon(planner): return r          # doctest: +SKIP
-    """
-    say(env, "backing the hand off the object", why=why)
-    planner.open_gripper()
-    retreat = planner.lift_hand(delta_h=ARC_RETREAT_M)
-    if retreat == -1:
-        tcp_now = task.agent.tcp.pose[0].sp
-        back = sapien.Pose(p=tcp_now.p, q=tcp_now.q) * sapien.Pose([0, 0, -ARC_RETREAT_M])
-        say(env, "retreat refused upward; backing off along the approach", why=why)
-        retreat = planner.static_manipulation(back, disable_lift_joint=False)
-    return retreat
-
-
-def _say_close_miss(env, task, obj):
-    """Instrument: the fingers closed and `is_grasping` is False — where did they close?
-
-    Prints the finger gap and the TCP against the object's live centre and top. Quiet
-    on a double without joints or meshes.
-
-    Example:
-        >>> _say_close_miss(env, task, task.shaker)  # doctest: +SKIP
-    """
-    try:
-        robot = task.agent.robot
-        jm = robot.active_joints_map
-        q = _np(robot.get_qpos()).reshape(-1)
-        gap = sum(float(q[int(jm[n].active_index[0])])
-                  for n in ("l_gripper_finger_joint", "r_gripper_finger_joint"))
-        tcp = _np(task.agent.tcp.pose.p).reshape(-1)[:3].astype(np.float64)
-        mesh = obj.get_first_collision_mesh(to_world_frame=True)
-        c = np.asarray(mesh.bounding_box_oriented.center_mass, dtype=np.float64)
-        say(env, "close missed", finger_gap=round(gap, 3),
-            tcp_minus_centre=[round(float(v), 3) for v in (tcp - c)],
-            tcp_below_top=round(float(mesh.bounds[1][2]) - float(tcp[2]), 3))
-    except Exception as exc:      # a double without joints/meshes: the instrument is quiet
-        say(env, "close missed", instrument=f"unavailable ({type(exc).__name__})")
 
 
 def try_grasp(env, planner, task, obj, grasp, reach, target_pad: float | None = None,
               by_line: bool | None = None):
-    """`common.try_grasp`, with both condiments inflated for the approach leg (K76).
+    """SeasonDish grasp sequence with both condiments inflated during approach (K76).
 
     Both, not just the distractor: six of nine failing seeds on the randomized layout
     were an approach path skimming one of them, and on seed 78 the *distractor* was
@@ -1083,7 +1507,7 @@ def try_grasp(env, planner, task, obj, grasp, reach, target_pad: float | None = 
     # its ladder rungs were refused `gripper_link<->keepout_1` **after 1 step**, i.e. the
     # hand's own START state sat inside the distractor's proxy, and mplib will not plan
     # out of a start it considers in collision. The two effects run opposite ways and it
-    # is unmeasured, so the single pad stays. `common.keepout` accepts per-actor pads now.
+    # is unmeasured, so the single pad stays. `season.keepout` accepts per-actor pads now.
     # An "above-then-descend" approach shape was built and withdrawn (K79e). Both K79c
     # post-mortems blame the path *shape*: RRTConnect lifts the TCP high, descends onto the
     # worktop, then sweeps sideways past the target — seed 61's TCP passes 9.7-13.4 cm from
@@ -1096,8 +1520,6 @@ def try_grasp(env, planner, task, obj, grasp, reach, target_pad: float | None = 
     # Keep looking at the condiment until the grasp is complete.
     planner.track_target(lambda: _np(obj.pose.p)[0])
     res, grasped = grasp_with_continuation(env, planner, task, obj, grasp, reach)
-    if res != -1 and not grasped and not common.stopped_by_horizon(planner):
-        _say_close_miss(env, task, obj)
     return res, grasped
 
 
@@ -1108,17 +1530,6 @@ def hold_object_in_planner(env, planner, task, obj, held: bool) -> None:
     common.hold_object_in_planner(env, planner, task, obj, held, who=WHO)
 
 
-def quat_about(axis, angle_rad: float) -> np.ndarray:
-    """wxyz quaternion for a rotation of `angle_rad` about the unit vector `axis`.
-
-    Example:
-        >>> np.round(quat_about([0, 0, 1], np.pi / 2), 4).tolist()
-        [0.7071, 0.0, 0.0, 0.7071]
-    """
-    a = np.asarray(axis, dtype=np.float64)
-    a = a / np.linalg.norm(a)
-    h = float(angle_rad) / 2.0
-    return np.array([math.cos(h), *(math.sin(h) * a)], dtype=np.float64)
 
 
 def raise_grasp_to(grasp: sapien.Pose, reach: sapien.Pose, z: float) -> tuple[sapien.Pose, sapien.Pose]:
@@ -1147,109 +1558,17 @@ def raise_grasp_to(grasp: sapien.Pose, reach: sapien.Pose, z: float) -> tuple[sa
 # remains is not to knock the object at all, which is a path-following question in the
 # solver rather than a grasp-geometry one.
 
-def grasp_yaw_candidates(grasp, reach, centre_xy, angles_deg=GRASP_YAWS_DEG):
-    """The same grasp, turned about the object's own vertical axis.
-
-    Both condiments are bodies of revolution — the shaker's OBB is 0.051 x 0.052 in
-    plan, a millimetre apart, so which side `compute_grasp_info_by_obb` calls "thin"
-    is decided by noise, and the one wrist yaw that falls out of it is arbitrary. When
-    that yaw is the unreachable one the whole episode is lost at the reach, which is
-    what seeds 7 and 8 do: `IK Failed! Cannot find valid solution`, identically, on
-    every approach direction tried.
-
-    For a cylinder the grasp is a one-parameter family, so the arbitrary choice can be
-    a ladder instead. Rotating about the object's vertical axis keeps the fingers at
-    the same height on the same body and only turns the wrist.
-
-    Example:
-        >>> import sapien, numpy as np
-        >>> g = sapien.Pose(p=[1.0, 0.0, 1.0]); r = sapien.Pose(p=[0.9, 0.0, 1.0])
-        >>> cands = grasp_yaw_candidates(g, r, np.array([1.0, 0.0]), (0.0, 90.0))
-        >>> np.round(np.asarray(cands[1][2].p, dtype=float), 3).tolist()
-        [1.0, -0.1, 1.0]
-    """
-    out = []
-    c = np.array([float(centre_xy[0]), float(centre_xy[1]), 0.0])
-    for a in angles_deg:
-        qz = quat_about(np.array([0.0, 0.0, 1.0]), math.radians(float(a)))
-        R = sapien.Pose(q=qz)
-        turned = []
-        for pose in (grasp, reach):
-            p_rel = np.asarray(pose.p) - c
-            p_new = np.asarray((R * sapien.Pose(p=p_rel)).p) + c
-            turned.append(sapien.Pose(p=p_new, q=np.asarray((R * sapien.Pose(q=pose.q)).q)))
-        out.append((float(a), turned[0], turned[1]))
-    return out
 
 
-def pour_pose_for(bowl_p, above: float, obj_q, T_tcp_obj: sapien.Pose, axis_world, tilt_deg: float) -> sapien.Pose:
-    """TCP pose that puts the held object's origin `above` metres over `bowl_p`, tilted
-    `tilt_deg` about the horizontal world axis `axis_world` from its upright `obj_q`.
-
-    By construction the object origin lands at `bowl_p + [0, 0, above]` (the tilt is a
-    rotation about the object's own origin), so the task's `over_bowl` and
-    `height_ok` hold if the plan reaches the pose, and `tilted` holds when
-    `tilt_deg ≥ pour_tilt_deg` and `obj_q` is upright (yaw only — the task spawns
-    yaw only). `T_tcp_obj` is the grasp transform read after the drive: "object
-    origin at X" is "TCP at X · T_tcp_obj⁻¹".
-
-    Args:
-        bowl_p: the bowl's origin, world (3,).
-        above: metres above it for the object origin (inside the predicate's band).
-        obj_q: the object's upright world orientation, wxyz.
-        T_tcp_obj: sapien.Pose, TCP → object.
-        axis_world: horizontal unit vector to tilt about (world), e.g. the base's facing.
-        tilt_deg: the tilt (positive or negative — two candidates per axis).
-
-    Example:
-        >>> T = sapien.Pose(p=[0.0, 0.0, -0.05])            # object 5 cm below the TCP
-        >>> pose = pour_pose_for(np.array([1.0, 2.0, 0.9]), 0.2, np.array([1.0, 0, 0, 0]), T, [1, 0, 0], 65.0)
-        >>> obj = pose * T
-        >>> [round(float(v), 3) for v in obj.p]   # the object origin: over the bowl, `above` up
-        [1.0, 2.0, 1.1]
-        >>> R = obj.to_transformation_matrix()[:3, :3]
-        >>> round(float(np.degrees(np.arccos(R[2, 2]))), 1)   # the object's +Z, tilted from world +Z
-        65.0
-    """
-    q_tilt = quat_about(axis_world, math.radians(float(tilt_deg)))
-    q_obj = (sapien.Pose(q=q_tilt) * sapien.Pose(q=np.asarray(obj_q, dtype=np.float64))).q
-    obj_pose = sapien.Pose(
-        p=np.asarray(bowl_p, dtype=np.float64) + np.array([0.0, 0.0, float(above)]), q=q_obj
-    )
-    return obj_pose * T_tcp_obj.inv()
 
 
-def pour_candidates(face_xy, along_xy, tilt_deg: float = POUR_TILT_DEG,
-                    strong_deg: float = POUR_TILT_STRONG_DEG):
-    """The (axis_world, tilt_deg) candidates in the order the oracle tries them: about
-    the base's facing (+, −), then about the counter's along axis (+, −) — and then the
-    same four again at `strong_deg`, for the arm that reaches the pose but not the angle.
-
-    Example:
-        >>> [(a, t) for a, t in pour_candidates([0, 1, 0], [1, 0, 0])][:4]
-        [([0, 1, 0], 65.0), ([0, 1, 0], -65.0), ([1, 0, 0], 65.0), ([1, 0, 0], -65.0)]
-        >>> [t for _a, t in pour_candidates([0, 1, 0], [1, 0, 0])][4:]
-        [90.0, -90.0, 90.0, -90.0]
-    """
-    rung = lambda d: [(face_xy, float(d)), (face_xy, -float(d)),
-                      (along_xy, float(d)), (along_xy, -float(d))]
-    return rung(tilt_deg) + rung(strong_deg)
-
-
-def _flag(info, key) -> bool:
-    return bool(_np(info[key]).reshape(-1)[0])
-
-
-def _pour_flags(info) -> dict:
-    return {k: _flag(info, k) for k in ("tilted", "over_bowl", "height_ok", "grasp_target", "distractor_ok")}
 
 
 def solve(
     env,
-    seed=None,
+    seed,
     debug=False,
     vis=False,
-    blind=False,
     *,
     planner_factory=default_planner_factory,
     grasp_info=approach_aligned_grasp_info,
@@ -1267,12 +1586,10 @@ def solve(
     try:
         with common.planning_budget(PLANNING_TIME_S):
             return _solve(
-                env, seed=seed, debug=debug, vis=vis, blind=blind,
+                env, seed=seed, debug=debug, vis=vis,
                 planner_factory=planner_factory, grasp_info=grasp_info,
                 waypoint_noise_seed=waypoint_noise_seed, waypoint_noise_m=waypoint_noise_m,
                 execution_noise_seed=execution_noise_seed, action_noise=action_noise, noise_hold=noise_hold)
-    except (PlanningBudgetExceeded, PayloadTiltError) as error:
-        return fail(env, str(error))
     finally:
         budget=getattr(env.unwrapped, 'search_budget', None)
         if budget is not None:
@@ -1282,10 +1599,9 @@ def solve(
 
 def _solve(
     env,
-    seed=None,
+    seed,
     debug=False,
     vis=False,
-    blind=False,
     *,
     planner_factory=default_planner_factory,
     grasp_info=approach_aligned_grasp_info,
@@ -1302,8 +1618,7 @@ def _solve(
     real solver and the real grasp geometry.
     """
     obs, info = env.reset(seed=seed)
-    if seed is not None:
-        seed_everything(seed)  # Python, numpy, torch and mplib's C++ RNG (seeding.py)
+    seed_everything(seed)  # Python, numpy, torch and mplib's C++ RNG (seeding.py)
 
     assert env.unwrapped.control_mode in (
         "pd_joint_pos",
@@ -1322,7 +1637,6 @@ def _solve(
         planner, env, int(seed or 0) + 300007 if execution_noise_seed is None else execution_noise_seed,
         action_noise=action_noise, noise_hold=noise_hold)
     task = env.unwrapped
-    rng = np.random.default_rng(seed)  # the blind arm's draw, deterministic per seed
     noise = WaypointNoise(
         int(seed or 0) + 200003 if waypoint_noise_seed is None else waypoint_noise_seed,
         waypoint_noise_m, lambda message, **data: say(env, message, **data),
@@ -1335,39 +1649,31 @@ def _solve(
     planner.track_target(_np(task.fridge_pictures.home)[0, :3])
     say(env, "fridge cue observation", phase="fridge_cue_observation")
     gaze = planner.hold_head(pan=pan, tilt=tilt, t=20, ramp=10)
-    if gaze == -1:
-        return fail(env, "look at the cue station")
-    info = wait_cue(env, planner, gaze[-1])
-    if isinstance(info, (int, np.integer)) and info == -1:
+    info = season.wait_cue(env, planner, gaze[-1])
+    if info == -1:
+        return -1
+    if common.stopped_by_horizon(planner):
         return info
     say(env, "fridge cue observation complete", control_steps=int(task.elapsed_steps[0]))
 
-    # -- STAGE 1: the privileged read (or the blind draw) ---------------------------
-    target_is_shaker = choose_target(info, blind, rng)
+    # -- STAGE 1: read the profile cue ---------------------------------------------
+    target_is_shaker = bool(_np(info["target_is_shaker"]).reshape(-1)[0])
     target = task.shaker if target_is_shaker else task.condiment_bottle
-    say(env, "target chosen", target_is_shaker=target_is_shaker, blind=bool(blind))
+    say(env, "target chosen", target_is_shaker=target_is_shaker)
     planner.track_target(lambda: _np(target.pose.p)[0])
     # Both answers use the same physical station dock.
     dock = _np(task._station_dock_np)[0].astype(np.float64)
     dock_xyz = noise.point("station_dock", [dock[0], dock[1], 0.0], axes=(True, True, False))
     face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.0])
     offset = float(getattr(task, "motion_parameters", {}).get("station_backoff_m", 0.))
-    if offset not in (0., .05, .10, .15):raise ValueError("Unsupported station offset")
     dock_xyz -= offset * face
-    if stance_scan.enabled():
-        # Item 2 (planners/season_dish_stance.py): a stance that survives the arrival error
-        # and from which a contact chain builds; None keeps the shipped one.
-        chosen = choose_station_stance(env, planner, task, target, dock_xyz + offset * face, face,
-                                       grasp_info, say=say, backoff=offset, below_top=GRASP_BELOW_TOP)
-        if chosen is not None:
-            dock_xyz, face = chosen
     say(env, "travel after cue", station_backoff_m=offset, goal=dock_xyz.tolist(),
         distance_m=float(np.linalg.norm(dock_xyz[:2] - _np(task.agent.base_link.pose.p)[0, :2])))
     res = drive_to_counter(env, planner, dock_xyz, face)
-    if res == -1:
-        return fail(env, "approach condiment station")
     if common.stopped_by_horizon(planner):
         return res
+    if res == -1:
+        return fail(env, "drive to condiment station")
     pan, tilt = planner._head_tracker.desired()
     # Let the head and the base settle after the final turn, but only while the
     # measured state still moves: the fixed 12-step hold recorded up to six
@@ -1383,23 +1689,13 @@ def _solve(
             break
         res = planner.hold_head(pan=pan, tilt=tilt, t=2, ramp=2 if held == 0 else 0)
         held += 2
-        if res == -1 or common.stopped_by_horizon(planner):
-            return res
     say(env, "settle at condiment station", steps=held, head_error_rad=head_error)
 
     # -- STAGE 2: grasp the target ---------------------------------------------------
     say(env, "grasp the target")
-    if getattr(task, "motion_parameters", {}).get("grasp_family", "rolled") == "unrolled":
-        # Same hand poses with the forearm unrolled: the wrist flexes negative at the
-        # grasp and crosses zero on the way from the rest pose, so only the elbow sign
-        # is enforced along paths; candidates keep the wrist sign at their endpoints.
-        joints = task.agent.robot.active_joints_map
-        planner._grasp_branch = {int(joints["elbow_flex_joint"].active_index[0]): 1}
-    else:
-        planner.set_grasp_branch(elbow=1, wrist=1)
+    joints = task.agent.robot.active_joints_map
+    planner._grasp_branch = {int(joints["elbow_flex_joint"].active_index[0]): 1}
     mesh = target.get_first_collision_mesh(to_world_frame=True)
-    if mesh is None:
-        return fail(env, "grasp the target: no collision mesh")
     obb = mesh.bounding_box_oriented
     tallest_top = max(
         float(a.get_first_collision_mesh(to_world_frame=True).bounds[1][2])
@@ -1409,25 +1705,6 @@ def _solve(
     # The horizontal base->object ray: the line the arm actually extends along, which
     # is the approach `approach_aligned_grasp_info` aims down (K59). Taken from the base
     # and not the TCP so it does not drift with whatever pose the hand happens to be in.
-    if GRASP_TORSO_RESERVE > 0.0:
-        # EXPERIMENT (2026-09-06, off by default): leave the lift some torso. At the shipped
-        # standoff the grasp spends the torso to its stop (377, 1802: 0.368 of 0.386) and the
-        # lift then has neither a screw rung nor torso room, only an RRT swing that drops the
-        # condiment. Set the torso GRASP_TORSO_RESERVE under its stop before the approach and
-        # freeze it for the reach and grasp legs; the arm reaches on its own.
-        jm = getattr(task.agent.robot, "active_joints_map", None)
-        if jm is not None and "torso_lift_joint" in jm:
-            t_idx = int(jm["torso_lift_joint"].active_index[0])
-            t_now = float(_np(task.agent.robot.get_qpos()).reshape(-1)[t_idx])
-            t_max = float(_np(jm["torso_lift_joint"].limits).reshape(-1)[-1])
-            t_goal = min(t_now, t_max - GRASP_TORSO_RESERVE)
-            if t_now - t_goal > 0.01:
-                say(env, "torso reserve for the lift", torso=round(t_now, 3), to=round(t_goal, 3))
-                r_t = common.plan_joints(env, planner, task, {"torso_lift_joint": t_goal},
-                                         label="torso reserve", tries=1, who=WHO, line_only=True)
-                if r_t != -1 and common.stopped_by_horizon(planner):
-                    return r_t
-                planner.planner.update_from_simulation()
     base_pos = _np(task.agent.base_link.pose.p)[0]
     ee_direction = np.asarray(obb.center_mass, dtype=np.float64) - base_pos
     ee_direction[2] = 0.0
@@ -1439,29 +1716,24 @@ def _solve(
     target_closing /= np.linalg.norm(target_closing)
 
     z_grasp = max(float(obb.center_mass[2]), float(mesh.bounds[1][2]) - GRASP_BELOW_TOP)
-    grasp, reach = raise_grasp_to(*grasp_geometry(task, obb, ee_direction, target_closing, grasp_info), z_grasp)
+    grasp, reach = raise_grasp_to(*season.grasp_geometry(
+        task, obb, ee_direction, target_closing, grasp_info), z_grasp)
     # One bounded search, at most eight distinct arm configurations. No nested
     # yaw/height/re-dock recovery ladder and no physical failed-grasp retries.
     tcp_to_hand = task.agent.tcp.pose[0].sp.inv() * task.agent.robot.links_map["gripper_link"].pose[0].sp
     hand = grasp * tcp_to_hand
     camera = next(c for c in task.agent._sensor_configs if c.uid == "fetch_hand")
     camera_pose = hand * camera.pose[0].sp
-    if (abs(grasp.to_transformation_matrix()[2, 2]) > math.sin(math.radians(2))
-            or camera_pose.p[2] - hand.p[2] < .02
-            or camera_pose.to_transformation_matrix()[2, 2] < .2):
-        return fail(env, "reject inverted hand-camera grasp")
     reach = noise.pose("grasp_approach", reach)
     res, grasped = _try_grasp_with_pad(env, planner, task, target, grasp, reach,
                                       target_pad=APPROACH_TARGET_PAD, by_line=True)
-    if res == -1 or not grasped:
+    if res == -1:
         return fail(env, "bounded horizontal grasp/lift/continuation refused",
                     reasons=dict(getattr(planner, '_chain_reasons', {})))
-    if common.stopped_by_horizon(planner):return res
-    # D6: a nudged distractor voids the episode — a physical miss, not a plan failure.
-    if not _flag(res[-1], "distractor_ok"):
-        say(env, "missed: distractor moved during the grasp", distractor_ok=False,
-            distractor_moved=round(float(_np(res[-1]["distractor_moved"]).reshape(-1)[0]), 3))
+    if not grasped:
+        say(env, "physical miss: target did not remain in the gripper")
         return res
+    # D6: a nudged distractor voids the episode — a physical miss, not a plan failure.
     say(env, "grasped", distractor_ok=True)
     # Keep observing the condiment until its lift is complete.
     # Keep the selected elbow/wrist branch through lift and carry.
@@ -1478,16 +1750,22 @@ def _solve(
     lift_z = float(planner._season_lift_z)
     lift_target = sapien.Pose([tcp.p[0], tcp.p[1], lift_z], tcp.q)
     say(env, "lift", lift_z=lift_z, motion="straight_vertical_same_elbow")
-    with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
+    with season.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
         current = task.agent.robot.get_qpos()[0].cpu().numpy()
         support = initial_support_contacts(planner, target, current)
         path = straight_plan(planner, lift_target, initial_contacts=support)
+        if path is None:
+            return fail(env, "vertical lift path refused")
         with enforce_upright(planner, task, target):
             res = execute_straight(planner, path)
-    if res != -1 and common.stopped_by_horizon(planner):
+    if common.stopped_by_horizon(planner):
         return res
     if res == -1:
-        return fail(env, "straight lift from physical grasp refused")
+        return fail(env, "vertical lift execution refused")
+    planner.planner.update_from_simulation()
+    if not bool(task.agent.is_grasping(target).any()):
+        say(env, "physical miss: target lost during vertical lift")
+        return res
 
     # Post-conditions the lift never had (K77). There are `distractor_ok` checkpoints
     # after the grasp and after the drive but none here, and `distractor_moved` is an
@@ -1501,144 +1779,73 @@ def _solve(
     # a 193 mm lift, the RRT fallback drove the TCP to z=0.710 — 0.21 m *below* the
     # counter — raked the shaker out of the fingers, and because nothing checked, the next
     # 270 steps planned against a phantom object still attached in the planning world.
-    if not _flag(res[-1], "distractor_ok"):
-        say(env, "missed: distractor moved during the lift", distractor_ok=False,
-            distractor_moved=round(float(_np(res[-1]["distractor_moved"]).reshape(-1)[0]), 3))
-        return res
-    if not bool(_np(task.agent.is_grasping(target)).any()):
-        say(env, "missed: dropped during the lift", lift_z=round(float(lift_z), 3),
-            object_z=round(float(_np(target.pose.p)[0][2]), 3))
-        return res
     planner.planner.update_from_simulation()
     # After the completed lift, check the whole stationary-base continuation
     # before spending motion on folding or driving. Pure previews issue no actions.
     with elbow_only(planner, task):
         current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
-        with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
+        with season.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
             direct = plan_loaded_hover(planner, task, current, held_transform(task, target))
         say(env, "bowl route selected", route="direct_pour" if direct is not None else "upright_carry_and_drive")
         planner.track_target(lambda: _np(task.bowl.pose.p)[0])
-        try:
-            with enforce_upright(planner, task, target):
-                if direct is None:
-                    res = navigation_posture(env, planner, task, target)
-                    if res == -1 or common.stopped_by_horizon(planner):
-                        return res
-                    dock = _np(task._bowl_dock_np)[0].astype(np.float64)
-                    face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.])
-                    dock_xyz = noise.point("bowl_dock", [dock[0], dock[1], 0.], axes=(True, True, False))
-                    planner.planner.update_from_simulation()
-                    current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
-                    route = plan_bowl_drive(planner, task, current, held_transform(task, target), dock_xyz, face)
-                    if route is None:
-                        return fail(env, "no checked loaded route with a complete bowl pour",
-                                    tried=getattr(planner, '_route_failures', []))
-                    dock_xyz = route['dock']
-                    say(env, "loaded bowl route prechecked", offset_x_m=route['offset_x_m'],
-                        dock=dock_xyz.tolist(), complete_wrist_pour=True)
-                    say(env, "drive to bowl dock", dock=dock_xyz.tolist())
-                    # Hold the corrected targets; do not integrate measured PD lag
-                    # into a slowly drifting wrist while the base is driving.
-                    names = task.agent.controller.controllers['arm'].config.joint_names
-                    q = task.agent.robot.get_qpos()[0].cpu().numpy()
-                    fixed = {i: float(q[int(task.agent.robot.active_joints_map[n].active_index[0])]) for i,n in enumerate(names)}
-                    fixed[10] = float(q[int(task.agent.robot.active_joints_map['torso_lift_joint'].active_index[0])])
-                    previous = getattr(planner, 'fixed_action_targets', {})
-                    planner.fixed_action_targets = dict(previous)
-                    planner.fixed_action_targets.update(fixed)
-                    try:
-                        res = drive_to_counter(env, planner, dock_xyz, face, loaded=True)
-                    finally:
-                        planner.fixed_action_targets = previous
-                    if res == -1 or common.stopped_by_horizon(planner):
-                        return res
-                    planner.planner.update_from_simulation()
-                    current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
-                    with common.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-                        direct = plan_loaded_hover(planner, task, current, held_transform(task, target), preferred=route['hover'])
-                    if direct is None:
-                        return fail(env, "no upright hover with a complete wrist-only pour",
-                                    hover=hover_summary(planner))
-                say(env, "hover over bowl", route_prechecked=True, extra=direct['hover_extra'],
-                    back=direct['hover_back'], spin_deg=direct['hover_spin'])
-                with transfer_phase(planner, "carry condiment over bowl"):
-                    res = planner.follow_forward_path_w_refinement(direct['approach'], refine=True)
-                if res == -1 or common.stopped_by_horizon(planner):
+        with enforce_upright(planner, task, target):
+            if direct is None:
+                res = navigation_posture(env, planner, task, target)
+                if common.stopped_by_horizon(planner):
                     return res
-        except PayloadTiltError as error:
-            return fail(env, str(error))
-        if not _flag(res[-1], "distractor_ok"):
-            return fail(env, "distractor moved during upright transfer")
-        from planners.oracle.wrist_pour import pour_with_wrist
+                if res == -1:
+                    return fail(env, "navigation posture before bowl drive")
+                if not bool(task.agent.is_grasping(target).any()):
+                    say(env, "physical miss: target lost while preparing bowl drive")
+                    return res
+                dock = _np(task._bowl_dock_np)[0].astype(np.float64)
+                face = np.array([math.cos(dock[2]), math.sin(dock[2]), 0.])
+                dock_xyz = noise.point("bowl_dock", [dock[0], dock[1], 0.], axes=(True, True, False))
+                planner.planner.update_from_simulation()
+                current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
+                route = plan_bowl_drive(planner, task, current, held_transform(task, target), dock_xyz, face)
+                if route is None:
+                    return fail(env, "no checked loaded route with a complete bowl pour",
+                                tried=getattr(planner, '_route_failures', []))
+                dock_xyz = route['dock']
+                say(env, "loaded bowl route prechecked", offset_x_m=route['offset_x_m'],
+                    dock=dock_xyz.tolist(), complete_wrist_pour=True)
+                say(env, "drive to bowl dock", dock=dock_xyz.tolist())
+                # Hold the corrected targets; do not integrate measured PD lag
+                # into a slowly drifting wrist while the base is driving.
+                names = task.agent.controller.controllers['arm'].config.joint_names
+                q = task.agent.robot.get_qpos()[0].cpu().numpy()
+                fixed = {i: float(q[int(task.agent.robot.active_joints_map[n].active_index[0])]) for i,n in enumerate(names)}
+                fixed[10] = float(q[int(task.agent.robot.active_joints_map['torso_lift_joint'].active_index[0])])
+                previous = getattr(planner, 'fixed_action_targets', {})
+                planner.fixed_action_targets = dict(previous)
+                planner.fixed_action_targets.update(fixed)
+                try:
+                    res = drive_to_counter(env, planner, dock_xyz, face, loaded=True)
+                finally:
+                    planner.fixed_action_targets = previous
+                if common.stopped_by_horizon(planner):
+                    return res
+                if res == -1:
+                    return fail(env, "loaded drive to bowl dock")
+                planner.planner.update_from_simulation()
+                if not bool(task.agent.is_grasping(target).any()):
+                    say(env, "physical miss: target lost during bowl drive")
+                    return res
+                current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
+                with season.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
+                    direct = plan_loaded_hover(planner, task, current, held_transform(task, target), preferred=route['hover'])
+                if direct is None:
+                    return fail(env, "no loaded hover after bowl drive")
+            say(env, "hover over bowl", route_prechecked=True, extra=direct['hover_extra'],
+                back=direct['hover_back'], spin_deg=direct['hover_spin'])
+            with transfer_phase(planner, "carry condiment over bowl"):
+                res = planner.follow_forward_path_w_refinement(direct['approach'], refine=True)
+        if common.stopped_by_horizon(planner):
+            return res
+        if res == -1:
+            return fail(env, "loaded approach to bowl refused")
+        if not bool(task.agent.is_grasping(target).any()):
+            say(env, "physical miss: target lost on approach to bowl")
+            return res
         return pour_with_wrist(env, planner, task, target, target_degrees=165.0)
-
-
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--seed", type=int, default=3)
-    parser.add_argument("--scene-idx", type=int, default=0)
-    parser.add_argument("--output-dir", default="videos/season_dish")
-    parser.add_argument("--render-mode", default="rgb_array")
-    parser.add_argument("--render-width", type=int, default=512)
-    parser.add_argument("--render-height", type=int, default=512)
-    parser.add_argument("--max-steps-per-video", type=int, default=None)
-    parser.add_argument("--no-video", action="store_true")
-    parser.add_argument("--no-trajectory", action="store_true")
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument(
-        "--blind",
-        action="store_true",
-        help="arm B of the control experiment: ignore the cue, take a uniformly random condiment (seeded)",
-    )
-    parser.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None,
-                        help="IK from mplib alone, or proposals from cuRobo (robots/fetch/IK_BACKENDS.md; needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY)")
-    parser.add_argument("--assisted-grasp", action=argparse.BooleanOptionalAction, default=True,
-                        help="weld the picked object to the hand by OmniGibson's rule (utils/mikasa/assisted_grasp.py; "
-                             "changes the physics); on by default since 2026-10-18 (profile 26), --no-assisted-grasp turns it off")
-    return parser.parse_args(argv)
-
-
-def main(argv=None):
-    args = parse_args(argv)
-    if args.ik_backend is not None:
-        os.environ["MIKASA_IK_BACKEND"] = args.ik_backend
-
-    env = gym.make(
-        "MikasaSeasonDish-v0",
-        num_envs=1,
-        render_mode=None if args.no_video else args.render_mode,
-        obs_mode="state" if args.no_video else None,
-        robot_uids="ds_fetch",
-        control_mode="pd_joint_pos",
-        scene_idx=args.scene_idx,
-        human_render_camera_configs=dict(
-            width=args.render_width, height=args.render_height
-        ),
-        assisted_grasp=args.assisted_grasp,
-    )
-    env = RecordEpisode(
-        env,
-        output_dir=args.output_dir,
-        save_video=not args.no_video,
-        save_trajectory=not args.no_trajectory,
-        video_fps=30,
-        save_on_reset=True,
-        max_steps_per_video=args.max_steps_per_video,
-    )
-
-    # solve() seeds everything (Python, numpy, torch, mplib) next to its reset.
-    res = solve(env, seed=args.seed, debug=args.debug, vis=False, blind=args.blind)
-    if res == -1:
-        print("failed_motion_plan")
-    else:
-        print("success:", bool(res[-1]["success"][0]))
-    ag = env.unwrapped._ag
-    if ag is not None:
-        kinds = [k for _, k, _ in ag.events]
-        print(f"assisted_grasp establish={kinds.count('establish')} release={kinds.count('release')} events={ag.events}")
-    env.close()
-    return res
-
-
-if __name__ == "__main__":
-    sys.exit(0 if main() != -1 else 1)

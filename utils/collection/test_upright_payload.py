@@ -1,10 +1,15 @@
 """The wrist compensation must preserve orientation and reject unreachable axes."""
-import numpy as np
 from types import SimpleNamespace
-from planners.oracle.roll_paths import RollPathPlanner
-from planners.oracle.upright_payload import preview_roll_history
-from planners.oracle.upright_payload import upright_wrist_candidates
-from planners.oracle.wrist_pour import rotation
+
+import numpy as np
+import pytest
+from planners.oracle.paths import RollPathPlanner
+from planners.oracle.oracle_season_dish import (
+    preview_roll_history,
+    rotation,
+    upright_path,
+    upright_wrist_candidates,
+)
 
 
 def test_compensation_recovers_many_grasp_axes_without_winding():
@@ -18,6 +23,13 @@ def test_compensation_recovers_many_grasp_axes_without_winding():
         np.testing.assert_allclose(candidates[0],expected,atol=1e-6)
         actual=rotation([0,1,0],candidates[0][0]) @ rotation([1,0,0],candidates[0][1]) @ axis
         np.testing.assert_allclose(actual,up,atol=1e-7)
+
+
+@pytest.mark.parametrize("mode", ("cone12", "cone_hover12"))
+def test_removed_cone_compensation_modes_are_rejected(mode):
+    task = SimpleNamespace(motion_parameters={"upright_compensation": mode})
+    with pytest.raises(ValueError, match="upright_compensation modes.*were removed"):
+        upright_path(None, task, None, None, None)
 
 
 def test_axis_that_two_wrist_joints_cannot_raise_is_refused():
@@ -47,7 +59,7 @@ def test_future_pour_accounts_for_grasp_excursion_and_restores_preview():
 
 def test_transfer_guard_checks_initial_grasp_every_step_and_restores_callback():
     import pytest
-    from planners.oracle.upright_payload import enforce_upright, PayloadTiltError
+    from planners.oracle.oracle_season_dish import enforce_upright, PayloadTiltError
     angle=[14.9];held=[True];steps=[]
     def matrix():
         result=np.eye(4);result[:3,:3]=rotation([1,0,0],np.deg2rad(angle[0]));return result

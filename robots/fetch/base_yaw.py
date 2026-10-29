@@ -52,7 +52,7 @@ SWEEP_STEP = 0.15
 
 # The one prefix every swept-arc refusal starts with. `rotate_base_z` prints the
 # refusal and returns a bare -1, so an oracle that wants the *reason* reads it off
-# stdout (`planners.oracle.oracle_common.capture_refusal`, D13) — the constant lives here
+# stdout (`planners.oracle.oracle_water_plants.capture_refusal`, D13) — the constant lives here
 # so a rewording cannot silently disable that recovery.
 SWEEP_REFUSAL = "rotation sweep hits"
 

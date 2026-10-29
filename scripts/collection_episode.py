@@ -29,9 +29,6 @@ def main():
     ap.add_argument("--ik-chain", action=argparse.BooleanOptionalAction, default=None,
                     help="solve the contact before its standoff (planners/oracle/ik_chain.py); "
                          "off unless --ik-chain or MIKASA_IK_CHAIN=1")
-    ap.add_argument("--stance-scan", action=argparse.BooleanOptionalAction, default=None,
-                    help="choose the stance by a reach scan (planners/oracle/stance_scan.py; SeasonDish's "
-                         "needs MIKASA_CUROBO_SOCKET or MIKASA_CUROBO_PY); the task's default otherwise")
     ap.add_argument("--video-dir", default=None, help="record the render camera's clip here")
     ap.add_argument("--trajectory-out", default=None,
                     help="save every control step's robot qpos and action to this .npz (for comparing arms)")
@@ -40,9 +37,8 @@ def main():
 
     if args.ik_backend is not None:
         os.environ["MIKASA_IK_BACKEND"] = args.ik_backend
-    for flag, var in ((args.ik_chain, "MIKASA_IK_CHAIN"), (args.stance_scan, "MIKASA_STANCE_SCAN")):
-        if flag is not None:
-            os.environ[var] = "1" if flag else "0"
+    if args.ik_chain is not None:
+        os.environ["MIKASA_IK_CHAIN"] = "1" if args.ik_chain else "0"
 
     import gymnasium as gym
 
@@ -99,7 +95,7 @@ def main():
         info = base.get_info()
         success = verdict == "success" and bool(info["success"].reshape(-1)[0])
         print(f"collection_episode task={args.task} seed={seed} assisted_grasp={kwargs['assisted_grasp']} "
-              f"ik_backend={args.ik_backend or 'mplib'} ik_chain={os.environ.get('MIKASA_IK_CHAIN', '0')} stance_scan={args.stance_scan} "
+              f"ik_backend={args.ik_backend or 'mplib'} ik_chain={os.environ.get('MIKASA_IK_CHAIN', '0')} "
               f"verdict={verdict} success={success} steps={int(base.elapsed_steps.reshape(-1)[0])}", flush=True)
         ag = base._ag
         if ag is not None:

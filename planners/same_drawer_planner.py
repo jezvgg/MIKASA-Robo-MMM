@@ -31,12 +31,16 @@ import my_scenes  # noqa: F401
 from mani_skill.utils.geometry.trimesh_utils import get_component_mesh
 from my_scenes.same_drawer import DRAWER_ART_SUFFIX, DRAWER_FIXTURES
 from planners.oracle import oracle_common as common
-from planners.oracle.path_clearance import dense_samples
-from planners.oracle.rest_paths import curved_rest
-from planners.oracle.roll_paths import RollPathPlanner
-from planners.oracle.settling import ReleaseSettling
-from planners.oracle.smooth_base import drive_rounded_route
-from planners.oracle.straight_paths import execute_straight, straight_plan
+from planners.oracle import oracle_same_drawer as same_drawer
+from planners.oracle.paths import (
+    ReleaseSettling,
+    RollPathPlanner,
+    curved_rest,
+    dense_samples,
+    drive_rounded_route,
+    execute_straight,
+    straight_plan,
+)
 from robots.fetch.utils import unwrap_toward
 from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 from utils.mikasa.seeding import seed_everything
@@ -61,7 +65,6 @@ APPLE_REACH_STARTS = (
         forearm_roll_joint=1.441230, wrist_flex_joint=0.783066,
         wrist_roll_joint=-1.470573)),
 )
-
 
 # Bezier progress control values. q(s)=q0+(q1-q0)*B(0,c1,c2,1;s).
 # Pan's necessary excursion provides clearance around the counter; it is reported,
@@ -428,8 +431,8 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
         # Contact must follow a Cartesian line, not a joint-space/RRT detour.
         # Freeze the lift first: a lowered torso otherwise jams the Jacobian
         # solver at its lower limit despite a feasible arm-only stroke.
-        fixed_lift = common.screw_plans(planner, pose, disable_lift_joint=True)
-        if not fixed_lift and not common.screw_plans(planner, pose):
+        fixed_lift = same_drawer.screw_plans(planner, pose, disable_lift_joint=True)
+        if not fixed_lift and not same_drawer.screw_plans(planner, pose):
             return common.fail(env, WHO, "no straight contact path", waypoint=label)
         return planner.static_manipulation(pose, disable_lift_joint=fixed_lift,
             n_init_qpos=REACH_N_INIT, max_knots=160, knot_draws=1, knot_refuse=True,
@@ -493,8 +496,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
         attempts = 4 if from_handle else 3
         for attempt in range(attempts):
             result = common.plan_joints(env, planner, task, targets,
-                                       label="fold to canonical rest", tries=1,
-                                       who=WHO, line_only=True)
+                                       label="fold to canonical rest", who=WHO)
             if not stopped(result):
                 return result
             result = curved_rest(env, planner, task, targets, who=WHO)
@@ -603,7 +605,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
                         {"shoulder_lift_joint": 0.0, "elbow_flex_joint": 1.8,
                          "wrist_flex_joint": 1.7},
                         label="clear counter for low handle", who=WHO,
-                        line_only=True, tries=1)
+                        )
                     if stopped(result):
                         return result, False
                     result = approach_for_contact(reach, grasp, 120, torso_height=torso)
@@ -664,8 +666,8 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
                 for margin in (0.08, 0.06, 0.04, 0.02):
                     travel = max(0.0, cfg.open_success + margin - amount)
                     candidate = sapien.Pose(tcp.p + [0, -travel, 0], tcp.q)
-                    if (common.screw_plans(planner, candidate, disable_lift_joint=True)
-                            or common.screw_plans(planner, candidate)):
+                    if (same_drawer.screw_plans(planner, candidate, disable_lift_joint=True)
+                            or same_drawer.screw_plans(planner, candidate)):
                         goal = candidate
                         break
                 with refine_steps_capped():
@@ -781,9 +783,9 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
     reach = noise.pose("apple approach", reach)
     planner.set_grasp_branch(elbow=1, wrist=1)
     with reference_ik_starts(planner, task, APPLE_REACH_STARTS) as reference_used:
-        result, held = common.try_grasp(env, planner, task, task.apple, grasp, reach,
-            resync_before_grasp=True, close_on_contact=True, n_init_qpos=REACH_N_INIT,
-            approach_by_line=True, approach_max_knots=160, grasp_max_knots=80, grasp_knot_draws=1)
+        result, held = same_drawer.try_grasp(env, planner, task, task.apple, grasp, reach,
+            n_init_qpos=REACH_N_INIT, approach_max_knots=160, grasp_max_knots=80,
+            grasp_knot_draws=1)
     if reference_used:
         log("apple reach IK from fixed reference start", starts=list(reference_used))
     planner._grasp_branch = {}

@@ -61,7 +61,7 @@ TASK_STATE_OPTIONAL = ("seen_count", "cube_spawn", "closed_count")
 #: through the text (station_checklist's trap 5). The home rule is STATED —
 #: an unstated rule with an instant fail would fail an agent that follows the
 #: instruction literally (review finding).
-INSTRUCTIONS = (
+INSTRUCTIONS_FLOOR_MARK = (
     "Find the cola can hidden in the wall cabinets. Start at the floor mark. "
     "Close empty cabinets and return directly to the mark before the next search. "
     "Never inspect a cabinet again. Finish when you find the can.",
@@ -71,7 +71,7 @@ INSTRUCTIONS = (
     "Look for the cola can. Begin at the floor mark, close each empty cabinet "
     "and return directly to the mark. Remember inspected cabinets. Finish on finding the can.",
 )
-INSTRUCTIONS_NUDGE = (
+INSTRUCTIONS_NUDGE_FLOOR_MARK = (
     "Find the cola can in the wall cabinets and gently push it. Start at the floor mark. "
     "Close empty cabinets and return directly to the mark before searching another. "
     "Never inspect a cabinet twice. Finish after pushing the can.",
@@ -80,6 +80,17 @@ INSTRUCTIONS_NUDGE = (
     "Begin at the floor mark and look for the cola can. Close each empty cabinet and "
     "return directly to the mark. Remember inspected cabinets. End by nudging the can.",
 )
+
+
+def _on_the_rug(text: str) -> str:
+    return text.replace("the floor mark", "the rug").replace("the mark", "the rug")
+
+
+#: Since profile 18 (owner 2026-10-23) home is a round rug, not the yellow disk, and every
+#: instruction says so; `CabinetSearchConfig.home_marker="disk"` restores the floor-mark texts.
+INSTRUCTIONS = tuple(_on_the_rug(t) for t in INSTRUCTIONS_FLOOR_MARK)
+INSTRUCTIONS_NUDGE = tuple(_on_the_rug(t) for t in INSTRUCTIONS_NUDGE_FLOOR_MARK)
+HOME_RUG_OBJ = Path(__file__).resolve().parent / "assets" / "home_rug" / "home_rug.obj"
 
 #: The W13-measured graspable depth band on the cabinet shelf (y, world). The
 #: cube is never grasped here, but the band is also where W22 will measure
@@ -527,6 +538,10 @@ class CabinetSearchConfig:
     home_yaw_tol_deg: float = 35.0
     base_static_speed: float = 0.08
     "|root x/y/yaw velocity| under this = the base is parked (station_checklist)."
+    home_marker: str = "rug"
+    """What marks home on the floor: "rug", a round rug of radius `home_radius` (profile 18,
+    owner 2026-10-23; `assets/home_rug/`), or "disk", the yellow disk of profiles <= 17. Visual
+    only either way: no collision shapes, and the home predicate is the same disk."""
     home_marker_z: float = 0.002
     """The visual disk's centre height. The RoboCasa floor RENDERS as a box
     of half-size 0.02 centred at z=-0.02 (fixture `floor_room`: top face at
@@ -680,6 +695,7 @@ class CabinetSearchConfig:
         assert self.handle_hpad > 0 and self.home_dock_min_m > 0
 
         assert self.home_radius > 0 and 0 < self.home_yaw_tol_deg < 90
+        assert self.home_marker in ("rug", "disk"), f"home_marker={self.home_marker!r}: rug or disk"
         assert self.base_static_speed > 0
         assert self.reveal_dwell_steps >= 0
         assert 0.0 < self.look_cone_rad < math.pi / 2 and self.look_range_m > 0.5, (
@@ -1280,6 +1296,9 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
 
     SUPPORTED_ROBOTS = ["ds_fetch", "fetch"]
     SUPPORTED_REWARD_MODES = ["sparse", "none"]
+    # The proxy drive: with the direct one the hand went through the door leaves
+    # (tools/assisted_grasp_check/RESULTS.md); the owner's call 2026-10-26.
+    HAND_COLLIDES = True
 
     cfg = CabinetSearchConfig()
 
@@ -1479,23 +1498,36 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
         if np.abs(bounds[:, :2]).max() > cfg.cube_half:
             raise ValueError("Can exceeds the checked compartment clearance envelope")
 
-        # The home marker: a visual-only disk on the floor (no collision shapes
-        # — `add_collision=False`; kinematic, not static: the pose setter
-        # asserts non-static under GPU sim, season_dish's marker note). A
-        # cylinder's axis is x, so it is stood up by a 90-degree pitch.
-        self.home_marker = actors.build_cylinder(
-            self.scene,
-            radius=cfg.home_radius,
-            half_length=0.001,
-            color=[0.95, 0.85, 0.1, 1.0],
-            name="home_marker",
-            body_type="kinematic",
-            add_collision=False,
-            initial_pose=sapien.Pose(
-                p=[cfg.home_xy[0], cfg.home_xy[1], cfg.home_marker_z],
-                q=euler.euler2quat(0.0, math.pi / 2.0, 0.0),
-            ),
-        )
+        # The home marker: visual only, on the floor (no collision shapes; kinematic, not
+        # static: the pose setter asserts non-static under GPU sim, season_dish's marker note).
+        # The rug is a flat unit disk (normal +z) scaled to the home radius; the legacy disk is
+        # a cylinder, whose axis is x, stood up by a 90-degree pitch.
+        if cfg.home_marker == "rug":
+            builder = self.scene.create_actor_builder()
+            builder.add_visual_from_file(str(HOME_RUG_OBJ), scale=[cfg.home_radius, cfg.home_radius, 1.0])
+            builder.initial_pose = sapien.Pose(p=[cfg.home_xy[0], cfg.home_xy[1], cfg.home_marker_z],
+                                               q=self._home_marker_q())
+            self.home_marker = builder.build_kinematic(name="home_marker")
+        else:
+            self.home_marker = actors.build_cylinder(
+                self.scene,
+                radius=cfg.home_radius,
+                half_length=0.001,
+                color=[0.95, 0.85, 0.1, 1.0],
+                name="home_marker",
+                body_type="kinematic",
+                add_collision=False,
+                initial_pose=sapien.Pose(
+                    p=[cfg.home_xy[0], cfg.home_xy[1], cfg.home_marker_z],
+                    q=self._home_marker_q(),
+                ),
+            )
+
+    def _home_marker_q(self):
+        """The marker's orientation: the rug lies as built, the legacy cylinder is pitched up."""
+        if self.cfg.home_marker == "rug":
+            return [1.0, 0.0, 0.0, 0.0]
+        return euler.euler2quat(0.0, math.pi / 2.0, 0.0)
 
     def _untangle_fixture_door(self, stem: str):
         """Clear a fixture door's ignore bit, enabling its wall-park backstop.
@@ -1702,8 +1734,7 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
                 torch.as_tensor(np.stack(home_j), device=self.device) *
                 torch.as_tensor(cfg.home_jitter_xy, device=self.device))
             home[:, 2] = cfg.home_marker_z
-            self.home_marker.set_pose(Pose.create_from_pq(
-                p=home, q=euler.euler2quat(0.0, math.pi / 2.0, 0.0)))
+            self.home_marker.set_pose(Pose.create_from_pq(p=home, q=self._home_marker_q()))
 
             # The robot start: south of home, outside the disk (validate()).
             base = torch.zeros((b, 3))
@@ -1886,7 +1917,10 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
         return obs
 
     def get_language_instruction(self, **kwargs):
-        texts = INSTRUCTIONS_NUDGE if self.cfg.terminal == "nudge" else INSTRUCTIONS
+        if self.cfg.home_marker == "rug":
+            texts = INSTRUCTIONS_NUDGE if self.cfg.terminal == "nudge" else INSTRUCTIONS
+        else:
+            texts = INSTRUCTIONS_NUDGE_FLOOR_MARK if self.cfg.terminal == "nudge" else INSTRUCTIONS_FLOOR_MARK
         return [texts[int(i)] for i in self.instruction_idx.tolist()]
 
     # ----------------------------------------------------------------- state --
@@ -1921,3 +1955,40 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
             setattr(self, key, restore_task_tensor(
                 getattr(self, key), state[key], self.device
             ))
+
+
+# ------------------------------------------------- N = 5: cab_1 opened by the fist --
+
+CAB_1_FIST = Compartment(CAB_1_STEM, ("doorhinge",), "doorhinge", (-1,), close_policy="push")
+"""cab_1 for the fist-opened leaf (2026-10-24, the owner's ask): the leaf is cracked by the
+bar, the fist goes into the gap and pushes it open from inside to `CAB_1_FIST_OPEN_RAD`, short
+of where its push side would stand in the west wall, and the round closes it shut like every
+other leaf (`close_policy="push"`), instead of W24's wall park. EXPERIMENTAL."""
+
+CAB_1_FIST_OPEN_RAD = 1.30
+"""How open the fist leaves cab_1: past `theta_reveal` (1.2), and short of the ~1.6 rad past
+which the leaf's outer face (its closing push side) turns toward the west wall at x = 0."""
+
+COMPARTMENTS_5_FIST = (CAB_1_FIST,) + DEFAULT_COMPARTMENTS
+
+
+@dataclass
+class CabinetSearch5Config(CabinetSearchConfig):
+    """N = 5 with cab_1 opened by the fist and pushed shut (EXPERIMENTAL, unmeasured).
+
+    The horizon is the N = 4 one scaled by 5/4 for the extra round, not a measurement."""
+
+    compartments: tuple = COMPARTMENTS_5_FIST
+    untangle_stems: frozenset = frozenset({CAB_1_STEM})
+    horizon: int = 9000
+
+
+@register_env(
+    "MikasaCabinetSearch5-v0",
+    max_episode_steps=CabinetSearch5Config.horizon,
+    asset_download_ids=["RoboCasa"],
+)
+class CabinetSearch5Task(CabinetSearchTask):
+    """`MikasaCabinetSearch-v0` with the west wall unit as a fifth compartment (index 0)."""
+
+    cfg = CabinetSearch5Config()

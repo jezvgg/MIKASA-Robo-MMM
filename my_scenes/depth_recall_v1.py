@@ -45,7 +45,7 @@ from mani_skill.utils.structs import Pose
 from mani_skill.utils.structs.types import SceneConfig, SimConfig
 
 from utils.initial_pose import randomize_initial_joints
-from utils.mikasa.assisted_grasp import AssistedGrasp
+from utils.mikasa.assisted_grasp import AssistedGrasp, AssistedGraspConfig
 from utils.robocasa_utils import (load_objaverse_actor, objaverse_index, parking_pose,
                                   require_get_fixture, restore_task_tensor)
 
@@ -63,8 +63,10 @@ PAD_COLOR_NAMES = ("red", "green", "blue", "yellow")
 #: Which pad each prop goes on, in identity order: prop i -> pad i. Fixed for every
 #: episode (the pads' SLOTS are what the episode shuffles), so the map is the same words
 #: in every instruction.
-PAD_MAP = ("ketchup on the red pad, pepper on the green pad, salt on the blue pad, "
-           "mustard on the yellow pad")
+#: The two shakers are one RoboCasa model in two colours (shaker_0 black, shaker_1 white), so
+#: the text names the colour that tells them apart (the owner's call 2026-10-22; `PropSpec.spoken`).
+PAD_MAP = ("ketchup on the red pad, black pepper shaker on the green pad, "
+           "white salt shaker on the blue pad, mustard on the yellow pad")
 
 INSTRUCTIONS = (
     "Take the props out of the cabinet onto the counter pads (" + PAD_MAP + "), "
@@ -75,6 +77,14 @@ INSTRUCTIONS = (
     "Empty the shelf row onto the counter (" + PAD_MAP + "), hold on to the prop "
     "from the deepest spot, and put the rest back exactly where each of them was.",
 )
+
+#: The map as `depthrecall-ag-1000ep` was recorded (profile 6, before the shakers' colours
+#: were named), and the instructions built from it.
+PAD_MAP_V1 = ("ketchup on the red pad, pepper on the green pad, salt on the blue pad, "
+              "mustard on the yellow pad")
+INSTRUCTIONS_V1 = tuple(text.replace(PAD_MAP, PAD_MAP_V1) for text in INSTRUCTIONS)
+#: `instruction_version` -> the instructions: 1 as recorded, 2 the current text.
+INSTRUCTION_VERSIONS = {1: INSTRUCTIONS_V1, 2: INSTRUCTIONS}
 
 #: The staging pads' plate size. One pad per prop, in that prop's colour; the episode
 #: draws which counter slot each pad lies on. Decoration with a job: the pads are where
@@ -88,8 +98,8 @@ PAD_HALF = (0.045, 0.045, 0.002)
 
 #: The pads' fixed palette: pad c belongs to prop c (`PAD_MAP` names the pairs in the
 #: instruction), and the episode's ticket permutes which SLOT each pad occupies. These
-#: four hues are the ones the coloured-box version of this task measured its pads on.
-#: The props are no longer drawn in them (`PROPS`).
+#: four hues are the ones the coloured-box version of this task measured its pads and its
+#: perception on. The props are no longer drawn in them (`PROPS`).
 PROP_COLORS = (
     (1.0, 0.1, 0.1, 1.0),   # red
     (0.1, 0.8, 0.1, 1.0),   # green
@@ -107,8 +117,8 @@ PROP_COLORS = (
 #: control step and no contact of either with it reported (seed 1004, traced step by
 #: step: geometry, contact list, video). The 243 g boxes never showed it. At 0.005 the
 #: band is 1 cm, under the clearances the oracle keeps in the row: seeds 1000-1009 went
-#: from 36/40 (0.02) to 39/40 over two grasp-depth ladders, and the knock-overs that were
-#: most of the failures at 0.02 did not occur.
+#: from 36/40 (0.02) to 39/40 over two grasp-depth ladders x both perception modes, and
+#: the knock-overs that were most of the failures at 0.02 did not occur.
 SCENE_CONTACT_OFFSET = 0.005
 
 
@@ -130,6 +140,9 @@ class PropSpec:
     half_xy: float
     height: float
     recolor: tuple = ()
+    #: How the instruction names the prop when ``label`` alone does not tell it apart on
+    #: camera ("" = ``label``).
+    spoken: str = ""
     "(visual mesh file name, rgba) pairs: those visual parts are drawn in a flat colour."
 
 
@@ -147,8 +160,9 @@ class PropSpec:
 #: squeeze bottle (ketchup_8, a different shape from the ketchup's) is drawn in the
 #: yellow pad's colour and called mustard: as its own flat orange-red «hot sauce» it was a
 #: second red bottle beside the ketchup (the owner's call 2026-10-19; mayonnaise was
-#: passed over, it would be white like the salt). Telling them apart is by object: the
-#: planner reads the simulator.
+#: passed over, it would be white like the salt). Telling them apart is by object: the planner's
+#: state mode reads the simulator; the camera mode (`planners/depth_recall_v1_perception`)
+#: still names props by the old hues and does not support this look yet.
 #:
 #: Measured sizes (collision mesh, RoboCasa scale), all 2026-10-16:
 #: ketchup_7 4.20 x 4.33 x 16.50 cm 19.3 g; shaker_0 / shaker_1 5.17 x 5.09 x 9.45 cm
@@ -156,8 +170,10 @@ class PropSpec:
 #: (xy within 0.6 mm, z exactly half the height).
 PROPS = (
     PropSpec("ketchup", "ketchup", "ketchup_7", half_xy=0.0217, height=0.1650),
-    PropSpec("pepper", "shaker", "shaker_0", half_xy=0.0262, height=0.0945),
-    PropSpec("salt", "shaker", "shaker_1", half_xy=0.0262, height=0.0945),
+    PropSpec("pepper", "shaker", "shaker_0", half_xy=0.0262, height=0.0945,
+             spoken="black pepper shaker"),
+    PropSpec("salt", "shaker", "shaker_1", half_xy=0.0262, height=0.0945,
+             spoken="white salt shaker"),
     PropSpec("mustard", "ketchup", "ketchup_8", half_xy=0.0215, height=0.1500,
              recolor=(("model_normalized_0.obj", PROP_COLORS[3]),)),
 )
@@ -396,13 +412,21 @@ class DepthRecallV1Task(BaseEnv):
     cfg = DepthRecallV1Config()
 
     def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0,
-                 assisted_grasp: bool = False, **kwargs):
+                 assisted_grasp: bool = False, assisted_grasp_hand_collides: bool = False,
+                 instruction_version: int = 2, **kwargs):
         """``assisted_grasp=True`` welds a prop to the hand by OmniGibson's rule
         (`utils/mikasa/assisted_grasp.py`). Off by default: it changes the physics, so
-        demos and evaluations made with it are a different task and must say so."""
+        demos and evaluations made with it are a different task and must say so.
+        ``assisted_grasp_hand_collides`` picks its drive (`AssistedGraspConfig`): the direct
+        one by default, as `depthrecall-ag-1000ep` was recorded. ``instruction_version`` 1 is
+        the text that dataset was recorded with (`INSTRUCTION_VERSIONS`)."""
         self.cfg.validate()
+        if instruction_version not in INSTRUCTION_VERSIONS:
+            raise ValueError(f"instruction_version must be one of {sorted(INSTRUCTION_VERSIONS)}")
         self.scene_idx = scene_idx
         self.assisted_grasp = bool(assisted_grasp)
+        self.assisted_grasp_hand_collides = bool(assisted_grasp_hand_collides)
+        self.instruction_version = int(instruction_version)
         self._ag = None
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
@@ -580,7 +604,8 @@ class DepthRecallV1Task(BaseEnv):
         # diagnose scripts; a counter that advanced on every call would be wrong twice.
         self.last_eval_step = torch.full((n,), -1, dtype=torch.int32, device=dev)
         # The props and the agent exist now; the drives are made once per build.
-        self._ag = AssistedGrasp(self, self.props) if self.assisted_grasp else None
+        cfg = AssistedGraspConfig(hand_collides=self.assisted_grasp_hand_collides)
+        self._ag = AssistedGrasp(self, self.props, cfg) if self.assisted_grasp else None
         return super()._after_reconfigure(options)
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
@@ -847,7 +872,7 @@ class DepthRecallV1Task(BaseEnv):
 
     def get_language_instruction(self, **kwargs):
         """One phrasing: the text names the chore, never which prop came from where."""
-        return [INSTRUCTIONS[0]] * self.num_envs
+        return [INSTRUCTION_VERSIONS[self.instruction_version][0]] * self.num_envs
 
     def _get_obs_extra(self, info: dict) -> dict:
         """The memory fence.

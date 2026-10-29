@@ -66,11 +66,317 @@ import os
 import numpy as np
 
 from planners import cabinet_retrieval_planner as crp
-from planners.oracle import door_swing as ds
+import math
 from planners.oracle import oracle_common as common
 
 WHO = "cabinet_door_bimbo"
 
+
+
+# Cabinet-door geometry and path constraints used by the active bimanual planner.
+def rot_z(a: float) -> np.ndarray:
+    """3x3 rotation about +z by `a` (counter-clockwise seen from above).
+
+    Example:
+        >>> np.round(rot_z(math.pi / 2) @ np.array([1.0, 0.0, 0.0]), 6).tolist()
+        [0.0, 1.0, 0.0]
+    """
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+def rot2(a: float) -> np.ndarray:
+    """2x2 rotation by `a`."""
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, -s], [s, c]])
+
+def swing_pose(T, hinge_xy, angle: float) -> np.ndarray:
+    """The pose `T` carried about the vertical axis through `hinge_xy` by `angle` (CCW > 0).
+
+    Position and orientation both turn: what a body rigidly fixed to the door does.
+
+    Example:
+        >>> T = np.eye(4); T[:3, 3] = [1.0, 0.0, 0.5]
+        >>> np.round(swing_pose(T, [0.0, 0.0], math.pi / 2)[:3, 3], 6).tolist()
+        [0.0, 1.0, 0.5]
+    """
+    T = np.asarray(T, dtype=np.float64)
+    Rz = rot_z(float(angle))
+    h = np.array([float(hinge_xy[0]), float(hinge_xy[1]), 0.0])
+    out = T.copy()
+    out[:3, :3] = Rz @ T[:3, :3]
+    out[:3, 3] = h + Rz @ (T[:3, 3] - h)
+    return out
+
+def door_frames(grasp_T, hinge_xy, turn: float, *, hand_turn: float | None = None,
+                pre_gap: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """(pre-grasp, grasp) hand poses with the door swung by `turn` from where `grasp_T` was taken.
+
+    BIMBO's `door_frames(geo, sw)`: the grasp point rides the hinge's circle with the door. The
+    hand's orientation turns about +z by `hand_turn` (None = `turn`, BIMBO's frames, the hand
+    fixed to the bar; 0 = the hand keeps its world orientation). The pre-grasp lies `pre_gap`
+    back along the hand's own approach axis (+z of the TCP frame, `build_grasp_pose`).
+
+    Args:
+        grasp_T: the hand pose on the bar at the reference door angle.
+        hinge_xy: the hinge axis, world xy.
+        turn: signed yaw of the door from the reference angle (sense * open_dir * delta).
+        hand_turn: signed yaw of the hand; None = `turn`.
+        pre_gap: metres back along the approach for the pre-grasp.
+
+    Returns:
+        `(pre, grasp)`, two 4x4 poses.
+
+    Example:
+        >>> G = np.eye(4); G[:3, 3] = [-0.4, 0.0, 1.5]
+        >>> pre, g = door_frames(G, [0.0, 0.0], math.pi / 2, hand_turn=0.0, pre_gap=0.1)
+        >>> (np.round(g[:3, 3], 6) + 0.0).tolist(), np.allclose(g[:3, :3], np.eye(3))
+        ([0.0, -0.4, 1.5], True)
+        >>> (np.round(pre[:3, 3], 6) + 0.0).tolist()
+        [0.0, -0.4, 1.4]
+    """
+    G = np.asarray(grasp_T, dtype=np.float64)
+    grasp = swing_pose(G, hinge_xy, float(turn))
+    yaw = float(turn) if hand_turn is None else float(hand_turn)
+    grasp[:3, :3] = rot_z(yaw) @ G[:3, :3]
+    pre = grasp.copy()
+    pre[:3, 3] = grasp[:3, 3] - float(pre_gap) * grasp[:3, 2]
+    return pre, grasp
+
+def angle_of(hinge_xy, ref_xy, xy, sign: float = 1.0) -> float:
+    """The door angle (in the opening sense) at which a handle first at `ref_xy` stands at `xy`.
+
+    BIMBO's `DoorGeo.angle_of`: the signed angle from (ref - hinge) to (xy - hinge), times the
+    opening sign (+1 when opening turns the door CCW seen from above).
+
+    Example:
+        >>> round(angle_of([0, 0], [-1, 0], [0, -1], sign=1.0), 4)
+        1.5708
+        >>> round(angle_of([0, 0], [1, 0], [0, -1], sign=-1.0), 4)
+        1.5708
+    """
+    h = np.asarray(hinge_xy, dtype=np.float64).reshape(-1)[:2]
+    a = np.asarray(ref_xy, dtype=np.float64).reshape(-1)[:2] - h
+    b = np.asarray(xy, dtype=np.float64).reshape(-1)[:2] - h
+    return float(sign) * math.atan2(a[0] * b[1] - a[1] * b[0], float(a @ b))
+
+def rotvec(R) -> np.ndarray:
+    """Rotation vector (axis * angle) of a 3x3 rotation matrix.
+
+    Example:
+        >>> np.round(rotvec(rot_z(0.3)), 6).tolist()
+        [0.0, 0.0, 0.3]
+    """
+    R = np.asarray(R, dtype=np.float64)
+    w = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+    s = 0.5 * float(np.linalg.norm(w))                 # sin(angle)
+    c = float(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))
+    angle = math.atan2(s, c)                           # well conditioned at small angles
+    if math.pi - angle < 1e-5:
+        # near pi the antisymmetric part vanishes: the axis from the symmetric part
+        M = (R + np.eye(3)) / 2.0
+        k = int(np.argmax(np.diag(M)))
+        axis = M[:, k] / math.sqrt(max(M[k, k], 1e-12))
+        return axis / np.linalg.norm(axis) * angle
+    if s < 1e-12:
+        return 0.5 * w
+    return w / (2.0 * s) * angle
+
+def pose_error(T_now, T_goal) -> tuple[np.ndarray, np.ndarray]:
+    """(position error, rotation-vector error) taking `T_now` to `T_goal`, both in the world frame.
+
+    Example:
+        >>> A = np.eye(4); B = np.eye(4); B[:3, :3] = rot_z(0.2); B[:3, 3] = [0.1, 0, 0]
+        >>> dp, dr = pose_error(A, B)
+        >>> np.round(dp, 6).tolist(), np.round(dr, 6).tolist()
+        ([0.1, 0.0, 0.0], [0.0, 0.0, 0.2])
+    """
+    A = np.asarray(T_now, dtype=np.float64)
+    B = np.asarray(T_goal, dtype=np.float64)
+    return B[:3, 3] - A[:3, 3], rotvec(B[:3, :3] @ A[:3, :3].T)
+
+def _clip_norm(v, cap: float) -> np.ndarray:
+    v = np.asarray(v, dtype=np.float64)
+    n = float(np.linalg.norm(v))
+    return v if n <= cap or n < 1e-12 else v * (cap / n)
+
+def dls_step(J, dp, dr, *, k_pos: float = 0.5, k_rot: float = 0.5, cap_pos: float = 0.03,
+             cap_rot: float = 0.08, damping: float = 2e-3, cap_q: float = 0.06,
+             w_rot: float = 0.5, joint_cost=None, bias=None) -> np.ndarray:
+    """One damped-least-squares joint step toward a pose error (BIMBO's `ArmServo.step`).
+
+    The task-space step is the error scaled by its gain and capped in norm; rotation rows are
+    weighted by `w_rot` (metres per radian) so a turn does not swamp a reach. The joint step is
+    `J^T (J J^T + damping I)^-1 d` on the weighted rows, scaled down as a whole so no joint moves
+    more than `cap_q` (a uniform scale keeps the direction of the step).
+
+    `joint_cost` (n,) makes it the weighted least-norm step: a joint with cost c moves as if
+    its motion cost c times more (the inverse weights scale `J^T`). `bias` (n,) is a joint step
+    wanted on the side; only its part in the task's null space is added, so it changes how the
+    arm is shaped, not where the hand goes (to first order).
+
+    Args:
+        J: 6 x n Jacobian, rows [linear; angular], world-aligned at the controlled point.
+        dp, dr: position error (m) and rotation-vector error (rad), world frame.
+        joint_cost: optional per-joint cost (> 0); None = 1 for all.
+        bias: optional secondary joint step, projected into the null space.
+
+    Returns:
+        dq, shape (n,).
+
+    Example:
+        >>> J = np.zeros((6, 6)); J[:6, :6] = np.eye(6)
+        >>> np.round(dls_step(J, [0.01, 0, 0], [0, 0, 0], k_pos=1.0), 4).tolist()[:3]
+        [0.01, 0.0, 0.0]
+    """
+    J = np.asarray(J, dtype=np.float64)
+    d = np.r_[_clip_norm(k_pos * np.asarray(dp, dtype=np.float64), cap_pos),
+              _clip_norm(k_rot * np.asarray(dr, dtype=np.float64), cap_rot)]
+    W = np.diag([1.0, 1.0, 1.0, w_rot, w_rot, w_rot])
+    Jw, dw = W @ J, W @ d
+    n = J.shape[1]
+    Ci = np.diag(1.0 / np.asarray(joint_cost, dtype=np.float64)) if joint_cost is not None \
+        else np.eye(n)
+    pinv = Ci @ Jw.T @ np.linalg.inv(Jw @ Ci @ Jw.T + float(damping) * np.eye(6))
+    dq = pinv @ dw
+    if bias is not None:
+        dq = dq + (np.eye(n) - pinv @ Jw) @ np.asarray(bias, dtype=np.float64)
+    m = float(np.max(np.abs(dq))) if dq.size else 0.0
+    if m > cap_q:
+        dq = dq * (cap_q / m)
+    return dq
+
+def unicycle_hold_cmd(point_xy, point_vel_xy, base_xy, yaw: float, lever_ref, *,
+                      gain: float = 1.0, v_max: float = 0.15, w_max: float = 0.6,
+                      min_ax: float = 0.3) -> tuple[float, float, float, float]:
+    """(v, omega, a_x, a_y) that keep a moving world point at `lever_ref` in the base frame.
+
+    BIMBO's `follow_base` creeps a holonomic base (x and y velocities) so the hand's goal stays
+    in front of the chest. A Fetch base has a forward speed and a yaw rate only. With the point at
+    body coordinates r = (a_x, a_y) and moving at `point_vel`, the body-frame rate of r is
+    `R^T pdot - (v - omega a_y, omega a_x)`; asking for `-gain (r - lever_ref)` gives the exact
+    solution below (the K103 arc law, `arc_pull_cmd`, is its feed-forward part). `a_x` is
+    floored at `min_ax` so a point that drifts beside the base cannot command a spin.
+
+    Args:
+        point_xy, point_vel_xy: the point and its world velocity (m, m/s).
+        base_xy, yaw: the base pose (root x, y and yaw).
+        lever_ref: where the point should stand in the base frame, (forward, left).
+        gain: feedback rate, 1/s.
+        v_max, w_max: caps, m/s and rad/s.
+
+    Returns:
+        `(v, omega, a_x, a_y)`: commands in physical units and the point's current lever.
+
+    Example:
+        >>> v, w, ax, ay = unicycle_hold_cmd([0, 1], [0, 0], [0, 0], math.pi / 2, (1.0, 0.0))
+        >>> round(v, 6), round(w, 6), round(ax, 6), round(ay, 6)
+        (0.0, 0.0, 1.0, 0.0)
+        >>> v, w, *_ = unicycle_hold_cmd([0, 1], [0, 0.1], [0, 0], math.pi / 2, (1.0, 0.0))
+        >>> round(v, 6), round(w, 6)
+        (0.1, 0.0)
+    """
+    p = np.asarray(point_xy, dtype=np.float64).reshape(-1)[:2]
+    u = np.asarray(point_vel_xy, dtype=np.float64).reshape(-1)[:2]
+    b = np.asarray(base_xy, dtype=np.float64).reshape(-1)[:2]
+    f = np.array([math.cos(yaw), math.sin(yaw)])
+    l = np.array([-math.sin(yaw), math.cos(yaw)])
+    r = p - b
+    ax, ay = float(r @ f), float(r @ l)
+    ex, ey = ax - float(lever_ref[0]), ay - float(lever_ref[1])
+    ux = float(u @ f) + gain * ex
+    uy = float(u @ l) + gain * ey
+    w = uy / max(ax, min_ax)
+    v = ux + w * ay
+    return (float(np.clip(v, -v_max, v_max)), float(np.clip(w, -w_max, w_max)), ax, ay)
+
+def leaf_segment(hinge_xy, edge0_xy, turn: float) -> tuple[np.ndarray, np.ndarray]:
+    """The leaf in the plane: hinge and free edge, the edge (closed-leaf position `edge0_xy`)
+    carried round the hinge by the signed `turn`.
+
+    Example:
+        >>> a, b = leaf_segment([0, 0], [-0.5, 0], math.pi / 2)
+        >>> (np.round(b, 6) + 0.0).tolist()
+        [0.0, -0.5]
+    """
+    h = np.asarray(hinge_xy, dtype=np.float64).reshape(-1)[:2]
+    e = np.asarray(edge0_xy, dtype=np.float64).reshape(-1)[:2] - h
+    return h.copy(), h + rot2(float(turn)) @ e
+
+def seg_dist(p, a, b) -> float:
+    """Distance from the point `p` to the segment a-b (BIMBO's `swing.seg_dist`).
+
+    Example:
+        >>> seg_dist([0, 1], [-1, 0], [1, 0]), seg_dist([2, 0], [-1, 0], [1, 0])
+        (1.0, 1.0)
+    """
+    p = np.asarray(p, dtype=np.float64).reshape(-1)[:2]
+    a = np.asarray(a, dtype=np.float64).reshape(-1)[:2]
+    b = np.asarray(b, dtype=np.float64).reshape(-1)[:2]
+    ab = b - a
+    L2 = float(ab @ ab)
+    if L2 < 1e-12:
+        return float(np.linalg.norm(p - a))
+    t = float(np.clip((p - a) @ ab / L2, 0.0, 1.0))
+    return float(np.linalg.norm(p - (a + t * ab)))
+
+def path_keeps_off(a, b, seg_a, seg_b, *, n: int = 12, slack: float = 1e-3) -> bool:
+    """True when no point of the straight path a -> b is nearer the panel than `a` is.
+
+    BIMBO's `path_clear` asks for a fixed gap along the whole path; a hand that has just let
+    go of a bar starts a few centimetres from the panel by construction, so the test here is
+    that the path never closes on it (within `slack`).
+
+    Example:
+        >>> path_keeps_off([0, 0.05], [0, 0.20], [-1, 0], [1, 0])
+        True
+        >>> path_keeps_off([0, 0.05], [0.3, 0.02], [-1, 0], [1, 0])
+        False
+    """
+    a = np.asarray(a, dtype=np.float64).reshape(-1)[:2]
+    b = np.asarray(b, dtype=np.float64).reshape(-1)[:2]
+    d0 = seg_dist(a, seg_a, seg_b)
+    return all(seg_dist(a + (b - a) * float(t), seg_a, seg_b) >= d0 - slack
+               for t in np.linspace(0.0, 1.0, int(n)))
+
+def clear_direction(hand_z, normal_xy, *, min_off: float = 0.1,
+                    lift_off: float = 0.25) -> tuple[np.ndarray, str]:
+    """The horizontal direction the open hand leaves the bar by, and which rule chose it.
+
+    `back`: straight back along the hand's own approach axis (`-hand_z`), the grasp's approach
+    reversed, when that also leaves the leaf's face (`-hand_z . n >= min_off`). Otherwise
+    `plane`: the hand's axis projected on the leaf's plane plus `lift_off` of the outward
+    normal — the slide off the bar along the face that the shipped retreat makes
+    (`RETREAT_ALONG_FACE`), tilted a little away from the face.
+
+    Args:
+        hand_z: the hand's approach axis (TCP +z), world.
+        normal_xy: the leaf's outward face normal, world xy.
+
+    Returns:
+        `(d, rule)`: a horizontal unit 3-vector and "back" or "plane".
+
+    Example:
+        >>> d, rule = clear_direction([0, 1, 0], [0, -1])
+        >>> rule, (np.round(d, 6) + 0.0).tolist()
+        ('back', [0.0, -1.0, 0.0])
+        >>> d, rule = clear_direction([0, 1, 0], [1, 0])
+        >>> rule, np.round(d, 3).tolist()
+        ('plane', [0.243, -0.97, 0.0])
+    """
+    hz = np.asarray(hand_z, dtype=np.float64).reshape(-1)[:3]
+    n = np.asarray(normal_xy, dtype=np.float64).reshape(-1)[:2]
+    n3 = np.array([n[0], n[1], 0.0]) / max(float(np.linalg.norm(n)), 1e-12)
+    back = -np.array([hz[0], hz[1], 0.0])
+    nb = float(np.linalg.norm(back))
+    back = back / nb if nb > 1e-9 else n3.copy()   # a vertical hand axis: off the face
+    off = float(back @ n3)
+    if off >= float(min_off):
+        return back, "back"
+    plane = back - off * n3
+    npl = float(np.linalg.norm(plane))
+    plane = plane / npl if npl > 1e-9 else np.zeros(3)
+    d = plane + float(lift_off) * n3
+    return d / max(float(np.linalg.norm(d)), 1e-12), "plane"
 
 def _f(name: str, default: float) -> float:
     return float(os.environ.get(name, str(default)))
@@ -262,7 +568,7 @@ class HandServo:
         for k, j in enumerate(self.idx):
             q1 = q.copy()
             q1[j] += self.FD_EPS
-            dp, dr = ds.pose_error(T0, self.pose(q1))
+            dp, dr = pose_error(T0, self.pose(q1))
             J[:3, k], J[3:, k] = dp / self.FD_EPS, dr / self.FD_EPS
         return J
 
@@ -274,7 +580,7 @@ class HandServo:
     def step(self, q, T_goal, q_cmd) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """One control: the arm's next commanded joints, and the pose error it was taken on."""
         q = np.asarray(q, dtype=np.float64)
-        dp, dr = ds.pose_error(self.pose(q), T_goal)
+        dp, dr = pose_error(self.pose(q), T_goal)
         meas = q[self.idx]
         bias = np.where(self.roll, ROLL_HOLD, ARM_HOLD) * (self.roll_ref - meas)
         lo, hi = self.lo.copy(), self.hi.copy()
@@ -285,7 +591,7 @@ class HandServo:
             hi[self.roll] = np.minimum(hi[self.roll], win[1])
             edge = np.minimum(meas[self.roll] - lo[self.roll], hi[self.roll] - meas[self.roll])
             cost[self.roll] *= 1.0 + 9.0 * np.clip(1.0 - edge / ROLL_EDGE_M, 0.0, 1.0)
-        dq = ds.dls_step(self.jacobian(q), dp, dr, k_pos=K_POS, k_rot=K_ROT, cap_pos=CAP_POS,
+        dq = dls_step(self.jacobian(q), dp, dr, k_pos=K_POS, k_rot=K_ROT, cap_pos=CAP_POS,
                          cap_rot=CAP_ROT, cap_q=CAP_Q, w_rot=W_ROT, joint_cost=cost,
                          bias=bias)
         cmd = np.clip(np.asarray(q_cmd, dtype=np.float64) + dq, meas - ARM_LEAD_MAX,
@@ -402,7 +708,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
 
     def frame(sw_now: float) -> np.ndarray:
         turn = s * (sw_now - rad0)
-        return ds.door_frames(G0, anchor_xy, turn, hand_turn=HAND_TURN * turn)[1]
+        return door_frames(G0, anchor_xy, turn, hand_turn=HAND_TURN * turn)[1]
 
     say(env, f"{label} the door (bimbo)", target_rad=round(target, 3), start_rad=round(start, 3),
         lead_rate=LEAD_RATE, lead_max=LEAD_MAX, hand_turn=HAND_TURN,
@@ -434,14 +740,14 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
         goal = frame(sw)
         q = _qpos(task)
         pvel = (goal[:2, 3] - prev[:2, 3]) / dt
-        v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], pvel, q[:2], float(q[2]), lever_at(sw),
+        v, w, ax, ay = unicycle_hold_cmd(goal[:2, 3], pvel, q[:2], float(q[2]), lever_at(sw),
                                             gain=BASE_GAIN, v_max=BASE_V_MAX, w_max=BASE_W_MAX)
         res, dp, dr, fresh = drv.step(goal, (v, w))
         if fresh:
             perr_max = max(perr_max, float(np.linalg.norm(dp)))
             rerr_max = max(rerr_max, float(np.linalg.norm(dr)))
         if i % 10 == 0:
-            hand = ds.angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
+            hand = angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
             trace.append([i, round(sw, 3), round(rad, 3), round(hand, 3),
                           round(float(np.linalg.norm(dp)), 3), round(float(np.linalg.norm(dr)), 3),
                           round(v, 3), round(w, 3), round(ax, 3), round(ay, 3)])
@@ -450,7 +756,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
     if reason == "target" and LEVER_END[0] > 0:
         for settle in range(1, SETTLE_STEPS + 1):
             q = _qpos(task)
-            v, w, ax, ay = ds.unicycle_hold_cmd(goal[:2, 3], np.zeros(2), q[:2], float(q[2]),
+            v, w, ax, ay = unicycle_hold_cmd(goal[:2, 3], np.zeros(2), q[:2], float(q[2]),
                                                 lever_b, gain=BASE_GAIN, v_max=BASE_V_MAX,
                                                 w_max=BASE_W_MAX)
             lever_err = float(np.hypot(ax - lever_b[0], ay - lever_b[1]))
@@ -458,7 +764,7 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
                 break
             res, _, _, _ = drv.step(goal, (v, w))
     rad = float(crp.door_rad_now(task, door))
-    hand_rad = ds.angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
+    hand_rad = angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
     q_end = _qpos(task)
     say(env, f"{label} done (bimbo)", rad=round(rad, 3), door_from_hand=round(hand_rad, 3),
         why=reason, steps=i + 1, perr_max=round(perr_max, 3), rerr_max=round(rerr_max, 3),
@@ -576,8 +882,8 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     bar0 = np.asarray(door.handle_bar, dtype=np.float64)[:2]
     r_bar = max(float(np.linalg.norm(bar0 - anchor_xy)), 1e-6)
     edge0 = anchor_xy + (bar0 - anchor_xy) * (1.0 + LEAF_EDGE_PAST_BAR / r_bar)
-    leaf_a, leaf_b = ds.leaf_segment(anchor_xy, edge0, s * rad_rel)   # turned from shut
-    d, rule = ds.clear_direction(T[:3, 2], n, lift_off=CLEAR_LIFT_OFF)
+    leaf_a, leaf_b = leaf_segment(anchor_xy, edge0, s * rad_rel)   # turned from shut
+    d, rule = clear_direction(T[:3, 2], n, lift_off=CLEAR_LIFT_OFF)
     lift = np.array([0.0, 0.0, CLEAR_LIFT_M])
     end = T[:3, 3] + CLEAR_M * d + lift
     goal = T.copy()
@@ -595,7 +901,7 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     T1 = _T(task.agent.tcp.pose.sp)
     say(env, "clear the open hand (bimbo)", rule=rule, d=[round(float(v), 3) for v in d],
         travelled=round(float(np.linalg.norm(T1[:3, 3] - T[:3, 3])), 3), steps=k + 1,
-        leaf_moved=round(moved, 4), panel_gap=round(ds.seg_dist(T1[:2, 3], leaf_a, leaf_b), 3),
+        leaf_moved=round(moved, 4), panel_gap=round(seg_dist(T1[:2, 3], leaf_a, leaf_b), 3),
         door_rad=round(float(crp.door_rad_now(task, door)), 3),
         touching=planner.touching_now())
     if record is not None:
@@ -607,6 +913,34 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     return res
 
 
+
+
+def lower_the_hand(env, planner, task, *, door, dz: float = LOWER_M):
+    """Drop the open hand straight down by `dz` with the base still (servoed, unplanned).
+
+    For a joint line that a hand standing beside the open leaf would sweep through it (the
+    tuck before the can approach): after the clear the hand stands just past the leaf's free
+    edge at bar height, and from under the leaf's bottom edge no arm motion reaches the leaf.
+    Watched by the leaf's angle like the clear. Returns the last 5-tuple, or -1 if no step was
+    taken."""
+    servo = HandServo(task, planner)
+    drv = _Driver(planner, task, servo, _torso(task))
+    T = _T(task.agent.tcp.pose.sp)
+    goal = T.copy()
+    goal[2, 3] = T[2, 3] - float(dz)
+    rad0 = float(crp.door_rad_now(task, door))
+    res, moved, k = -1, 0.0, 0
+    for k in range(CLEAR_MAX_STEPS):
+        res, dp, _, fresh = drv.step(goal)
+        if common.stopped_by_horizon(planner):
+            return res
+        moved = float(crp.door_rad_now(task, door)) - rad0
+        if abs(moved) > CLEAR_LEAF_TOL or (fresh and float(np.linalg.norm(dp)) < 0.01):
+            break
+    planner.planner.update_from_simulation()
+    say(env, "lowered the open hand", dz=round(float(dz), 3), steps=k + 1,
+        z=round(float(_T(task.agent.tcp.pose.sp)[2, 3]), 3), leaf_moved=round(moved, 4))
+    return res
 
 
 CLOSE_BY_BAR = os.environ.get("MIKASA_BD_CLOSE_BY_BAR", "0") == "1"

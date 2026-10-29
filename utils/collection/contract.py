@@ -8,6 +8,18 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+DATASET_REPO_ID = "MIKASA-Robo-MMM/MIKASA-Robo-MMM"
+# The HF root repo contains six independent task datasets. This inventory defines
+# dataset scope, not executable profile availability; profile.py:TASKS is narrower.
+DATASET_TASK_PLANNERS = {
+    "takeitback": "planners.myrobocasa_takeitback_planner",
+    "veggie": "planners.myrobocasa_fridge_veggies_planner",
+    "samedrawer": "planners.same_drawer_planner",
+    "seasondish": "planners.season_dish_planner",
+    "cabinetsearch": "planners.cabinet_search_planner",
+    "depthrecall": "planners.depth_recall_v1_planner",
+}
+
 ROBOT = "ds_fetch"
 CONTROL_MODE = "pd_joint_pos"
 CONTROL_FPS = 20

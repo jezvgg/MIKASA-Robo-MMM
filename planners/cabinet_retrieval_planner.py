@@ -38,6 +38,7 @@ import numpy as np
 import sapien
 
 from planners.oracle import oracle_common as common
+from planners.oracle import oracle_cabinet_retrieval as cabinet_retrieval
 from planners.oracle.oracle_common import fail as _fail
 from planners.oracle.oracle_common import say as _say
 from utils.mikasa.seeding import seed_everything
@@ -901,8 +902,7 @@ def fold_arm_to_rest(env, planner, task, *, label: str = "fold to rest"):
     targets = {n: float(rest_q[jm[n].active_index[0].item()]) for n in arm_names}
     targets["wrist_flex_joint"] = 1.7
     return common.plan_joints(
-        env, planner, task, targets, label=label, tries=3,
-        who=WHO, trace_rrt=False,
+        env, planner, task, targets, label=label, who=WHO,
     )
 
 
@@ -1172,7 +1172,7 @@ def finish_by_the_handle(env, planner, task, *, door: DoorSpec, anchor=None, res
     # close runs its negative, and the target is signed by the leaf the same way the
     # opening's is.
     stop_at = 0.0 if physical_close else float(door.closed_rad) - CLOSE_MARGIN_RAD
-    r = common.pull_hinge_arc(env, planner, task, _art_key(task, door), door.hinge,
+    r = cabinet_retrieval.pull_hinge_arc(env, planner, task, _art_key(task, door), door.hinge,
                               target_rad=door.open_dir * stop_at, who=WHO,
                               v_handle=.05 if physical_close else PULL_V_HANDLE, max_steps=PULL_MAX_STEPS,
                               anchor=anchor, open_dir=-door.open_dir)
@@ -1481,7 +1481,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
     res = common.plan_joints(
         env, planner, task,
         {"torso_lift_joint": TORSO_DRIVE, "wrist_flex_joint": 1.7},
-        label="duck the torso", who=WHO, trace_rrt=False,
+        label="duck the torso", who=WHO,
     )
     planner.planner.update_from_simulation()
 
@@ -1619,11 +1619,10 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
     return res
 
 
-def plan_joints(env, planner, task, targets: dict, *, label: str, tries: int = 2,
-                line_only: bool = False, qpos_step: float | None = None):
+def plan_joints(env, planner, task, targets: dict, *, label: str,
+                qpos_step: float | None = None):
     return common.plan_joints(
-        env, planner, task, targets, label=label, tries=tries, who=WHO,
-        line_only=line_only, qpos_step=qpos_step,
+        env, planner, task, targets, label=label, who=WHO, qpos_step=qpos_step,
     )
 
 

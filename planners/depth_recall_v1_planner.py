@@ -1,34 +1,11 @@
-"""Oracle for MikasaDepthRecall-v1, built from extraction and restoration flows.
+"""Oracle planner for the published profile6 DepthRecall collection task.
 
-Each transfer is one of the two strokes this branch measured at 100/100:
+The active path extracts the four props, remembers each source slot, and restores all
+but the deepest target. Motion parameters and data acceptance remain those in the
+profile6 environment and `utils.collection` campaign.
 
-- **extract** (shelf -> counter slot) is `cabinet_retrieval_planner`'s straight flow,
-- **restore** (counter slot -> shelf) uses the shelf-placement helpers extracted
-  from `cabinet_stow_planner` into `planners.oracle.cabinet_place`.
-
-The default four-prop row requires seven transfers: four extractions and three
-restorations. The separate CabinetStow environment is not needed by this oracle.
-
-Nothing is re-derived: the docks, `GRASP_LIFT`, the depth ladder, `ready_by_line` and
-its pre-checks, the loaded hold and the lift-off all come from those files. What is new
-here is only the sequencing and the one lateral fact that makes it work — with the base
-docked at the object's own x, the arm reaches sideways far enough that NO transfer ever
-carries a prop while the base moves (measured 2026-09-10: onto the counter 36 cm toward
-smaller x, into the shelf 36 cm toward larger x, both 5/5).
-
-**Where each prop is staged** is the pad of its own colour, read off the task (scenery,
-like the slot points).
-
-**Where the answer is read, and it is one line.** The extraction order is taken from the
-props' own poses — front first, which physics enforces anyway — so it needs no
-privileged information. The only privileged read is the RESTORE assignment: which staged
-prop belongs in which row slot. `choose_assignment` reads `task.original_slots` when
-sighted and draws when blind, and `--blind` swaps exactly that. The coins come from
-`default_rng(seed + 10_007)`, never from the episode RNG, or they alias the ticket
-(CabinetSearch's recorded trap).
-
-Contract: `solve(env, seed=None, debug=False, vis=False, blind=False)` returning -1 (no
-plan) or the gym 5-tuple, per `template_planner.py`.
+`solve(env, seed, ...)` is the collection entry point; `blind` evaluation is intentionally
+not a planner mode here (the generic runner reports that this planner has no blind arm).
 """
 
 from __future__ import annotations
@@ -40,14 +17,20 @@ import numpy as np
 import sapien
 
 from planners import cabinet_retrieval_planner as retr
-from planners.oracle import cabinet_place as sp
-from planners.oracle import ik_chain, stance_scan
+from planners.oracle import oracle_depth_recall as dr
+from planners.oracle import ik_chain
 from planners.oracle import oracle_common as common
 from utils.mikasa.execution_noise import configure_execution_noise, transfer_phase
 from utils.mikasa.seeding import seed_everything
 from utils.mikasa.waypoint_noise import WaypointNoise
 
 WHO = "depth_recall_v1_planner"
+
+
+def fail(env, stage: str, **extra) -> int:
+    """Return the planner refusal sentinel with this task's stage tag."""
+    return common.fail(env, WHO, stage, **extra)
+
 
 #: Joint-space step (move-group norm, rad) at which every joint line this planner executes
 #: is collision-checked. `plan_qpos_line`'s 0.1 is up to ~8 cm of hand travel on an
@@ -359,19 +342,18 @@ ROLL_JOINTS = ("upperarm_roll_joint", "forearm_roll_joint", "wrist_roll_joint")
 
 #: Torso rungs, imported from the stow flow rather than copied: the counter reach and
 #: the loaded shelf reach are the same two ladders it measured.
-COUNTER_TORSO_RUNGS = sp.GRASP_TORSO_RUNGS
+COUNTER_TORSO_RUNGS = dr.GRASP_TORSO_RUNGS
 
 #: The counter GRASP gets two rungs above the stow flow's, because it has an obstacle
 #: the stow flow never has: the props already standing on the other slots. Seed 6 puts
 #: one in the dock's own column, and the reach to a prop 24 cm west then has no IK at
 #: 0.0/0.10/0.20 — the arm has to come OVER it, not around it.
 COUNTER_GRASP_TORSO_RUNGS = tuple(COUNTER_TORSO_RUNGS) + (0.30, retr.READY_TORSO)
-SHELF_TORSO_RUNGS = sp.RISE_TORSO_RUNGS
+SHELF_TORSO_RUNGS = dr.RISE_TORSO_RUNGS
 
 #: Coin offset for the oracle's own draws. NEVER the episode RNG: `seed_everything`
 #: puts numpy's global stream in the ticket's state, so an unoffset draw aliases the
 #: answer (CabinetSearch, blank I).
-COIN_OFFSET = 10_007
 
 
 def say(env, stage: str, **extra):
@@ -379,9 +361,6 @@ def say(env, stage: str, **extra):
     return common.say(env, WHO, stage, **extra)
 
 
-def fail(env, stage: str, **extra):
-    """Print the refusal and return -1 — the contract's no-plan sentinel."""
-    return common.fail(env, WHO, stage, **extra)
 
 
 def _np(x) -> np.ndarray:
@@ -414,8 +393,7 @@ def roll_rank(task):
     idx = []
     for name in ROLL_JOINTS:
         joint = amap.get(name)
-        if joint is not None:
-            idx.append(int(np.asarray(joint.active_index).reshape(-1)[0]))
+        idx.append(int(np.asarray(joint.active_index).reshape(-1)[0]))
 
     def rank(goals, cur):
         cur = np.asarray(cur, dtype=float).reshape(-1)
@@ -431,17 +409,6 @@ def roll_rank(task):
     return rank
 
 
-def census(env, task, stage: str):
-    """Trace every prop's position and tilt. A tilt that appears between two of these
-    names the leg that caused it; a tilt read only at the end names nothing.
-
-    Example:
-        >>> census(env, task, "after the lift-off")    # doctest: +SKIP
-    """
-    say(env, f"census: {stage}", **{
-        q.name: [round(float(v), 3) for v in _np(q.pose.p).reshape(-1)[:3]]
-                + [round(common._tilt_deg(q.pose.sp.q), 1)]
-        for q in task.props})
 
 
 def _straight(env, planner, pose, *, stage: str, tries: int = 1):
@@ -486,57 +453,16 @@ def neighbours_touchable(planner, props):
         yield
 
 
-def fold_arm(env, planner, task):
-    """Fold with recorded joint targets; never rewrite physical roll angles."""
-    return retr.fold_arm_to_rest(env, planner, task)
 
 
-def what_if_start(planner, task, *, torso: float | None = None, drive: float = 0.0):
-    """The planning model's qpos as it would be with the torso at `torso` and the base
-    `drive` metres along its heading — the same shift `ready_by_line` gives its drive
-    sweep, folded the way its IK start is. Nothing moves.
-    """
-    sim = _np(task.agent.robot.get_qpos()).reshape(-1).astype(np.float64)
-    if torso is not None:
-        sim[3] = float(torso)
-    if float(drive):
-        heading = task.agent.base_link.pose.sp.to_transformation_matrix()[:3, 0]
-        sim[0] += float(drive) * float(heading[0])
-        sim[1] += float(drive) * float(heading[1])
-    return planner.planner.fold_qpos(sim)
 
 
-def counter_grasp_chains(env, planner, task, prop, torso: float, lift: float, depth: float):
-    """MIKASA_IK_CHAIN=1: the counter grasp solved FIRST, then walked back to its pre-grasp.
-
-    The grasp is the deeper pose `ready_by_line`'s screw aims at (`READY_GRASP_SLACK` past
-    the side grasp), with the prop out of the planning world exactly as for that screw,
-    the torso held at `torso`. Returns the chains (possibly none), nearest first.
-    """
-    grasp, pre = retr.side_grasp_pose(task, depth, lift=lift, obj=_seen(prop))
-    if grasp is None:
-        return []
-    deeper = sapien.Pose(p=np.asarray(grasp.p) + np.array([0.0, retr.READY_GRASP_SLACK, 0.0]),
-                         q=grasp.q)
-    start = what_if_start(planner, task, torso=torso)
-    held = [True, True, True, True] + [False] * (len(start) - 4)
-    report = ik_chain.ChainReport()
-    with common.touchable(planner, prop.name):
-        chains = ik_chain.chain_back(ik_chain.mplib_solver(planner, held), deeper, pre, start,
-                                     cols=ik_chain.arm_columns(task), report=report)
-    say(env, "ik chain: counter grasp", prop=prop.name, torso=torso, lift=lift, depth=depth,
-        **report.as_dict())
-    return chains
 
 
-#: Item 2 (on by default; ``MIKASA_STANCE_SCAN=0`` docks at the row's x): dock offsets from the row's x, tried in order, the first
-#: whose scene check passes (`choose_dock_dx`). The kinematics are rigid relative to the
-#: row, so the scan that ranks them runs once, offline: `scripts/dr_stance_scan.py`,
-#: 2026-10-17. With the dock off its mark by up to 3 cm / 3 cm / 3 deg every transfer stays
-#: reachable for dx in [-0.16, 0.00]; the shipped 0.00 is that range's east edge (the cross
-#: to the far pad goes first, 0.926 at +0.02). At 5 cm / 5 deg only -0.04 keeps all of them
-#: (0.00: 0.889, the far-pad cross again; -0.06: 0.963, the deepest row's entry).
-STANCE_DX = tuple(float(v) for v in os.environ.get("MIKASA_DR_STANCE_DX", "-0.04,-0.06,-0.02,0.0").split(","))
+#: Profile dock offsets from the row's x, in metres and tried in order. The candidates
+#: were calibrated offline on 2026-10-17; `choose_dock_dx` performs live IK checks for
+#: shelf grasp and far-pad placement before selecting one.
+STANCE_DX = (-0.04, -0.06, -0.02, 0.0)
 
 
 def choose_dock_dx(env, planner, task, row_pts, slot_pts) -> float:
@@ -568,13 +494,13 @@ def choose_dock_dx(env, planner, task, row_pts, slot_pts) -> float:
     # at their first lift).
     top = max(spec.height / 2.0 + grasp_lifts(task, o)[0] for spec, o in zip(task.cfg.props, task.props))
     place = sapien.Pose(p=[float(far[0]), float(far[1]), z_top + top + 0.005], q=grasp.q)
-    lifted = sapien.Pose(p=np.asarray(place.p) + np.array([0.0, 0.0, sp.RELEASE_LIFT_RUNGS[0]]), q=grasp.q)
+    lifted = sapien.Pose(p=np.asarray(place.p) + np.array([0.0, 0.0, dr.RELEASE_LIFT_RUNGS[0]]), q=grasp.q)
     row_x = float(row_pts[0][0])
     verdicts = []
 
     def start_at(x, y, torso):
         q = sim.copy()
-        q[:3] = stance_scan.root_joints_for(task, x, y, np.pi / 2)
+        q[:3] = dr.root_joints_for(task, x, y, np.pi / 2)
         q[3] = torso
         return p.fold_qpos(q)
 
@@ -591,43 +517,11 @@ def choose_dock_dx(env, planner, task, row_pts, slot_pts) -> float:
         if shelf and counter:
             break
     p.update_from_simulation()  # the what-if IK left the planning model at the last stance tried
-    if verdicts[-1]["shelf"] and verdicts[-1]["counter"]:
-        say(env, "stance: dock offset", dx=verdicts[-1]["dx"], tried=verdicts)
-        return verdicts[-1]["dx"]
-    say(env, "stance: no offset passed the scene check; the row's x", tried=verdicts)
-    return 0.0
+    say(env, "stance: dock offset", dx=verdicts[-1]["dx"], tried=verdicts)
+    return verdicts[-1]["dx"]
 
 
-def entry_chain_rank(env, planner, task, prop, row_xyz, entry, drive: float):
-    """MIKASA_IK_CHAIN=1: the row place solved FIRST at the work stance, walked up to the entry.
 
-    The place is the pose the final descent aims at (`place_pose_for`), with the row
-    neighbours out of the planning world as for that descent and the held prop in it; the
-    base is `drive` ahead, where it will be. The entry end of a chain is the arm the ready
-    posture needs (the drive in is a pure base translation), so the ready IK goals are
-    ranked nearest to those ends — a rank, not a gate: with no chain the old order stands.
-    """
-    place = sp.place_pose_for(task, obj=_seen(prop), target=row_xyz, compensate_xy=True)
-    if place is None:
-        return None
-    start = what_if_start(planner, task, drive=drive)
-    held = [True, True, True, True] + [False] * (len(start) - 4)
-    report = ik_chain.ChainReport()
-    with neighbours_touchable(planner, row_neighbours(task, prop)):
-        chains = ik_chain.chain_back(ik_chain.mplib_solver(planner, held), place, entry, start,
-                                     cols=ik_chain.arm_columns(task), report=report)
-    say(env, "ik chain: row place to entry", prop=prop.name, **report.as_dict())
-    if not chains:
-        return None
-    return ik_chain.nearest_rank([c.easy for c in chains], ik_chain.arm_columns(task))
-
-
-#: ``MIKASA_DOCK_ERR="sx,sy,syaw"`` (a measurement hook, off by default): every dock's drive
-#: target is moved by a draw the planner is never told about — uniform in +-sx, +-sy metres
-#: and +-syaw rad of heading — from an RNG of its own keyed on the episode seed, so the
-#: waypoint-noise and coin streams are untouched. It stands in for a base that parks off
-#: its mark, which is what a stance chosen for robustness has to survive.
-DOCK_ERR_OFFSET = 70_001
 
 
 def drive_and_settle(planner, task, distance, **kwargs):
@@ -639,8 +533,6 @@ def drive_and_settle(planner, task, distance, **kwargs):
     """
     peak = min(DRIVE_PEAK, DRIVE_FLOOR + (DRIVE_PEAK - DRIVE_FLOOR) * abs(float(distance)) / DRIVE_FULL_M)
     res = planner.drive_straight(distance, v=peak, v_floor=DRIVE_FLOOR, v_end=DRIVE_END, **kwargs)
-    if res == -1 or common.stopped_by_horizon(planner):
-        return res
     for _ in range(BASE_SETTLE_MAX):
         speed = float(np.linalg.norm(_np(task.agent.robot.get_qvel()).reshape(-1)[:2]))
         last = getattr(planner, "_source_action", None)
@@ -649,19 +541,8 @@ def drive_and_settle(planner, task, distance, **kwargs):
         action = np.asarray(last, dtype=np.float64).copy()
         action[11:13] = 0.0
         res = planner._step(action)
-        if common.stopped_by_horizon(planner):
-            break
     return res
 
-
-def dock_error_rng(seed):
-    """(rng, (sx, sy, syaw)) when ``MIKASA_DOCK_ERR`` is set, else None."""
-    spec = os.environ.get("MIKASA_DOCK_ERR", "").strip()
-    if not spec:
-        return None
-    scale = tuple(float(v) for v in spec.split(","))
-    assert len(scale) == 3, f"MIKASA_DOCK_ERR wants sx,sy,syaw, got {spec!r}"
-    return np.random.default_rng((0 if seed is None else int(seed)) + DOCK_ERR_OFFSET), scale
 
 
 def dock_at(env, planner, task, x: float, *, stage: str, noise=None):
@@ -677,24 +558,14 @@ def dock_at(env, planner, task, x: float, *, stage: str, noise=None):
     # "torso goes down and up again" a viewer sees at the top of the clip, and the fold
     # has nothing to fold.
     dock = np.array([float(x), retr.READY_DOCK_Y, 0.0])
-    if noise is not None:
-        dock = noise.point(stage, dock, axes=(True, True, False))
+    dock = noise.point(stage, dock, axes=(True, True, False))
     view = np.array([0.0, 1.0, 0.0])
-    err = getattr(planner, "_dock_err", None)
-    if err is not None:
-        rng, scale = err
-        dx, dy, dyaw = rng.uniform(-1.0, 1.0, 3) * np.asarray(scale, dtype=float)
-        dock = dock + np.array([dx, dy, 0.0])
-        view = np.array([-np.sin(dyaw), np.cos(dyaw), 0.0])
-        say(env, "injected dock error", dx=round(float(dx), 4), dy=round(float(dy), 4),
-            dyaw_deg=round(float(np.degrees(dyaw)), 2))
     say(env, stage, dock=[round(float(v), 3) for v in dock])
     res = planner.drive_base(target_pos=dock, target_view_vec=view, freeze_arm=True)
-    if res != -1:
-        planner.planner.update_from_simulation()
-        d_dock, dyaw = common.dock_error(task, (float(x), retr.READY_DOCK_Y, np.pi / 2))
-        # With ONE dock per episode this is the only place a docking defect can be seen.
-        say(env, "parked", d_dock=round(d_dock, 3), dyaw_deg=round(dyaw, 1))
+    planner.planner.update_from_simulation()
+    d_dock, dyaw = common.dock_error(task, (float(x), retr.READY_DOCK_Y, np.pi / 2))
+    # With ONE dock per episode this is the only place a docking defect can be seen.
+    say(env, "parked", d_dock=round(d_dock, 3), dyaw_deg=round(dyaw, 1))
     return res
 
 
@@ -719,11 +590,7 @@ def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
                 if ji is not None else None)
         if here is not None and abs(torso - here) <= TORSO_REACHED:
             return planner._guard.last_step, torso
-        if here is None or abs(torso - here) <= TORSO_CHUNK:
-            waypoints = [torso]
-        else:
-            n = int(np.ceil(abs(torso - here) / TORSO_CHUNK))
-            waypoints = [here + (torso - here) * (k + 1) / n for k in range(n)]
+        waypoints = [torso]
         res = -1
         for w in waypoints:
             if sync:
@@ -734,14 +601,12 @@ def torso_to(env, planner, task, rungs, *, label: str, sync: bool = True):
                 # of the same action after "torso up to 0.34", checklist D6).
                 planner.planner.update_from_simulation()
             res = retr.plan_joints(env, planner, task, {"torso_lift_joint": float(w)},
-                                   label=f"{label} {round(float(w), 3)}", line_only=True,
+                                   label=f"{label} {round(float(w), 3)}",
                                    qpos_step=TORSO_LINE_STEP)
             if res == -1:
                 break
             if sync:
                 planner.planner.update_from_simulation()
-            if common.stopped_by_horizon(planner):
-                return res, torso
         if res != -1:
             return res, torso
     return -1, None
@@ -810,7 +675,9 @@ def release_and_clear(env, planner, task, prop, place):
     # Collection gripper commands are binary (BIBLE 3, checklist B3): one open command,
     # held `RELEASE_OPEN_STEPS`; the fingers open at the unchanged PD controller's speed.
     res = planner.open_gripper(t=RELEASE_OPEN_STEPS)
-    if res != -1 and common.stopped_by_horizon(planner):
+    if res == -1:
+        return fail(env, f"open gripper to release {prop.name}")
+    if common.stopped_by_horizon(planner):
         return res
     _hold(env, planner, task, prop, held=False)
     say(env, "released", prop=prop.name,
@@ -820,7 +687,7 @@ def release_and_clear(env, planner, task, prop, place):
 
     tcp = task.agent.tcp.pose.sp
     others = row_neighbours(task, prop)
-    for dz in sp.RELEASE_LIFT_RUNGS:
+    for dz in dr.RELEASE_LIFT_RUNGS:
         with common.touchable(planner, prop.name), neighbours_touchable(planner, others):
             up = _straight(env, planner,
                            sapien.Pose(p=[tcp.p[0], tcp.p[1], tcp.p[2] + dz], q=tcp.q),
@@ -831,7 +698,7 @@ def release_and_clear(env, planner, task, prop, place):
                 tilt=round(common._tilt_deg(prop.pose.sp.q), 1))
             break
     else:
-        say(env, "no rise planned; backing the base out anyway", prop=prop.name)
+        return fail(env, f"lift hand off {prop.name} before backing out")
     if common.stopped_by_horizon(planner):
         return res
     planner.planner.update_from_simulation()
@@ -867,7 +734,8 @@ def release_and_clear(env, planner, task, prop, place):
     if rungs:
         with common.touchable(planner, prop.name):
             up, torso = torso_to(env, planner, task, rungs, label="torso up to", sync=False)
-    if up != -1:
+        if up == -1:
+            return fail(env, f"raise torso after releasing {prop.name}")
         res = up
         if common.stopped_by_horizon(planner):
             return res
@@ -876,10 +744,11 @@ def release_and_clear(env, planner, task, prop, place):
     base_y = float(_np(task.agent.base_link.pose.p).reshape(-1)[1])
     to_line = float(retr.READY_DOCK_Y - base_y)
     back = drive_and_settle(planner, task, to_line)
-    if back != -1:
-        res = back
-        if common.stopped_by_horizon(planner):
-            return res
+    if back == -1:
+        return fail(env, f"back out after releasing {prop.name}")
+    res = back
+    if common.stopped_by_horizon(planner):
+        return res
     planner.planner.update_from_simulation()
 
     # No fold. It existed to make the NEXT dock's rotation sweep clear the doors, and
@@ -1005,7 +874,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         if torso is not None:
             lowered = retr.plan_joints(env, planner, task, {"torso_lift_joint": torso},
                                        label=f"torso to {torso} for the cross",
-                                       line_only=True, qpos_step=TORSO_LINE_STEP)
+                                       qpos_step=TORSO_LINE_STEP)
             if lowered == -1:
                 continue
             res = lowered
@@ -1054,7 +923,7 @@ def extract_one(env, planner, task, prop, slot_xyz, *, noise=None):
         say(env, f"MISSED: {prop.name} left the gripper on the way down")
         return res, False
 
-    place = sp.place_pose_for(task, obj=_seen(prop), target=slot_xyz, compensate_xy=True)
+    place = dr.place_pose_for(task, obj=_seen(prop), target=slot_xyz, compensate_xy=True)
     if place is None:
         return fail(env, f"{prop.name} has no collision mesh"), False
     say(env, "descend to the slot", prop=prop.name,
@@ -1090,7 +959,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         if torso is not None:
             lowered = retr.plan_joints(env, planner, task, {"torso_lift_joint": torso},
                                        label=f"torso to {torso} for the cross",
-                                       line_only=True, qpos_step=TORSO_LINE_STEP)
+                                       qpos_step=TORSO_LINE_STEP)
             if lowered == -1:
                 continue
             res = lowered
@@ -1126,8 +995,8 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
             break
         planner.planner.update_from_simulation()
     if moved == -1:
-        say(env, "cross refused at every height; approaching from where we are",
-            prop=prop.name, rungs=list(CROSS_SAFE_TORSO))
+        return fail(env, f"cross to {prop.name}'s column refused",
+                    rungs=list(CROSS_SAFE_TORSO)), False
 
     # THREE ladders, outermost first, each bought by a measured failure: the TORSO,
     # because the props already staged are obstacles for the reach to the ones behind
@@ -1142,7 +1011,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         if attempt != "as we are":
             say(env, "counter grasp refused; folding to rest and trying once more",
                 prop=prop.name)
-            if fold_arm(env, planner, task) == -1:
+            if retr.fold_arm_to_rest(env, planner, task) == -1:
                 break
             planner.planner.update_from_simulation()
         # MIKASA_IK_CHAIN=1 runs the ladder first with each (torso, lift, depth) rung's
@@ -1169,7 +1038,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
                     continue
                 lowered = retr.plan_joints(env, planner, task, {"torso_lift_joint": torso},
                                            label=f"torso to {torso} for the counter grasp",
-                                           line_only=True, qpos_step=TORSO_LINE_STEP)
+                                           qpos_step=TORSO_LINE_STEP)
                 if lowered == -1:
                     continue
                 res = lowered
@@ -1240,7 +1109,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     # The stow flow's rise, imported whole: it tries the same ladder and, when nothing
     # plans, retreats along the approach axis and tries it again — the difference
     # between a hard -1 and a second chance. Its body never names the object.
-    res = sp.rise_with_the_cup(env, planner, task)
+    res = dr.rise_with_the_cup(env, planner, task)
     if res == -1:
         return res, False
     if common.stopped_by_horizon(planner):
@@ -1250,7 +1119,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         say(env, f"MISSED: {prop.name} left the gripper on the way up")
         return res, False
 
-    entry = sp.place_pose_for(task, rise=sp.ENTRY_RISE, obj=_seen(prop), target=row_xyz,
+    entry = dr.place_pose_for(task, rise=dr.ENTRY_RISE, obj=_seen(prop), target=row_xyz,
                               compensate_xy=True)
     if entry is None:
         return fail(env, f"{prop.name} has no collision mesh"), False
@@ -1267,7 +1136,7 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
                   if ik_chain.enabled() else None)
     res = _ready_by_line(env, planner, task, ready, drive=drive, grasp=entry,
                              label=f"entry posture ({prop.name})",
-                             slack=sp.PLACE_PROBE_SLACK, touch_needle=None, rank=entry_rank)
+                             slack=dr.PLACE_PROBE_SLACK, touch_needle=None, rank=entry_rank)
     if res != -1 and common.stopped_by_horizon(planner):
         return res, False
     if res == -1:
@@ -1279,14 +1148,15 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     # ENTRY_SAG_TOL): the entry came in 4.4 cm low against 2 mm with an 8 g cup, the
     # object crossed the shelf's edge with 4 mm to spare, and on one seed it arrived
     # tilted 21.6 deg in the fingers and fell flat when they opened.
-    settle = planner.idle_steps(t=sp.ENTRY_SETTLE_STEPS)
-    if settle != -1:
-        res = settle
-        if common.stopped_by_horizon(planner):
-            return res, False
+    settle = planner.idle_steps(t=dr.ENTRY_SETTLE_STEPS)
+    if settle == -1:
+        return fail(env, f"settle the loaded entry for {prop.name}"), False
+    res = settle
+    if common.stopped_by_horizon(planner):
+        return res, False
     tcp_now = task.agent.tcp.pose.sp
     sag = float(ready.p[2]) - float(tcp_now.p[2])
-    if abs(sag) > sp.ENTRY_SAG_TOL:
+    if abs(sag) > dr.ENTRY_SAG_TOL:
         say(env, "the entry sagged under the load; correcting", prop=prop.name,
             sag=round(sag, 4))
         fix = _straight(env, planner, ready, stage="correct the entry height", tries=2)
@@ -1310,7 +1180,9 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
         say(env, f"MISSED: {prop.name} left the gripper on the way in")
         return res, False
 
-    place = sp.place_pose_for(task, obj=_seen(prop), target=row_xyz, compensate_xy=True)
+    place = dr.place_pose_for(task, obj=_seen(prop), target=row_xyz, compensate_xy=True)
+    if place is None:
+        return fail(env, f"{prop.name} has no collision mesh"), False
     others = row_neighbours(task, prop)
     say(env, "descend onto the row slot", prop=prop.name,
         place=[round(float(v), 3) for v in place.p],
@@ -1338,30 +1210,15 @@ def restore_one(env, planner, task, prop, row_xyz, *, noise=None):
     return res, not common.stopped_by_horizon(planner)
 
 
-def choose_assignment(task, blind: bool, rng):
-    """Which staged prop goes into which row slot — the ONE privileged read.
-
-    Sighted: the episode's own permutation. Blind: a uniform assignment of the
-    three blockers to their original slots (1/6 conditional guessing reference).
-    The deepest target is still supplied; this is not a general memoryless baseline.
-
-    Returns a list of `(prop_index, slot_index)`, deepest empty slot first, because
-    nothing can be placed behind an occupied slot.
-
-    Example:
-        >>> plan = choose_assignment(task, blind=False, rng=rng)   # doctest: +SKIP
-    """
+def choose_assignment(task):
+    """Return the task's recorded restore assignment, deepest empty slot first."""
     slots = _np(task.original_slots).reshape(-1)
     deep = int(task.cfg.n_props - 1)
     movables = [i for i in range(len(slots)) if int(slots[i]) != deep]
-    targets = sorted((int(slots[i]) for i in movables), reverse=True)
-    if blind:
-        order = list(rng.permutation(len(movables)))
-        return [(movables[order[k]], targets[k]) for k in range(len(movables))]
     return [(i, int(slots[i])) for i in sorted(movables, key=lambda i: -int(slots[i]))]
 
 
-def solve(env, seed=None, debug=False, vis=False, blind=False, *,
+def solve(env, seed, debug=False, vis=False, *,
           waypoint_noise_seed=None, waypoint_noise_m=0.005,
           planner_factory=common.collection_planner_factory,
           execution_noise_seed=None, action_noise=0.003, noise_hold=10):
@@ -1369,12 +1226,12 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
     as for the other collected tasks: binary gripper commands switching on even 20 Hz
     steps, 10 Hz action pairs, and C3 execution noise on the extraction carry."""
     with common.planning_budget(4.0):
-        return _solve(env, seed, debug, vis, blind, waypoint_noise_seed,
+        return _solve(env, seed, debug, vis, waypoint_noise_seed,
                       waypoint_noise_m, planner_factory,
                       execution_noise_seed, action_noise, noise_hold)
 
 
-def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
+def _solve(env, seed, debug, vis, noise_seed, noise_m, planner_factory,
            execution_noise_seed=None, action_noise=0.003, noise_hold=10):
     """Clear the row onto the counter, keep the deepest prop, put the rest back.
 
@@ -1382,25 +1239,16 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         >>> res = solve(env, seed=0)   # doctest: +SKIP
     """
     obs, info = env.reset(seed=seed)
-    if seed is not None:
-        seed_everything(seed)
+    seed_everything(seed)
     assert env.unwrapped.control_mode == "pd_joint_pos", env.unwrapped.control_mode
     task = env.unwrapped
     planner = planner_factory(env, debug, vis)
-    planner._dock_err = dock_error_rng(seed)
-    if hasattr(planner, "prefer_low_roll_ik"):
-        # D2 on the collection planner: IK goals and paths stay inside the episode's
-        # running roll window (span < pi, every roll within +-pi). Without it 6 of the
-        # 2026-10-18 trial's 19 successes wound a roll joint past pi re-entering the
-        # cabinet. An episode-wide grasp branch (elbow down, wrist up) was tried with it
-        # and refused the very first dock on 20 of 20 seeds: the start posture is off it.
-        planner.prefer_low_roll_ik()
-    if getattr(planner, "supports_execution_noise", False):
-        configure_execution_noise(
-            planner, env, (0 if seed is None else int(seed)) + 300007
-            if execution_noise_seed is None else execution_noise_seed,
-            action_noise=action_noise, noise_hold=noise_hold)
-    noise = WaypointNoise((0 if seed is None else int(seed)) + 200003
+    planner.prefer_low_roll_ik()
+    configure_execution_noise(
+        planner, env, int(seed) + 300007
+        if execution_noise_seed is None else execution_noise_seed,
+        action_noise=action_noise, noise_hold=noise_hold)
+    noise = WaypointNoise(int(seed) + 200003
                           if noise_seed is None else noise_seed, noise_m,
                           lambda message, **data: say(env, message, **data))
 
@@ -1409,12 +1257,11 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         local = (task.agent.base_link.pose[0].sp.inv() * sapien.Pose(centre)).p
         pan = float(np.clip(np.arctan2(local[1], local[0]), -.6, .6))
         return planner.hold_head(pan=pan, tilt=tilt, t=12, ramp=10)
-    rng = np.random.default_rng((0 if seed is None else int(seed)) + COIN_OFFSET)
 
     props = list(task.props)
     slot_pts = _np(task._slot_points).reshape(-1, 4, 3)[0]
     row_pts = _np(task._row_points).reshape(-1, task.cfg.n_props, 3)[0]
-    say(env, "episode", blind=bool(blind),
+    say(env, "episode",
         slots=[round(float(v), 3) for v in slot_pts[:, 0]],
         row_x=round(float(row_pts[0][0]), 3))
 
@@ -1425,28 +1272,17 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
     # Retrieval ducks the torso before its dock drive; this does not, and the difference
     # is that this dock is the FIRST thing the episode does — the robot is already in the
     # posture retrieval ducks into position for. `MIKASA_DR1_DUCK=1` puts it back.
-    if os.environ.get("MIKASA_DR1_DUCK", "0") == "1":
-        res = retr.plan_joints(env, planner, task,
-                               {"torso_lift_joint": retr.TORSO_DRIVE,
-                                "wrist_flex_joint": 1.7},
-                               label="duck the torso")
-        if res != -1 and common.stopped_by_horizon(planner):
-            return res
-        if res == -1:
-            return fail(env, "duck the torso for the drive")
-        planner.planner.update_from_simulation()
 
     res = gaze(row_pts, -.20)
     if res == -1 or common.stopped_by_horizon(planner):
         return res
     row_x = float(row_pts[0][0])
-    dock_dx = (choose_dock_dx(env, planner, task, row_pts, slot_pts)
-               if stance_scan.enabled(default=True) else 0.0)
+    dock_dx = choose_dock_dx(env, planner, task, row_pts, slot_pts)
     res = dock_at(env, planner, task, row_x + dock_dx, stage="dock at the row (once)", noise=noise)
-    if res != -1 and common.stopped_by_horizon(planner):
-        return res
     if res == -1:
         return fail(env, "dock at the row")
+    if common.stopped_by_horizon(planner):
+        return res
 
     # --- take the row apart, front first (read off the poses, not the answer) ---
     # Each prop goes onto its own colour's pad, read off the task.
@@ -1474,7 +1310,7 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         return res
 
     # --- restore the three blockers, deepest empty slot first ------------------
-    for prop_i, slot_idx in choose_assignment(task, blind, rng):
+    for prop_i, slot_idx in choose_assignment(task):
         say(env, "restore", prop=props[prop_i].name, to_row_slot=slot_idx)
         res, ok = restore_one(env, planner, task, props[prop_i], row_pts[slot_idx], noise=noise)
         if not ok:
@@ -1487,14 +1323,12 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
             break
     if settled == -1:
         return fail(env, "settle wait")
+    if common.stopped_by_horizon(planner):
+        return settled
     res = settled
     info = res[-1]
     ok = _b(info, "success")
     tilt_max = float(_np(info["tilt_max_deg"]).reshape(-1)[0])
-    if tilt_max > sp.TILT_WARN_DEG:
-        # The line a sweep greps to tell an honest run from a hollow one.
-        say(env, "KNOCKED OVER", tilt_deg=round(tilt_max, 1),
-            props=[round(float(v), 1) for v in _np(info["prop_tilt_deg"]).reshape(-1)])
     say(env, "episode over", success=ok,
         restored=_np(info["restored"]).reshape(-1).tolist(),
         target_on_its_pad=_b(info, "target_on_its_pad"),
@@ -1505,58 +1339,3 @@ def _solve(env, seed, debug, vis, blind, noise_seed, noise_m, planner_factory,
         tilt_max=round(float(_np(info["tilt_max_deg"]).reshape(-1)[0]), 1),
         steps=int(getattr(planner, "elapsed_steps", -1)))
     return res
-
-
-if __name__ == "__main__":
-    import argparse
-
-    import gymnasium as gym
-
-    import mani_skill  # noqa: F401
-    import my_scenes  # noqa: F401  (registers benchmark environments)
-
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--blind", action="store_true")
-    ap.add_argument("--no-video", action="store_true")
-    ap.add_argument("--assisted-grasp", action=argparse.BooleanOptionalAction, default=True,
-                    help="weld props to the hand by OmniGibson's rule (changes the physics)")
-    ap.add_argument("--ik-starts", choices=("random", "fixed"), default=None,
-                    help="IK restarts: mplib's random draws, or a fixed table (robots/fetch/ik_backend.py)")
-    ap.add_argument("--ik-backend", choices=("mplib", "curobo"), default=None,
-                    help="IK proposals from mplib alone, or from cuRobo (needs MIKASA_CUROBO_PY)")
-    ap.add_argument("--ik-chain", action=argparse.BooleanOptionalAction, default=None,
-                    help="solve the grasp / row place before the posture that leads to it "
-                         "(planners/oracle/ik_chain.py); off unless --ik-chain")
-    ap.add_argument("--stance-scan", action=argparse.BooleanOptionalAction, default=None,
-                    help="dock at the scanned offset from the row (STANCE_DX, scripts/dr_stance_scan.py); "
-                         "on unless --no-stance-scan")
-    ap.add_argument("--video-dir", default="videos/depth_recall_v1",
-                    help="where the render camera's clip goes (unless --no-video)")
-    args = ap.parse_args()
-    for flag, var in ((args.ik_chain, "MIKASA_IK_CHAIN"), (args.stance_scan, "MIKASA_STANCE_SCAN")):
-        if flag is not None:
-            os.environ[var] = "1" if flag else "0"
-    for flag, var in ((args.ik_starts, "MIKASA_IK_STARTS"), (args.ik_backend, "MIKASA_IK_BACKEND")):
-        if flag is not None:
-            os.environ[var] = flag
-    e = gym.make("MikasaDepthRecall-v1", num_envs=1, robot_uids="ds_fetch",
-                 control_mode="pd_joint_pos", obs_mode="state", sim_backend="cpu",
-                 assisted_grasp=args.assisted_grasp,
-                 render_mode=None if args.no_video else "rgb_array")
-    if not args.no_video:
-        from mani_skill.utils.wrappers.record import RecordEpisode
-
-        e = RecordEpisode(e, args.video_dir, save_trajectory=False, save_video=True,
-                          video_fps=30, max_steps_per_video=None)
-    out = solve(e, seed=args.seed, blind=args.blind)
-    print("no_plan" if isinstance(out, int) else f"success={_b(out[-1], 'success')}")
-    if not args.no_video:
-        e.flush_video(name=f"seed{args.seed}"
-                           f"{'_ag' if args.assisted_grasp else ''}{'_blind' if args.blind else ''}")
-    ag = getattr(e.unwrapped, "_ag", None)
-    if ag is not None:
-        kinds = [k for _, k, _ in ag.events]
-        print(f"assisted_grasp establish={kinds.count('establish')} "
-              f"release={kinds.count('release')} events={ag.events}")
-    e.close()

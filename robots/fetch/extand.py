@@ -197,7 +197,7 @@ OPEN = 1
 #: (`tests/test_solver_in_container.py:217-218`); the direct callers were the exception, not
 #: the rule. `base_free=True` restores the old behaviour for a caller that wants the base to
 #: shuffle — nobody passes it today, and the six sites that used to rely on it
-#: (`oracle_common.try_grasp`, `same_drawer_planner`'s four reach/push/pull legs) are an
+#: (`oracle_same_drawer.try_grasp`, `same_drawer_planner`'s four reach/push/pull legs) are an
 #: opt-in A/B of their own, not a silent inheritance.
 RRT_BASE_MASK = [True, True, True, False] + [False] * 11
 
