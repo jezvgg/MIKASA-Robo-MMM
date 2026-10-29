@@ -1,7 +1,7 @@
 {
-  "profile_version": 26,
+  "profile_version": 28,
   "env_id": "MikasaSeasonDish-v0",
-  "task_variant": "salt_pepper_fridge_picture_100_tilt_155",
+  "task_variant": "salt_pepper_fridge_picture_number_1_9_cue50_upside_down_shake_30_then_upright_hold",
   "robot_reference": {
     "repository": "https://github.com/jezvgg/MIKASA-Robo-MMM",
     "commit": "4c5c8b3de941565ee2d57b153a10254fe64c2849",
@@ -21,13 +21,13 @@
     },
     "assisted_grasp": true,
     "assisted_grasp_hand_collides": false,
-    "instruction_version": 1
+    "instruction_version": 3
   },
   "task": {
-    "horizon": 1100,
-    "cue_steps": 100,
+    "horizon": 2000,
+    "cue_steps": 50,
     "delay_steps": 40,
-    "hold_steps": 15,
+    "hold_steps": 10,
     "bowl_along": 0.85,
     "station_along": 0.46,
     "across": -0.1,
@@ -68,7 +68,27 @@
     "initial_torso_jitter_m": 0.01,
     "initial_head_jitter_rad": 0.05,
     "fridge_picture_width": 0.3,
-    "fridge_start_distance": 0.9
+    "fridge_start_distance": 0.9,
+    "shake_counts": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "shake_out_deg": 20.0,
+    "shake_return_deg": 10.0,
+    "upright_enter_deg": 15.0,
+    "upright_leave_deg": 20.0,
+    "hold_grace_steps": 2,
+    "hold_still_deg": 5.0,
+    "digit_card_width": 0.3,
+    "digit_card_side": "below",
+    "digit_card_gap": 0.03
   },
   "data": {
     "control_hz": 20,
@@ -133,8 +153,10 @@
     "gripper_switch_control_step_parity": 0,
     "motion_revision": "bounded_legacy_carry_or_direct_dual_hover_2026_09_28",
     "navigation_posture": "dair_6168333_tcp_25cm_fixed_named_core_actual_grasp_wrists",
-    "pour_motion": "wrist_roll_only",
-    "cue_observation_steps": 100,
+    "pour_motion": "wrist_roll_only_near_upside_down_one_sided_shakes_then_upright",
+    "shake_amplitude_deg": 30.0,
+    "shake_motion": "wrist_pour.pour_and_shake: wrist roll to the smallest turn that leaves the condiment shake_return_deg - 3 short of upside down (1.5 at the bowl) and whose 30 deg swing back toward upright leans >= shake_out_deg + 3, rest and swing over the bowl; then per shake out and back on that one side (checklist D2: each roll joint spans <= pi - 0.05 per episode, so no swing past upside down; owner 2026-10-28 after the +-30 version refused 8/8); then the wrist back to its value before the pour, the condiment upright, and hold. All legs at the planner's own 0.9 rad/s, 0.9 rad/s^2 (owner 2026-10-28: no speed change); every leg planned before the first moves; no refinement wait after a leg: it idles at the leg's goal only until the counter has seen it (swung, counted, upright), at most 20 steps (D6)",
+    "cue_observation_steps": 50,
     "left_wall_dock_approach": "diagonal_from_open_aisle_in_canonical_rest",
     "pour_hover_prechecked": true,
     "loaded_navigation_joint_targets": {
@@ -269,10 +291,12 @@
   },
   "quality_exceptions": {
     "D6": {
-      "reason": "Owner explicitly requires the complete five-second initial fridge cue observation.",
-      "initial_observation_control_steps": 100,
+      "reason": "Owner explicitly requires the complete initial fridge cue observation (five seconds until 2026-10-28, 2.5 s since: «давай сократим до 50 шагов»).",
+      "initial_observation_control_steps": 50,
       "phase": "fridge_cue_observation",
-      "preserve_all_frames": true
+      "preserve_all_frames": true,
+      "final_hold_control_steps": 14,
+      "final_hold_reason": "Owner 2026-10-28 «Исключение для удержания»: the task ends with the condiment held upright and still for hold_steps (10) after the last shake; the last 14 control steps (7 frames at 10 Hz: the hold and the success margin) are excluded from D6, as the cue frames are at the start."
     }
   },
   "scene_visuals": {
@@ -291,5 +315,6 @@
     ],
     "precheck": "full_robot_turn_drive_turn_then_complete_upright_hover_and_wrist_only_pour"
   },
-  "one_branch_2026_10_26": "Reproduction on train/vla (owner 2026-10-26, «Можно же применить прокси только к задаче cabinetsearch»): assisted_grasp_hand_collides false is the direct hand -> object drive this dataset was recorded with (utils/mikasa/assisted_grasp.py; the default of every AssistedGraspTask but CabinetSearch); instruction_version 1 is the instruction text it was recorded with (2 names the shakers' colours)."
+  "one_branch_2026_10_26": "Reproduction on train/vla (owner 2026-10-26, «Можно же применить прокси только к задаче cabinetsearch»): assisted_grasp_hand_collides false is the direct hand -> object drive (utils/mikasa/assisted_grasp.py; the default of every AssistedGraspTask but CabinetSearch). Since profile 27 instruction_version 3 is the shaking task's text; 1 was the text seasondish-ag-1000ep (profile 26) was recorded with.",
+  "task_2026_10_27": "Owner 2026-10-27/28: a number card (1-9, 0.30 m) hangs next to the condiment picture and disappears with it; the robot turns the remembered condiment upside down over the bowl, shakes it that many times, turns it upright again and holds it still 0.5 s (within 15 deg of upright, leaving past 20, up to 2 steps of jitter, tilt spread <= 5 deg) («вернуть вверх, как была»). A shake is a swing of >= shake_out_deg from upside down over the bowl that comes back within shake_return_deg; it counts when it comes back, so the final turn upright is not one. The owner asked for two-sided tilts; checklist D2 allows only one-sided wrist-roll shakes (option 2), each a 30 deg swing back toward upright and return. Exactly the number then upright and still for hold_steps succeeds; one shake more fails the episode (`fail`). Horizon 2000 for nine. Replaces the one-tip task of profile 26, whose dataset seasondish-ag-1000ep train/vla 0864fb1 rebuilds."
 }
