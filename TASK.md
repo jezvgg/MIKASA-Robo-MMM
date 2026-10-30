@@ -71,7 +71,8 @@
 
 - `utils/mikasa/assisted_grasp.py` — прокси-драйв, `AssistedGraspConfig.hand_collides`;
 - профили: `same_drawer_profile.json` 21, `depth_recall_profile.json` 6,
-  `season_dish_profile.json` 26, `cabinet_search_profile.json` 19,
+  `season_dish_profile.json` 26 (с тех пор перенесён на 28, см. ниже),
+  `cabinet_search_profile.json` 19,
   `cabinet_search5_profile.json` 7;
 - `my_scenes/depth_recall_v1.py` — `INSTRUCTION_VERSIONS` и `instruction_version`;
 - `my_scenes/cabinet_search.py` — пятиотсечная `MikasaCabinetSearch5-v0`,
@@ -93,13 +94,42 @@
   `retrace_the_door`, вернувший `None`, отдаёт закрытие «лестнице»;
 - `planners/cabinet_door_bimbo.py` — восстановлена `lower_the_hand`.
 
+### SeasonDish: число на карточке и встряхивания (profile 28)
+
+Задача переопределена в `origin/train/vla` и перенесена сюда точечно, без слияния
+её планировщика (там всё ещё `season_dish_{candidates,paths,transfer,stance}.py`):
+
+- `my_scenes/season_dish.py` — карточка с числом 1–9 рядом с картинкой
+  кондимента, счётчик встряхиваний в `evaluate`, `hold_steps` для финального
+  удержания, `INSTRUCTION_VERSIONS` 1/2/3 (по умолчанию 3);
+- `my_scenes/assets/season_dish/digit_1..9.png` + `tools/make_digit_cards.py` —
+  сама карточка и генератор её текстур;
+- `utils/mikasa/shake_counter.py` — `step_shakes`, `lean_from_down_deg`,
+  `step_upright_hold`: встряхивание считается, когда шейкер вернулся к наклону
+  `<= shake_return_deg`;
+- `planners/oracle/wrist_pour.py` — `plan_shakes` (четыре ноги `in/out/back/home`,
+  все планируются до первого движения) и `pour_and_shake`; из одного и того же
+  модуля наш `preview_pour` берёт окно, которое обязан оставить hover;
+- `utils/collection/season_dish_profile.json` 28 (`horizon 2000`, `cue_steps 50`,
+  `hold_steps 10`, `shake_*`, `digit_card_*`), `utils/collection/checklist.py`
+  (50-шаговый cue и исключение финального удержания), `utils/fridge_picture.py`
+  (`z_offset`, `name` — вторая группа картинок на двери),
+  `utils/collection/test_season_shakes.py`;
+- `planners/season_dish_planner.py` — `preview_pour` через
+  `wrist_pour.plan_shakes`, число встряхиваний из `info["num_shakes"]`, финал -
+  `pour_and_shake`; `pour_with_wrist` и `tilt_angles` удалены вместе с тестами
+  one-tip-наклона: остался один путь налива.
+
 ## Результаты на валидационных сидах (oracle-фаза, 100 сидов)
+
+Сиды 0–99, `MIKASA_IK_BACKEND=mplib`, восемь параллельных процессов.
 
 | Задача | success | missed | no_plan | error | baseline (индекс до рефакторинга) |
 |---|---|---|---|---|---|
 | SameDrawer 21 | 81 | 3 | 16 | 0 | 80 / 4 / 16 / 0 |
 | DepthRecall 6 | 98 | 2 | 0 | 0 | 98 / 2 / 0 / 0 |
 | SeasonDish 26 (repo v2) | 83 | 1 | 16 | 0 | 83 / 0 / 17 / 0 |
+| SeasonDish 28 (карточка+встряхивания) | 85 | 0 | 15 | 0 | нет (задача перенята из train/vla) |
 | CabinetSearch5 7 | 83 | 17 | 0 | 0 | нет (сцены не было в ветке) |
 
 Вывод: регрессий нет — множества успешных сидов совпадают с baseline, у
@@ -108,15 +138,21 @@ SameDrawer один сид добавлен (8250082). Оставшиеся `no_
 
 Не покрыто:
 
-- SeasonDish из HF помечен profile 28, такого профиля нет ни здесь, ни в
-  `origin/train/vla` (там 26) — эти сиды не прогнать;
 - TakeItBack и Veggie не проверялись (нет collection-профиля ни в одной ветке).
+
+Отказы SeasonDish 28 (15 `no_plan`): 12 — `no checked loaded route with a
+complete bowl pour` (не нашлось док-маршрута, который заканчивается полным
+shake-наливом), 3 — отказ на захвате (`contact False`, `upright continuation
+False`). Ни один не вызван отказом `preview_pour`: в логах `plan_shakes` либо
+находил ноги, либо маршрут отвергался раньше.
 
 ## Проверки
 
-- `253 passed, 4 skipped` — focused-набор `utils/collection/test_*.py`;
+- `265 passed, 4 skipped` — focused-набор `utils/collection/test_*.py`;
 - `git diff --check` чистый;
-- инвентарь: 70 файлов / 35 651 строка в `my_scenes` + `planners` + `robots`
+- эпизод вручную: `scripts/collection_episode.py season_dish 435` ->
+  `verdict=success steps=791` (`shake_count=2`, `pour_hold=12`);
+- инвентарь: 71 файл / 36 011 строк в `my_scenes` + `planners` + `robots`
   (было 164 файла / 30 909 строк production-кода в начале работы).
 
 ## Инструменты
