@@ -149,7 +149,7 @@
 
 | Задача | success | missed | no_plan | error | baseline (индекс до рефакторинга) |
 |---|---|---|---|---|---|
-| SameDrawer 21 | 81 | 3 | 16 | 0 | 80 / 4 / 16 / 0 |
+| SameDrawer 21 | 91 | 1 | 8 | 0 | 81 / 3 / 16 / 0 (и 79 / 2 / 19 / 0 на `origin/train/vla`, `c6a429d`) |
 | DepthRecall 6 | 98 | 2 | 0 | 0 | 98 / 2 / 0 / 0 |
 | SeasonDish 26 (repo v2) | 83 | 1 | 16 | 0 | 83 / 0 / 17 / 0 |
 | SeasonDish 28 (карточка+встряхивания) | 91 | 0 | 9 | 0 | 91 / 0 / 9 / 0 на `origin/train/vla` (`c6a429d`), те же сиды |
@@ -166,9 +166,21 @@ CabinetSearch5 до порта потерянных тактик давал 83/1
 а без этого `is_open` не снимается (нужны 10 подряд тиков с TCP > 0.25 м от
 штанги).
 
-Вывод: регрессий нет — множества успешных сидов совпадают с baseline, у
-SameDrawer один сид добавлен (8250082). Оставшиеся `no_plan` — те же сиды, что
-отказывали и до рефакторинга; чинить их не требуется.
+Вывод: регрессий нет. Там, где строки расходятся с baseline, виноват не
+рефакторинг, а потерянная тактика, и она возвращена: SameDrawer — 14 сидов
+(`DRAWER_CLOSE_STARTS` с `close_starts`/`reference_ik_starts` вокруг
+`approach_for_contact`, `contact_context`/`_drawer_initial_wrist_budget` как в
+upstream, `move(..., contact=, contact_stretch=)`, fallback «align with apple»,
+`try_grasp(..., resync_before_grasp/close_on_contact/approach_by_line)`);
+CabinetSearch — порт `nudge_the_cube`, `if closed: return res, True` в
+`close_and_verify`, поворот кисти под кулак и свободная ось проката.
+
+Остающиеся отказы SameDrawer (9 сидов: 22, 30, 43, 52, 60, 64, 66, 72, 78) —
+строгое подмножество отказов `origin/train/vla` (там их 21) и с теми же
+сообщениями: восемь — `no straight contact path` на подходе к ручке, сид 66 —
+`drawer reopened during withdrawal open_amount=0.0052` (кисть выдёргивает
+ящик на 5 мм при отходе). Двенадцать сидов, где upstream отказывает, здесь
+проходят.
 
 Не покрыто:
 
