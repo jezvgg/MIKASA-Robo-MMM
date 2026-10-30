@@ -11,7 +11,14 @@ from mani_skill.utils.structs import Actor, Pose
 
 
 class FridgePictures:
-    def __init__(self, env, images, width=0.3, front_distance=0.9):
+    """One of `images` shown on each scene's fridge door; the others parked at z = 1000.
+
+    `z_offset` moves the whole group up or down the door from the picture's spot (a second
+    group, such as SeasonDish's digit cards, hangs next to the picture); `name` prefixes the
+    actors, so two groups in one scene keep distinct names.
+    """
+
+    def __init__(self, env, images, width=0.3, front_distance=0.9, z_offset=0.0, name="fridge_picture"):
         self.env = env
         homes, starts, fronts = [], [], []
         actors = [[] for _ in images]
@@ -26,7 +33,7 @@ class FridgePictures:
             door_center = center.copy()
             # At the door centre below the resting arm, both head cameras see it.
             width_dir = np.cross([0., 0., 1.], front)
-            center[2] = float(fridge.pos[2]) + float(fridge.size[2]) * 0.20
+            center[2] = float(fridge.pos[2]) + float(fridge.size[2]) * 0.20 + float(z_offset)
             rot = np.column_stack([front, width_dir, [0., 0., 1.]])
             home = np.r_[center, mat2quat(rot)].astype(np.float32)
             yaw = float(np.arctan2(-front[1], -front[0]))
@@ -49,11 +56,11 @@ class FridgePictures:
                 hidden = home.copy()
                 hidden[2] = 1000.
                 builder.initial_pose = sapien.Pose(hidden[:3], hidden[3:])
-                actors[j].append(builder.build_kinematic(name=f"fridge_picture_{j}_{i}"))
+                actors[j].append(builder.build_kinematic(name=f"{name}_{j}_{i}"))
         self.home = torch.as_tensor(np.stack(homes), device=env.device)
         self.starts = np.stack(starts)
         self.fronts = np.stack(fronts)
-        self.actors = [Actor.merge(group, name=f"fridge_picture_{j}")
+        self.actors = [Actor.merge(group, name=f"{name}_{j}")
                        for j, group in enumerate(actors)]
         # Store each merged actor once; those poses are sufficient for state replay.
         for group, merged in zip(actors, self.actors):

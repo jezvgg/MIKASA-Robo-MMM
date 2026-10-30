@@ -35,6 +35,7 @@ from transforms3d.quaternions import mat2quat
 
 from planners.oracle import oracle_common as common
 from planners.oracle import oracle_season_dish as season
+from planners.oracle import wrist_pour
 from planners.oracle.paths import (
     dense_samples,
     execute_straight,
@@ -52,9 +53,7 @@ from planners.oracle.oracle_season_dish import (
     kinematics,
     measured,
     preview_roll_history,
-    pour_with_wrist,
     rotation,
-    tilt_angles,
     upright_path,
     upright_wrist_candidates,
 )
@@ -90,50 +89,27 @@ def held_transform(task, target):
             * target.pose[0].sp).to_transformation_matrix().astype(float)
 
 
-def pour_targets(planner, task, q, hand_object):
-    """Cheap endpoint geometry and joint-budget checks; no path or IK calls."""
-    p = planner.planner
+@measured
+def preview_pour(planner, task, q, hand_object):
+    """Cheap preview: the wrist-only shake that `wrist_pour.pour_and_shake` would plan from `q`, or
+    None. No motion executes; the 'in' leg is the arc, the swing's end is the reserve the hover
+    check needs to keep the whole roll inside the counter's span band."""
     fk = kinematics(planner, task)
     wrist = fk.matrix(q, 'wrist_roll_link')
     obj = fk.matrix(q) @ hand_object
-    axis, pivot = wrist[:3, 0], wrist[:3, 3]
-    bowl = task.bowl.pose[0].sp.p
-    index = fk.indices['wrist_roll_joint']
-    # Preview needs room for the measured model-to-physics deviation. These
-    # reserves tighten candidate selection; execution and checker stay at 165/155.
-    parameters=getattr(task,'motion_parameters',{})
-    clearance_reserve=float(parameters.get('pour_preview_clearance_reserve_m',0.))
-    wrist_reserve=float(parameters.get('pour_preview_wrist_reserve_rad',0.))
-    reasons = getattr(planner, '_pour_reasons', None)
-    def note(key, delta):
-        if reasons is not None:
-            reasons.append(f"{key}{'+' if delta > 0 else '-'}")
-    for delta in tilt_angles(axis, obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body), 165.):
-        end = pivot + rotation(axis, delta) @ (obj[:3, 3] - pivot)
-        if np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius:
-            note('miss_xy', delta); continue
-        if not task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve:
-            note('miss_height', delta); continue
-        goal = q.copy(); goal[index] += delta
-        reserve=goal.copy();reserve[index]+=np.sign(delta)*wrist_reserve
-        if not p.accepts(np.vstack([q,goal,reserve])):
-            note('roll_window', delta); continue
-        yield goal, reserve
-
-
-@measured
-def preview_pour(planner, task, q, hand_object):
-    p = planner.planner
-    for goal, reserve in pour_targets(planner, task, q, hand_object):
-        try:
-            path = p.plan_qpos_line(goal, q, time_step=task.control_timestep,
-                                    ref_yaw=float(q[2]), qpos_step=.02)
-        except RuntimeError:
-            continue
-        if path.get('status') == 'Success' and path_clear(planner, q, path['position']):
-            path['preview_reserve_qpos'] = reserve
-            return path
-    return None
+    plan = wrist_pour.plan_shakes(planner, task, q, fk.indices['wrist_roll_joint'], wrist[:3, 0],
+                                  wrist[:3, 3], obj, task.bowl.pose[0].sp.p.astype(float))
+    planner._pour_reasons = [] if plan is not None else ['no_feasible_wrist_shake']
+    if plan is None:
+        return None
+    rest, legs, out = plan
+    path = dict(legs['in'])
+    if not path_clear(planner, q, path['position']):
+        planner._pour_reasons = ['shake_arc_not_clear']
+        return None
+    path['preview_reserve_qpos'] = out
+    path['preview_rest_qpos'] = rest
+    return path
 
 
 def hover_goals(p, current, tcp, *, n_init=32, preferred=None, mode='dual'):
@@ -1659,7 +1635,9 @@ def _solve(
     # -- STAGE 1: read the profile cue ---------------------------------------------
     target_is_shaker = bool(_np(info["target_is_shaker"]).reshape(-1)[0])
     target = task.shaker if target_is_shaker else task.condiment_bottle
-    say(env, "target chosen", target_is_shaker=target_is_shaker)
+    # How many shakes the number card asked for: the remembered answer, read once here.
+    shakes = int(_np(info["num_shakes"]).reshape(-1)[0])
+    say(env, "target chosen", target_is_shaker=target_is_shaker, num_shakes=shakes)
     planner.track_target(lambda: _np(target.pose.p)[0])
     # Both answers use the same physical station dock.
     dock = _np(task._station_dock_np)[0].astype(np.float64)
@@ -1848,4 +1826,4 @@ def _solve(
         if not bool(task.agent.is_grasping(target).any()):
             say(env, "physical miss: target lost on approach to bowl")
             return res
-        return pour_with_wrist(env, planner, task, target, target_degrees=165.0)
+        return wrist_pour.pour_and_shake(env, planner, task, target, shakes)

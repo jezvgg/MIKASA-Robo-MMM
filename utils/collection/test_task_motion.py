@@ -179,67 +179,7 @@ import numpy as np
 import sapien
 import torch
 
-from planners.season_dish_planner import above_via, pour_with_wrist
-
-
-def setup_planner(line_status='Success', grasped=True):
-    q = np.zeros(15)
-    calls = []
-    names = ['shoulder_pan_joint', 'shoulder_lift_joint', 'upperarm_roll_joint',
-             'elbow_flex_joint', 'forearm_roll_joint', 'wrist_flex_joint',
-             'wrist_roll_joint']
-    indices = [5, 7, 8, 9, 10, 11, 12]
-    joints = {n: SimpleNamespace(active_index=[i]) for n, i in zip(names, indices)}
-    joints['torso_lift_joint'] = SimpleNamespace(active_index=[3])
-    robot = SimpleNamespace(
-        active_joints_map=joints,
-        get_qpos=lambda: torch.tensor(q[None]),
-        links_map={'wrist_roll_link': SimpleNamespace(pose=[SimpleNamespace(sp=sapien.Pose([0, 0, .2]))])},
-    )
-    target = SimpleNamespace(pose=[SimpleNamespace(sp=sapien.Pose([0, 0, .2]))])
-    task = SimpleNamespace(
-        agent=SimpleNamespace(robot=robot, is_grasping=lambda _: torch.tensor([grasped]),
-            controller=SimpleNamespace(controllers={'arm': SimpleNamespace(config=SimpleNamespace(joint_names=names))})),
-        cfg=SimpleNamespace(pour_axis_body=[0, 0, 1], pour_xy_radius=.1,
-                            pour_min_clearance=.05, pour_max_clearance=.3, hold_steps=15),
-        bowl=SimpleNamespace(pose=SimpleNamespace(p=torch.tensor([[0., 0., 0.]]))),
-        control_timestep=.05,
-    )
-    def line(goal, current, **kwargs):
-        np.testing.assert_array_equal(np.delete(goal, 12), np.delete(current, 12))
-        assert kwargs['qpos_step'] <= .02
-        calls.append('preview')
-        return {'status': line_status}
-    planner = SimpleNamespace(
-        planner=SimpleNamespace(update_from_simulation=lambda: None, plan_qpos_line=line),
-        fixed_action_targets={9: .42},
-    )
-    def execute(path, *, refine):
-        calls.append('execute')
-        assert planner.fixed_action_targets == {**{i: 0. for i in range(6)}, 7: -1., 10: 0., 11: 0., 12: 0.}
-        return -1
-    planner.follow_forward_path_w_refinement = execute
-    return planner, task, target, calls
-
-
-def test_collision_failure_never_executes_endpoint():
-    p, task, target, calls = setup_planner('finger collision')
-    assert pour_with_wrist(SimpleNamespace(), p, task, target) == -1
-    assert calls and set(calls) == {'preview'}
-    assert p.fixed_action_targets == {9: .42}
-
-
-def test_pour_locks_other_actuators_and_restores_lock_on_failure():
-    p, task, target, calls = setup_planner()
-    assert pour_with_wrist(SimpleNamespace(), p, task, target) == -1
-    assert calls == ['preview', 'execute']
-    assert p.fixed_action_targets == {9: .42}
-
-
-def test_missing_grasp_refuses_before_planning():
-    p, task, target, calls = setup_planner(grasped=False)
-    assert pour_with_wrist(SimpleNamespace(), p, task, target) == -1
-    assert calls == []
+from planners.season_dish_planner import above_via
 
 
 def test_above_via_returns_none_when_straight_plan_refuses(monkeypatch):
@@ -247,29 +187,3 @@ def test_above_via_returns_none_when_straight_plan_refuses(monkeypatch):
     monkeypatch.setattr('planners.season_dish_planner.straight_plan', lambda *a, **kw: None)
     assert above_via(p, SimpleNamespace(), np.zeros(15), sapien.Pose(), .15) is None
     assert p._above_status == {'statuses': ['counter contact']}
-
-
-from planners.season_dish_planner import rotation
-
-
-# Source group: test_wrist_pour.py
-import math
-import numpy as np
-from planners.season_dish_planner import rotation, tilt_angles
-
-
-def test_horizontal_wrist_reaches_165_in_both_directions():
-    roots = tilt_angles([1, 0, 0], [0, 0, 1])
-    assert any(x > 0 for x in roots) and any(x < 0 for x in roots)
-    for delta in roots:
-        z = (rotation([1, 0, 0], delta) @ [0, 0, 1])[2]
-        assert np.isclose(math.degrees(math.acos(z)), 165)
-
-
-def test_rejected_35_degree_grasp_cannot_pour_with_wrist_alone():
-    p = math.radians(35)
-    assert tilt_angles([math.cos(p), 0, -math.sin(p)], [0, 0, 1]) == []
-
-
-def test_parallel_axis_cannot_change_tilt():
-    assert tilt_angles([0, 0, 1], [0, 0, 1]) == []
