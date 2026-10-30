@@ -3,20 +3,25 @@
 The scripts that collected the `nurtayev-d/*-ag-1000ep` datasets, copied as they ran from
 `~/sd-collect` on the server (last synced 2026-10-26). They are the pod's 2026-09-28 collection
 pipeline, adapted to this server: a 12-CPU quota, NFS, a shared disk budget. The code under test
-lives in the task branches. These are the runners around it.
+lives in the task branches. These are the runners around it. The runners of the SeasonDish
+shaking collection (2026-10-27/28) are not copied here yet.
 
 | Dataset | Collected on | Profile | Accepted / attempts |
 |---|---|---|---|
 | samedrawer-ag-1000ep | collection/samedrawer-ag 9238467 | 21 | 1106 / 1462 |
-| seasondish-ag-1000ep | collection/seasondish-ag 5dbf5a8 | 26 | 1044 / 1320 |
+| seasondish-ag-1000ep (one tip, superseded) | collection/seasondish-ag 5dbf5a8 | 26 | 1044 / 1320 |
+| seasondish-shake-ag-1000ep | feat/seasondish-planner 5adb6f6 | 28 | 1030 / 1440 |
 | cabinetsearch-ag-1000ep (four compartments, superseded) | collection/samedrawer-ag 4562981 | 16 | 1051 / 1360 |
 | depthrecall-ag-1000ep | feat/depth-recall-mustard ddfbccf | 6 | 1057 / 1100 |
 | cabinetsearch5-ag-1000ep | feat/cabinet-fifth-door d65cd4c | cabinet_search5 7 | 1062 / 1080 |
 
 Since 2026-10-26 `train/vla` (2fa4560 and later) rebuilds all of them but the four-compartment one:
 20 re-collected episodes per dataset are bit-identical to the published ones
-(`tools/assisted_grasp_check/RESULTS.md`, "One branch"). Run the collection from a clone of that
-branch; each dataset's profile carries its assisted-grasp drive and instruction version.
+(`tools/assisted_grasp_check/RESULTS.md`, "One branch"). Since 2026-10-30 it also holds the
+shaking task (feat/seasondish-planner, fast-forwarded): the SeasonDish profile is 28 and rebuilds
+seasondish-shake-ag-1000ep; the one-tip seasondish-ag-1000ep is rebuilt at 0864fb1. Run the
+collection from a clone of that branch; each dataset's profile carries its assisted-grasp drive and
+instruction version.
 
 ## Layout
 

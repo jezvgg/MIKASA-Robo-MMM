@@ -266,3 +266,26 @@ which failed under the proxy, passes with SeasonDish back on its direct drive.
 Policies trained on SameDrawer, SeasonDish or DepthRecall are now evaluated by default in the physics
 their data was recorded with; under the direct drive the hand cannot collide with those tasks'
 graspable objects (the fingers still do), which the data above never needed.
+
+## SeasonDish's shaking task on this branch (2026-10-30)
+
+`train/vla` is fast-forwarded to feat/seasondish-planner 5adb6f6. The SeasonDish profile is now 28
+(a number card, that many shakes, then upright and still; instruction version 3), the profile
+`seasondish-shake-ag-1000ep` was collected with. The one-tip `seasondish-ag-1000ep` (profile 26) is
+rebuilt at 0864fb1, as measured above.
+
+The same re-collection on a rented pod (5 workers, its CPU quota):
+
+| Dataset | 5adb6f6 against 0864fb1, same pod | Against the published episodes, this pod |
+|---|---|---|
+| samedrawer-ag-1000ep (profile 21) | 20/20 | 15/20 at both commits |
+| depthrecall-ag-1000ep (profile 6) | 20/20 | 0/20 at both commits |
+| cabinetsearch5-ag-1000ep (profile 7) | 20/20 | 20/20 at both commits |
+| seasondish-shake-ag-1000ep (profile 28) | - | 20/20 |
+
+The pod is not the collection server. Two runs of 0864fb1 there agree 20/20, but its planner leaves
+the server's on some SameDrawer and DepthRecall seeds (action differences of 1e-18 to 1e-15 from
+the first replanned step, which can then shift the gripper's timing). So the same-pod column is the
+one that says whether the fast-forward changed these tasks, and it says no. The instruction token
+lists are the same at both commits. Tests: `utils/collection/` without the slow one, 277 passed,
+4 skipped.
