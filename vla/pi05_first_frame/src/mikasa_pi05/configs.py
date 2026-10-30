@@ -301,6 +301,11 @@ CONFIGS["memer_lowlevel_debug_1xh100"] = _memer_config(
     "memer_lowlevel_debug_1xh100", data=MemerLowLevelDataConfig(episodes=MEMER_DEBUG_TRAIN_EPISODES),
     batch_size=32, num_workers=6, num_train_steps=2_000, save_interval=2_000, keep_period=None, ema_decay=None,
     lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=100, peak_lr=1e-4, decay_steps=2_000, decay_lr=1e-5))
+# Four-GPU debug (vla/debug_4gpu.sh): the full run's config (batch 128 on 4 FSDP devices, its LR
+# schedule, EMA) on episodes 0-979 of every task, so 980-999 stay held out for the check.
+CONFIGS["memer_lowlevel_debug_4xh100"] = _memer_config(
+    "memer_lowlevel_debug_4xh100", data=MemerLowLevelDataConfig(episodes=MEMER_DEBUG_TRAIN_EPISODES),
+    batch_size=128, fsdp_devices=4, num_workers=16, num_train_steps=600, save_interval=200, keep_period=None)
 
 
 # Steps between full checkpoints (with optimizer state) for configs that snapshot more often.

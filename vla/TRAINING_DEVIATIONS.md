@@ -31,6 +31,13 @@ GPU count:
   0.99), as their `pi05_droid_finetune` leaves them.
 - MemER: the code release has no model merging (the paper's 0.2 pre + 0.8 fine-tuned); the code
   recipe is followed, so no merging.
+- MemER high level, frame rate: the paper feeds the recent frames at 2 Hz (section 4), the code
+  takes every 5th frame, and the authors' released data is 15 Hz, so their code runs at 3 Hz. Our
+  data is 10 Hz, so the same stride gives the paper's 2 Hz (window 3.5 s; subtask target 1.0 s ahead).
+- MemER high level, chat roles: qwen-vl-finetune renders the export's `system` turn as an assistant
+  turn (`qwenvl/data/data_processor.py:160`), so the system prompt is in the loss, while the
+  authors' eval defaults to the `system` role (`memer_eval/contract.py:63`). Training is left as
+  theirs; evaluation should compare both roles (`--system-role assistant`).
 
 ## Changed, and why
 
@@ -42,6 +49,8 @@ GPU count:
 | Our own norm stats | MemER low, MemoryVLA | DROID's/MIKASA's statistics describe other action spaces |
 | Normalization bounds: each task's min/max instead of its 1st/99th percentile for every normalized channel (base velocities and arm/head/torso deltas; `vla/memoryvla/set_norm_bounds.py` edits q01/q99 in the authors' cached `dataset_statistics_*.json`; their code is unchanged) | MemoryVLA | their BOUNDS_Q99 clips each task to its percentiles; on our data that erases DepthRecall's turn (q01 = q99 = 0) and cuts TakeItBack's drives from 0.90 to 0.155 m/s; a 20k-step one-GPU check with their bounds indeed never turned and never drove faster than 0.17. Supervisor 2026-10-22: "do not clip the real important actions". Min/max clips nothing; it is what GR00T N1.5 uses for a mobile base and OpenVLA-OFT for joints and base (ALOHA; R1Pro in BEHAVIOR). The action contract's fixed -1/+1 for the base (the BEHAVIOR baselines' way) was tried first: at 10k debug steps it turned the model's residual noise into large base commands on still frames, so the narrower per-task scale was chosen (2026-10-23). Survey: `artifacts/base-normalization.md` |
 | Memory settings for long episodes: `--dataloader_type stream --mem_length 256` from the authors' `script/train/real_world/train_real.sh` in their MIKASA recipe (OpenVLA init and the 4-step window kept) | MemoryVLA | supervisor 2026-10-22 ("take the authors' settings for long episodes"). The paper (App. G, Tab. 9-10) ties memory length to episode length and uses 256 for its long real tasks (median 236, up to 902 frames after filtering); ours run 452-1373 frames (median per task), MIKASA's 60-90 |
+| Shuffle buffer of 500 episodes per rank instead of their 64,000 (`vla/memoryvla/train.sh`, `SHUFFLE`) | MemoryVLA | the stream dataloader shuffles whole episodes (their `make_interleaved_episodic_dataset` leaves out the frame flatten, and images are decoded after the shuffle), so the number counts encoded episodes, ~50 MB each of ours (RLDS: 6.0 GB for 120 episodes). Their 64,000 comes from the group-dataloader MIKASA script and would mean ~3 TB per rank: on 2026-10-27 the four ranks filled ~640 GB in 90 s and the pod was killed at its 728 GiB limit. Their stream script (`train_real.sh`) uses 32,000, with the comment to lower it if memory is limited; 500 is ~25 GB per rank and covers 8% of our 6000 episodes on each rank |
+| Dataloader workers per GPU: 2 instead of their 8 (`vla/memer/train_high.sh`, `WORKERS`; owner's choice 2026-10-29) | MemER high | each worker of their Qwen loader turns its copy-on-write view of the parsed `train.json` into a private copy within ~10 min (Python's reference counts write to every page): ~21 GiB per worker for four tasks, plateaus 260 / 345 / 429 GiB at 2 / 3 / 4 workers (`vla/memer/probe_loader_mem.sh`); their 8 killed the pod on 2026-10-27. The sampler runs in the main process, so the samples and their order do not depend on it, only the loading speed does. Six tasks of the every-frame export need fewer: the fit 7 + 4·(1 + W)·D GiB with D = 29.6–32.7 GiB per copy gives 362–399 GiB at 2 workers, 481–530 at 3, 599–661 at 4 (the guard stops at 582; the longer new SeasonDish adds ~3%). The price of 2: a step of 6.2 s instead of 5.4 s at 4 (probe of 2026-10-27, four tasks) |
 | Subtask boundaries from the oracle's recorded events; subtask names and keyframe rules written by us | MemER | theirs: operator key presses and their own per-task rules (App. E); every task needs its own. Approved list: ~/Downloads/memer_subtasks_2026-10-20.txt |
 | A keyframe before a sample's first subsampled frame moves to that frame instead of being dropped (`vla/memer/patches/memer-0001-early-keyframes.patch`, one line in their `generate_sft_data.py`) | MemER high | owner 2026-10-22; without it SameDrawer's cue reaches 20% of the samples that need it. See "Early keyframes" below |
 | Data: 6 tasks x 1000 oracle episodes, no interventions | all | our benchmark. MemER: 3 tasks x 50 demos (+10-15 interventions for the low level); MemoryVLA on MIKASA-Robo: 5 tasks x 250 demos at 128x128 |
@@ -103,17 +112,36 @@ are byte-identical.
 
 ## Not settled: training length on our data
 
-The step counts were set for the authors' datasets. Ours have 4,844,230 frames (6000 episodes,
-~80 s each), so the same steps see each frame far fewer times:
+The step counts were set for the authors' datasets. Ours have 5,141,099 frames (6000 episodes,
+~86 s each; 4,844,230 before CabinetSearch became five compartments), so the same steps see each
+frame far fewer times:
 
 | | samples (steps x batch) | our epochs | authors' epochs (estimate) |
 |---|---|---|---|
 | MemER high (code) | 1500 x 128 = 192k | 0.04 | ~6 (50 dusting episodes, ~31k frames) |
-| MemER low (Table 5) | 18,000 x 128 = 2.3M | 0.48 | ~10-20 (3 tasks x ~62 episodes) |
-| MemoryVLA (MIKASA) | 20,000 x 256 = 5.1M (ours 128: 2.6M) | 1.06 (ours 0.53) | ~50 (5 tasks x 250 short episodes) |
+| MemER low (Table 5) | 18,000 x 128 = 2.3M | 0.45 | ~10-20 (3 tasks x ~62 episodes) |
+| MemoryVLA (MIKASA) | 20,000 x 256 = 5.1M (ours 128: 2.6M) | 1.00 (ours 0.50) | ~50 (5 tasks x 250 short episodes) |
 
 Matching the authors' epochs would take 10-150x their steps. The owner decides between the
 literal steps, more steps, or fewer episodes per task.
+
+## Not settled: MemoryVLA's chunk length
+
+We use their MIKASA script's `--future_action_window_size 3` (chunk 4). The paper says 16 for every
+benchmark, MIKASA-Robo included (App. C.1, Table 8: "Action chunking size 16"); `train.py` defaults to
+15 (chunk 16), and so does their long-episode script `train_real.sh`, whose memory settings we
+already take. At our 10 Hz a chunk of 4 is 0.4 s and a chunk of 16 is 1.6 s (MemER low: 15 = 1.5 s).
+The debug runs so far used 4. The owner proposes 50 (2026-10-28); the report for approval
+suggests training 50 and executing the first 8-16 (SmolVLA, BPP and pi0 predict long and execute
+short; executing all 50 has no precedent and loses in SmolVLA, 51.8 vs 82.8).
+
+Memory cadence, found 2026-10-28 and open at any chunk: with `--dataloader_type stream` training
+writes one memory entry per frame with the frame index as its time (`vla/datasets/datasets.py:362-372`),
+while inference writes one entry per `predict_action` call with the call count as its time
+(`vla/memory_vla.py:828-836`), i.e. once per executed chunk. Executing k actions makes inference
+memory k times sparser than training: 4x now, 50x for chunk 50 executed in full. The authors' group
+loader on MIKASA and LIBERO is about 1x; their real-world stream recipe is 10x. muVLA (arXiv
+2606.12497, sections 4-5) reports this mismatch breaking memory (LIBERO-Long 95.8 -> 5.4).
 
 ## Evaluation protocol (not training, for later)
 

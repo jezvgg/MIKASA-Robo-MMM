@@ -4,7 +4,7 @@
     "observation.images.left_base_camera_link",
     "observation.images.right_base_camera_link"
   ],
-  "view_width": 256,
-  "view_height": 256,
-  "notes": "Fetch stacked RGB layout after MemER's panda_stacked_rgb_camera_layout.json, all three cameras (owner, 2026-10-21): wrist (fetch_hand) on top, then the left and the right base camera. MemER's stack_frame_images does not resize the views: it pads the 128-wide hand image with black to the base cameras' 256 width, stacks 256x640 and scales the stack to view_width x 3*view_height. At the planned 192 px (192x576) the hand view is 96x115 beside a black block of the same size and each base view is 192x230."
+  "view_width": 192,
+  "view_height": 192,
+  "notes": "Fetch stacked RGB layout after MemER's panda_stacked_rgb_camera_layout.json, all three cameras (owner, 2026-10-21): wrist (fetch_hand) on top, then the left and the right base camera. MemER's stack_frame_images does not resize the views: it pads the 128-wide hand image with black to the base cameras' 256 width, stacks 256x640 and scales the stack to view_width x 3*view_height. At 192 px (192x576, 108 Qwen3-VL tokens, under the authors' max_pixels 115200) the hand view is 96x115 beside a black block of the same size and each base view is 192x230. The size is set here, not only on the command line, because memer_eval/deploy.py takes it from this file and sets no max_pixels: at 256 a deployed model would get 192 tokens instead of the 108 it was trained on."
 }

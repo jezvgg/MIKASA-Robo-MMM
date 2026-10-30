@@ -44,7 +44,7 @@ def params(task: str, base, seed: int) -> dict:
         _, order = search_plan(seed, len(base.cfg.compartments))   # the oracle's sighted route
         return {"cube_cab": int(np1(base.cube_cab)[0]), "home_radius": float(base.cfg.home_radius),
                 "search_order": [int(v) for v in order],
-                "compartments": [c.name + ":" + c.open_hinge for c in base.cfg.compartments],
+                "compartments": [c.name for c in base.cfg.compartments],
                 "home_xy": np1(base.home_marker.pose.p)[:2].tolist()}
     if task == "depthrecall":
         from my_scenes.depth_recall_v1 import PROPS
