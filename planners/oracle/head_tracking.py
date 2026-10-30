@@ -40,6 +40,28 @@ def aim_angles(target, tilt_origin, eye_offset, optical_pitch, limits):
     return np.array([pan, np.clip(tilt, *limits[1])])
 
 
+def aim_one_eye(target, tilt_origin, eye, limits, start, iterations=40):
+    """Aim ONE camera's optical axis (+x of its frame) at a point in the pan frame.
+
+    `eye` is the camera's pose in the tilt link's frame. The two cameras are toed in, so the
+    midpoint aim leaves a near target off-centre in each; this centres it in the one named.
+    Fixed-point steps on the target's yaw and pitch in the camera frame, from `start`.
+    """
+    pan, tilt = float(start[0]), float(start[1])
+    lift = np.eye(4)
+    lift[:3, 3] = tilt_origin
+    for _ in range(iterations):
+        cam = rotation("z", pan) @ lift @ rotation("y", tilt) @ eye
+        d = cam[:3, :3].T @ (np.asarray(target, dtype=float) - cam[:3, 3])
+        yaw = math.atan2(d[1], d[0])
+        pitch = math.atan2(d[2], math.hypot(d[0], d[1]))
+        if abs(yaw) < 1e-4 and abs(pitch) < 1e-4:
+            break
+        pan = float(np.clip(pan + yaw, *limits[0]))
+        tilt = float(np.clip(tilt - pitch, *limits[1]))
+    return np.array([pan, tilt])
+
+
 class HeadTracker:
     """Recompute absolute head targets as the base, torso and target move.
 
@@ -70,13 +92,18 @@ class HeadTracker:
         if not np.allclose(pan_to_tilt[:3, :3], np.eye(3), atol=1e-5):
             raise ValueError("Head tracker expects DSFetch pan/tilt joint axes")
         self.tilt_origin = pan_to_tilt[:3, 3]
-        eyes = [
-            cfg.pose.sp.to_transformation_matrix()
+        named = {
+            cfg.uid: cfg.pose.sp.to_transformation_matrix()
             for cfg in agent._sensor_configs
             if cfg.uid in ("left_base_camera_link", "right_base_camera_link")
-        ]
+        }
+        eyes = list(named.values())
         if len(eyes) != 2:
             raise ValueError("Expected the two standard DSFetch external cameras")
+        #: Each camera in the tilt link's frame, for `eye`: None aims the midpoint of the two
+        #: (the default), a camera uid aims that one camera (`aim_one_eye`).
+        self.eyes = {uid: tilt_to_head @ e for uid, e in named.items()}
+        self.eye = None
         self.eye_offset = tilt_to_head[:3, 3] + tilt_to_head[:3, :3] @ np.mean(
             [e[:3, 3] for e in eyes], axis=0
         )
@@ -98,9 +125,12 @@ class HeadTracker:
             raise ValueError("Nonfinite head tracking target")
         neutral = self.pose("head_pan_link") @ rotation("z", -self.measured()[0])
         local = neutral[:3, :3].T @ (target - neutral[:3, 3])
-        return aim_angles(
+        both = aim_angles(
             local, self.tilt_origin, self.eye_offset, self.optical_pitch, self.limits
         )
+        if self.eye is None:
+            return both
+        return aim_one_eye(local, self.tilt_origin, self.eyes[self.eye], self.limits, both)
 
     def command(self):
         goal = self.desired()

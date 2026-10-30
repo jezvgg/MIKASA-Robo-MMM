@@ -1,5 +1,5 @@
 {
- "version": 5,
+ "version": 7,
  "declared_before_first_gate": true,
  "scope": "Per-episode acceptance for the 2026-09-28 collection. SR (H2) counts every attempted seed; rejected successes stay successes in H2 and are listed with reasons.",
  "hard_gates_all_tasks": [
@@ -29,9 +29,9 @@
   ]
  },
  "recorded_not_gated": {
-  "E1": "visible_fraction; Season/Drawer >= 0.98 in pilots, Cabinet ~0.89 in all pilots: task-level open item (camera coverage), not filtered",
+  "E1": "visible_fraction; CabinetSearch rug phases count a frame with the base on the rug (within home_radius of its centre) as reached (amendment 6); visible_fraction_raw keeps camera visibility as before",
   "D3_cabinet": "open task-level item from earlier stages",
-  "D5_cabinet": "base direction changes; Cabinet search drives between cabinets and home; known open item",
+  "D5_cabinet": "base direction changes; documented task exception (owner 2026-10-25, amendment 7): the search drives between the cabinets and the rug; measured and reported per episode, never used to filter",
   "D6_other_tasks": "recorded for same_drawer/cabinet_search"
  },
  "export": "compact video profile, 10 Hz by stride-2 subsampling, per-batch -test-Nep datasets merged later with --link-videos",
@@ -61,6 +61,20 @@
    "utc": "2026-10-18T18:26:30.268102+00:00",
    "version": 5,
    "change": "depth_recall (profile 5) hard gates: source success; native, held 10 Hz and RGB replays; D2, D4, action pairs, no odd gripper switch; D6 (the motion audit's pause check); export readback. Recorded, not gated: D5 (owner 2026-10-18, profile quality_exceptions.D5), D3, E1. Audits: audit_followup_motion_dr.py (the pod's audit with its last branch limited to SameDrawer) and audit_restored_views_dr.py (DepthRecall view targets), the neighbour session's scripts, md5 360d0b38 / 788e0123. No clearance audits: the env's own success covers wrong pad, tilt and two-in-slot."
+  },
+  {
+   "version": 6,
+   "utc": "2026-10-25T08:18:06.097848+00:00",
+   "change": "E1 rug rule (audit_restored_views.py): in CabinetSearch's rug phases (home_start, home_after_k) a frame with the base within home_radius (0.20 m) of the rug centre counts the rug as reached. The rug is smaller than the base and lies under it once the robot stands on it; the per-frame `seen` and the episode's `visible_fraction_raw` keep the camera visibility. Already gated batches re-scored without rendering into <batch>-views-e1.json (e1_recompute.py).",
+   "reason": "Owner 2026-10-25 «Да» to «если база стоит на коврике, цель коврик считается достигнутой». Measured on 451 accepted five-compartment profile-7 episodes: the rug is in some camera on 99-100 % of the frames at every base distance >= 0.1 m and on 3 % below it; 80 % of all E1 misses were frames standing on the rug, 20 % the first frames of a round (head turning from the rug to the cabinet); the can 100 %, the leaves 97 %. E1 then: min 0.971, median 0.977, 451/451 >= 0.95 (raw median 0.895).",
+   "applies_from": "all CabinetSearch batches (re-scored), profile 7 five-compartment and profile 19"
+  },
+  {
+   "version": 7,
+   "utc": "2026-10-25T12:44:12.808788+00:00",
+   "change": "CabinetSearch D5 (no back-and-forth base driving) moves from 'known open item' to a documented task exception, as DepthRecall's (owner 2026-10-18). Still recorded per episode, not gated, not used to filter; the dataset README states it. Five-compartment profile 7's profile JSON predates the decision and is not re-pinned mid-collection; the next profile version carries it as quality_exceptions.D5.",
+   "reason": "Owner 2026-10-25: «исключение» to «D5: оформить исключение в документации или менять движение». Every round drives the base from the rug to a cabinet and back, so the base reverses by design: 405/412 accepted five-compartment episodes fail D5, median 90 reversing frames, about 18 direction changes an episode.",
+   "applies_from": "all CabinetSearch batches (cabinet_search, cabinet_search5)"
   }
  ]
 }

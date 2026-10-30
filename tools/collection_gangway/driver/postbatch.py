@@ -14,8 +14,9 @@ TOK = os.path.expanduser('~/mikasa-pi05/openpi-cache/big_vision/paligemma_tokeni
 SIM = os.environ['SIM']  # ~/sd-collect/env.sh
 EXP = os.environ['EXP']  # ~/sd-collect/venv-export
 REPOS = dict(same_drawer=os.path.expanduser('~/sd-collect/repo'),
+             cabinet_search5=os.path.expanduser('~/sd-collect/repo-cab5c7'),  # five compartments, profile 7, feat/cabinet-fifth-door d65cd4c (unpushed)
              season_dish=os.path.expanduser('~/sd-collect/repo-sdish'),  # profile 26, collection/seasondish-ag 5dbf5a8
-             cabinet_search=os.path.expanduser('~/sd-collect/repo-cab'),  # profile 16, collection/samedrawer-ag 4562981
+             cabinet_search=os.path.expanduser('~/sd-collect/repo-cab19'),  # profile 19 (d674243, unpushed); p18 repo-cab18 never collected;, check/assisted-grasp-collisions 3eef80c + render lanes 4e3ba84; p16 was repo-cab 4562981
              depth_recall=os.path.expanduser('~/sd-collect/repo-dr6'))  # profile 6, feat/depth-recall-mustard ddfbccf
 AUDITS = dict(
     season_dish=['audit_followup_motion.py', 'audit_pilot_structure.py', 'audit_payload_clearance.py', 'audit_upper_clearance.py'],
@@ -23,6 +24,7 @@ AUDITS = dict(
     cabinet_search=['audit_followup_motion.py', 'audit_pilot_structure.py', 'audit_transport_clearance.py', 'audit_cabinet_closing.py',
                     'audit_can_early.py'],  # can_early: profile 16 gate, ACCEPTANCE_RULES v4
     depth_recall=['audit_followup_motion_dr.py'])  # the neighbour's DR audit (task-guarded SameDrawer branch), v5
+AUDITS['cabinet_search5'] = AUDITS['cabinet_search']  # five compartments: CabinetSearch's audits and rules
 #: Tasks whose source .h5 go once the batch is exported and every step passed (owner 2026-10-19 «3) удалить»,
 #: Depth Recall); json, logs and the ledger stay. Manifest: deletions/<batch>-h5.json.
 H5_AFTER_EXPORT = ()  # 10-19: sources go to HF first (tools/hf_sources_loop.py on the Mac), then the loop deletes
@@ -91,7 +93,7 @@ def main(task, batch):
             reasons.append('no motion audit')
         else:
             gated = ('D2_pass', 'D4_pass', 'action_pairs_equal') + (
-                () if task in ('cabinet_search', 'depth_recall') else ('D5_direction_pass',))  # DR D5: owner 2026-10-18
+                () if task in ('cabinet_search', 'cabinet_search5', 'depth_recall') else ('D5_direction_pass',))  # DR D5: owner 2026-10-18
             for k in gated:
                 if not m.get(k):
                     reasons.append(k + ' failed')
@@ -110,7 +112,7 @@ def main(task, batch):
                 r = m.get('apple_retention') or {}
                 if not r.get('final_on_plate') or r.get('latch_violated'):
                     reasons.append('apple retention')
-        if task in ('same_drawer', 'cabinet_search'):
+        if task in ('same_drawer', 'cabinet_search', 'cabinet_search5'):
             t = transport.get(s)
             if t is None or t['collision_frames']:
                 reasons.append('transport clearance' if t else 'no transport audit')
@@ -122,7 +124,7 @@ def main(task, batch):
             p = payload.get(s)
             if p is None or p['collision_frames']:
                 reasons.append('payload clearance' if p else 'no payload audit')
-        if task == 'cabinet_search':
+        if task in ('cabinet_search', 'cabinet_search5'):
             c = closing.get(s)
             if c is None or c['unexpected_contacts']:
                 reasons.append('closing unexpected contact' if c else 'no closing audit')
