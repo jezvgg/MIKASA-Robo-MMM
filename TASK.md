@@ -143,6 +143,72 @@
 - `tools/collection_gangway/driver/*` не тронуты: это архив кампании на H100
   (пути `~/sd-collect/repo-cab`), он описывает снятый датасет, а не запускает env.
 
+### Ветки сведены: обучение, RoboMME и legacy-планировщики
+
+Ветка `tmp/season-dish-consolidation` теперь содержит и то, что осталось
+в `origin/train/vla` (`c6a429d`), и то, что наработано на
+`origin/wt/takeitwithhead-worktree-20260921`. Сливалось точечно, по файлам,
+чтобы не воскресить код, удалённый на этой ветке.
+
+Взято из `origin/train/vla` (`f46cedd`, `ed9c668`): `vla/memer`,
+`vla/memoryvla`, `vla/BASELINES_PARAMS.md`, `vla/TRAINING_DEVIATIONS.md`,
+`vla/mem_guard.py`, `vla/mem_log.py`, `vla/debug_4gpu.sh`, новые
+`vla/pi05_first_frame/src/mikasa_pi05/{configs,dataset,provenance,transforms}.py`,
+`third_party/` (только gitlink'и: `memer` `fb6dbd0`, `Qwen3-VL` `9658872`,
+`MemoryVLA` `082ce25` branch `mikasa-robo`, `openpi` `215abfb`),
+`my_scenes/my_robocasa_takeit.py`, `MyRoboCasaSceneTakeItBack`/
+`MyRoboCasaFridgeVeggies` на общем миксине `AssistedGraspTask`,
+`planners/oracle/head_tracking.py` с `aim_one_eye`, `utils/target_visibility.py`,
+`utils/tray_episode_checkers.py`, `utils/collection/test_one_branch_profiles.py`,
+`tools/` целиком.
+
+Взято из `origin/wt/takeitwithhead-worktree-20260921` (`6b09933`):
+`utils/policies/` (RoboMME-слой и `recipes/author_recipes.json`), `research/`,
+`OPENPI.md`, `utils/openpi_*`, `utils/serve_openpi.py`, `utils/evaluate_*`,
+`utils/trajectory_metadata.py`, `utils/combine_lerobot_stream.py`,
+`utils/merge_replays.py`, `robots/fetch/forward_rrt.py`,
+`planners/myrobocasa_takeit_planner.py`, `planners/takeitback_common.py`,
+`scripts/collect_tray_{dataset,demos}.py`, `tests/*` (14 файлов) и версии
+`planners/myrobocasa_{fridge_veggies,takeitback}_planner.py`, к которым эти
+тесты написаны.
+
+Не взято: `pyproject.toml`, `uv.lock` (наш lock новее и проверен прогоном),
+`BIBLE.md`, `DATASET_CHECKLIST.md`, `README.md` (наш уже упоминает
+`MikasaCabinetSearch5-v0`), `utils/convert_to_lerobot_stream.py` (наш пишет
+потоком с постоянной памятью), `utils/mikasa/preflight.py`,
+`utils/validate_seeded_replay.py`, `planners/cabinet_door_fist.py` (вторая
+копия кулачковых тактик, которые уже внутри `cabinet_search_planner.py`),
+`robots/fetch/{extand,utils}.py` целиком (наш IK-бэкенд новее — порт только
+нужных методов), а также 88 файлов, которые `train/vla` влила бы заново из
+числа удалённых здесь (пять `season_dish_*`, три `same_drawer_*`,
+`depth_recall_v1_perception.py`, 15 oracle-модулей, `season_{salad,postures}.py`,
+`qualify_*.py`, `audit.py`, `merge_replays.py`, `point_cloud.py`, ~40 узких
+тестов, пять одноразовых скриптов).
+
+Три переноса не файлами: `SapienPlannerV2.pad_move_group_qpos` расширяет по
+индексу сустава, а не по префиксу (Fetch чередует головные суставы, и
+префиксный паддинг сдвигал их — тест падал на 7 из 11 значений);
+`solver.set_execution_noise_seed`/`_apply_execution_noise` (нужны legacy
+планировщикам, которые задают шум сами; при `action_noise = 0.0` это
+тождество, покрытые профилями задачи не меняются); обсерверы шага в
+`utils/logging_utils.py`.
+
+Снято как лишнее: `tests/test_lerobot_quantiles.py` (импортирует
+`vector_quantiles` старого конвертера) и `tests/test_assisted_grasp.py`
+(ждёт `AssistedGrasp(task, objs)` без `AssistedGraspConfig`; покрытие даёт
+`utils/mikasa/test_assisted_grasp.py`). `tests/test_fridge_veggies_closings.py`
+переписан под то, что осталось от закрывания: раньше он проверял перебор
+нескольких направлений схвата по длине винтового пути, теперь — измерение
+узкой оси по мешу (`_narrow_closing_axis`).
+
+Сабмодули: для `openpi` gitlink'а достаточно (`vla/pi05_first_frame/scripts/
+setup_server.sh` клонирует его в `$OPENPI_DIR` и ставит отдельный venv,
+`third_party/openpi` в `train/vla` никем не читается), а `memer`,
+`Qwen3-VL` и `MemoryVLA` их же setup-скрипты **патчат и ставят `-e`** из
+`third_party/`, поэтому для обучения нужен `git submodule update --init`.
+В основном venv нет `jax`, `flax`, `openpi.shared`, `mme_vla_suite` —
+тесты `utils/policies` проходят не импортируя их на верхнем уровне.
+
 ## Результаты на валидационных сидах (oracle-фаза, 100 сидов)
 
 Сиды 0–99, `MIKASA_IK_BACKEND=mplib`, восемь параллельных процессов.
@@ -210,12 +276,15 @@ fallback'ом hover'а `more=True` (`EXTRA_SPINS` и `rest_shifts`), он вос
 
 ## Проверки
 
-- `266 passed, 4 skipped` — focused-набор `utils/collection/test_*.py`;
+- `423 passed, 6 skipped` — весь `tests/` и `utils/collection` вместе,
+  `-m "not gpu_sim"` (из них 266/4 — focused-набор `utils/collection/test_*.py`);
 - `git diff --check` чистый;
 - эпизод вручную: `scripts/collection_episode.py season_dish 435` ->
   `verdict=success steps=791` (`shake_count=2`, `pour_hold=12`);
-- инвентарь: 71 файл / 36 011 строк в `my_scenes` + `planners` + `robots`
-  (было 164 файла / 30 909 строк production-кода в начале работы).
+- инвентарь `scripts/tree_loc.py`: 75 файлов / 39 077 строк в `my_scenes` +
+  `planners` + `robots` (было 164 файла / 30 909 строк production-кода в
+  начале работы; +2 650 строк добавили legacy-планировщики и сцены из
+  `takeitwithhead`).
 
 ## Инструменты
 
