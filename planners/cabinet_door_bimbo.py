@@ -391,6 +391,9 @@ centimetres of the bar however the door moves)."""
 HAND_TURN = _f("MIKASA_BD_HAND_TURN", 0.0)
 """Fraction of the door's turn the hand's yaw follows (BIMBO: 1; see the module docstring)."""
 SWING_MAX_STEPS = int(_f("MIKASA_BD_SWING_MAX_STEPS", 600))
+
+
+LEAF_CONTACT_N = _f("MIKASA_BD_LEAF_CONTACT_N", 1.0)
 STALL_STEPS = 60
 STALL_EPS = 0.01
 "Less door travel than STALL_EPS over STALL_STEPS controls is a stall."
@@ -518,6 +521,8 @@ def roll_window(planner, indices) -> tuple[np.ndarray, np.ndarray] | None:
     """
     ridx = getattr(planner, "_roll_indices", None)
     low, high = getattr(planner, "_roll_low", None), getattr(planner, "_roll_high", None)
+    if ridx is None or low is None or high is None:
+        return None
     width = np.pi - ROLL_WINDOW_MARGIN
     pos = {int(j): k for k, j in enumerate(ridx)}
     lo = np.array([max(-width, float(high[pos[int(j)]]) - width) for j in indices])
@@ -692,7 +697,8 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
     than LEAD_MAX ahead of the measured leaf; the hand is servoed to the grasp frame carried to
     `sw` (`door_frames`, its yaw turned by HAND_TURN of the door's); the base creeps so the goal
     stands at a lever going from `lever_a` to `lever_b` by LEVER_LEAD_FRAC of the way, then
-    settles there. Stops on the target, an empty hand, a stall, or SWING_MAX_STEPS.
+    settles there. Stops on the target, the leaf stopped against the hand (LEAF_*), an empty
+    hand, a stall, or SWING_MAX_STEPS.
 
     Returns `(res, reason, goal)`; `res` is None when the horizon struck (the caller returns
     the solver's last step).
@@ -719,6 +725,11 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
     goal = frame(sw)
     q = _qpos(task)
     q_arm0, q_base0 = q[servo.idx].copy(), q[:3].copy()
+    art = task.scene.articulations[crp._art_key(task, door)]
+    joints = art.get_active_joints()
+    leaf = joints[[j.name for j in joints].index(door.hinge)].child_link
+    hand_link = task.agent.robot.links_map["gripper_link"]
+    pressed, press_max = 0, 0.0
     hist: list = []
     trace: list = []
     reason = "max-steps"
@@ -730,12 +741,17 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
         if direction * (rad - target) >= 0.0:
             reason = "target"
             break
+        if _fingers(task) <= common.FINGER_EMPTY_M:
+            reason = "slipped"
+            break
         if (len(hist) > STALL_STEPS
                 and direction * (hist[-1] - hist[-1 - STALL_STEPS]) < STALL_EPS):
             reason = "stalled"
             break
         if direction > 0:
             sw = min(target + 0.02, sw + LEAD_RATE * dt, max(sw, rad + LEAD_MAX))
+        else:
+            sw = max(target - 0.02, sw - LEAD_RATE * dt, min(sw, rad - LEAD_MAX))
         prev = goal
         goal = frame(sw)
         q = _qpos(task)
@@ -746,14 +762,24 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
         if fresh:
             perr_max = max(perr_max, float(np.linalg.norm(dp)))
             rerr_max = max(rerr_max, float(np.linalg.norm(dr)))
+        press = float(np.linalg.norm(_np(task.scene.get_pairwise_contact_forces(hand_link, leaf))
+                                     .reshape(-1, 3), axis=1).max())
+        press_max = max(press_max, press)
+        pressed = pressed + 1 if press > LEAF_CONTACT_N else 0
+        if (pressed >= LEAF_STOP_STEPS and len(hist) > LEAF_STOP_STEPS
+                and direction * (hist[-1] - hist[-1 - LEAF_STOP_STEPS]) < LEAF_STOP_EPS):
+            reason = "hand-on-leaf"
+            break
         if i % 10 == 0:
             hand = angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
             trace.append([i, round(sw, 3), round(rad, 3), round(hand, 3),
                           round(float(np.linalg.norm(dp)), 3), round(float(np.linalg.norm(dr)), 3),
                           round(v, 3), round(w, 3), round(ax, 3), round(ay, 3)])
+        if common.stopped_by_horizon(planner):
+            return None, "horizon", goal
     # -- the stance settles: the goal held on the bar, the creep runs on to lever_b -----------
     settle, lever_err = 0, 0.0
-    if reason == "target" and LEVER_END[0] > 0:
+    if reason in ("target", "hand-on-leaf") and LEVER_END[0] > 0:
         for settle in range(1, SETTLE_STEPS + 1):
             q = _qpos(task)
             v, w, ax, ay = unicycle_hold_cmd(goal[:2, 3], np.zeros(2), q[:2], float(q[2]),
@@ -763,6 +789,8 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
             if lever_err < SETTLE_TOL_M:
                 break
             res, _, _, _ = drv.step(goal, (v, w))
+            if common.stopped_by_horizon(planner):
+                return None, "horizon", goal
     rad = float(crp.door_rad_now(task, door))
     hand_rad = angle_of(anchor_xy, G0[:2, 3], _T(task.agent.tcp.pose.sp)[:2, 3], s) + rad0
     q_end = _qpos(task)
@@ -771,14 +799,14 @@ def _swing(env, planner, task, door, drv, servo, *, G0, rad0, anchor_xy, s, star
         arm_moved=[round(float(v), 3) for v in q_end[servo.idx] - q_arm0],
         base_moved=[round(float(v), 3) for v in q_end[:3] - q_base0],
         base_end=[round(float(v), 3) for v in q_end[:3]], settle=settle,
-        lever_err=round(lever_err, 3),
+        lever_err=round(lever_err, 3), hand_on_leaf_n_max=round(press_max, 2),
         trace="[i, sw, rad, hand, perr, rerr, v, w, a_x, a_y] " + str(trace[-16:]),
         **({"door_tail": [round(v, 3) for v in hist[-20:]]} if reason != "target" else {}))
     return res, reason, goal
 
 
 def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
-                  record: dict | None = None):
+                  record: dict | None = None, target_rad: float | None = None, keep_hold: bool = False):
     """Grasp the leaf's bar, swing it open with the servoed hand, let go and clear the hand.
 
     Same contract as `cabinet_retrieval_planner.open_the_door` (D6): -1 only for a refusal
@@ -792,16 +820,33 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         park_rad: a wall-park target (cab_1); the swing then runs to the larger of it and
             `DOOR_OPEN_TARGET` on the same grip.
         record: optional dict for `retrace_the_door`.
+        target_rad: a swing target of its own (`cabinet_door_fist`'s crack of the leaf); the
+            base then keeps the grasp's lever instead of settling on LEVER_END. None (default)
+            is the shipped target and stance.
+        keep_hold: end with the fingers still on the bar (no release, no clear) and the swing's
+            servo state in `record["hold"]`, for `swing_back_and_release` (cab_1 is closed by the
+            handle it was opened by). False (default) is the shipped stage.
 
     Example:
         >>> res = open_the_door(env, planner, task, door=CAB_MAIN_RIGHT)   # doctest: +SKIP
     """
     target = float(crp.DOOR_OPEN_TARGET if park_rad is None
                    else max(crp.DOOR_OPEN_TARGET, float(park_rad)))
+    if target_rad is not None:
+        target = float(target_rad)
     dock = np.array([door.handle_dock[0], door.handle_dock[1], 0.0])
     res, done = crp.grasp_the_bar(env, planner, task, door, bar=door.handle_bar, dock=dock)
-    servo = HandServo(task, planner)
+    if done:
+        return res
+    try:
+        servo = HandServo(task, planner)
+    except Exception as exc:          # no model, no servo: say so and stop before the close
+        return crp.fail(env, "bimbo door: no kinematic model for the hand servo",
+                        why=f"{type(exc).__name__}: {exc}"[:160])
     gap_fk = servo.fk_gap()
+    if gap_fk > 0.01:
+        return crp.fail(env, "bimbo door: the servo's model disagrees with the simulator",
+                        tcp_gap_m=round(gap_fk, 4))
     art_key = crp._art_key(task, door)
     anchor_xy, sense = common.hinge_anchor(task, art_key, door.hinge)
     anchor_xy = np.asarray(anchor_xy, dtype=np.float64).reshape(-1)[:2]
@@ -814,6 +859,8 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         r = planner.close_gripper(t=12)
         if r != -1:
             res = r
+        if common.stopped_by_horizon(planner):
+            return res
         gap = _settled_gap(planner, task)
         held = GRASP_GAP[0] < gap <= GRASP_GAP[1]
         ag = getattr(task, "_ag", None)
@@ -824,6 +871,21 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
         # BIMBO: the fingers closed on the edge or on nothing — open and go again, here a
         # little deeper along the approach (the stroke stops at the FIRST touch of the
         # cabinet, which can be a fingertip on the bar's flank).
+        planner.open_gripper()
+        T = _T(task.agent.tcp.pose.sp)
+        goal = T.copy()
+        goal[:3, 3] = T[:3, 3] + GRASP_RETRY_IN_M * T[:3, 2]
+        drv.reset_command()
+        for _ in range(12):
+            res, dp, _, fresh = drv.step(goal)
+            if common.stopped_by_horizon(planner):
+                return res
+            if fresh and float(np.linalg.norm(dp)) < 0.003:
+                break
+    if not GRASP_GAP[0] < gap <= GRASP_GAP[1]:
+        planner.open_gripper()
+        say(env, "MISSED: the fingers did not close on the bar", finger_gap=round(gap, 4))
+        return res
 
     # -- door_swing: the lead angle, the servoed hand, the creeping base ---------------------
     drv.torso = _torso(task)
@@ -833,7 +895,7 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     rad0 = float(crp.door_rad_now(task, door))
     q = _qpos(task)
     lever = _lever(G0[:2, 3], q)
-    lever_end = lever if LEVER_END[0] <= 0 else (LEVER_END[0], s * LEVER_END[1])
+    lever_end = lever if (LEVER_END[0] <= 0 or target_rad is not None) else (LEVER_END[0], s * LEVER_END[1])
     yaw0 = float(q[2])
     res, reason, goal = _swing(env, planner, task, door, drv, servo, G0=G0, rad0=rad0,
                                anchor_xy=anchor_xy, s=s, start=rad0, target=target,
@@ -846,6 +908,8 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     # The servo's command runs ahead of the measured joints while it pulls (ARM_LEAD_MAX); let
     # go of that pull before the fingers open, or the arm springs back as the weld lets go.
     res = planner.idle_steps(t=HOLD_STEPS)
+    if common.stopped_by_horizon(planner):
+        return res
     planner.planner.update_from_simulation()
 
     if record is not None:
@@ -863,7 +927,21 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
             arm_qpos=_qpos(task).copy())
         record["tape"] = planner.start_tape()
 
+    if keep_hold:
+        if record is not None:
+            record["hold"] = dict(drv=drv, servo=servo, G0=G0, rad0=rad0, anchor_xy=anchor_xy, sense=sense,
+                                  s=s, lever=lever)
+        say(env, "holding the bar (bimbo)", door_rad=round(float(crp.door_rad_now(task, door)), 4))
+        return res
+
     # -- door_release ------------------------------------------------------------------------
+    return release_and_clear(env, planner, task, door=door, drv=drv, anchor_xy=anchor_xy, sense=sense,
+                             s=s, res=res, record=record)
+
+
+def release_and_clear(env, planner, task, *, door, drv, anchor_xy, sense, s, res, record=None):
+    """BIMBO's door_release and door_clear: open the hand on the bar, then take it off on a path
+    that never closes on the panel. The shipped stage's tail, callable after a held swing."""
     n = _leaf_normal(task, door, anchor_xy, sense)
     hz = _T(task.agent.tcp.pose.sp)[:3, 2]
     off_normal = float(-hz[:2] @ n)
@@ -871,6 +949,8 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     r = planner.open_gripper()
     if r != -1:
         res = r
+    if common.stopped_by_horizon(planner):
+        return res
     rad_rel = float(crp.door_rad_now(task, door))
     say(env, "released the handle (bimbo)", door_rad_held=round(rad_held, 4),
         door_rad_now=round(rad_rel, 4), off_normal=round(off_normal, 3),
@@ -886,6 +966,14 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     d, rule = clear_direction(T[:3, 2], n, lift_off=CLEAR_LIFT_OFF)
     lift = np.array([0.0, 0.0, CLEAR_LIFT_M])
     end = T[:3, 3] + CLEAR_M * d + lift
+    if not path_keeps_off(T[:2, 3], end[:2], leaf_a, leaf_b, slack=PATH_SLACK_M):
+        d2, rule2 = clear_direction(T[:3, 2], n, min_off=2.0,       # force the in-plane slide
+                                       lift_off=CLEAR_LIFT_OFF)
+        end2 = T[:3, 3] + CLEAR_M * d2 + lift
+        if path_keeps_off(T[:2, 3], end2[:2], leaf_a, leaf_b, slack=PATH_SLACK_M):
+            d, rule, end = d2, rule2, end2
+        else:
+            rule = rule + "-unchecked"
     goal = T.copy()
     goal[:3, 3] = end
     drv.reset_command()
@@ -894,6 +982,8 @@ def open_the_door(env, planner, task, *, door, park_rad: float | None = None,
     k = 0
     for k in range(CLEAR_MAX_STEPS):
         res, dp, _, fresh = drv.step(goal)
+        if common.stopped_by_horizon(planner):
+            return res
         moved = float(crp.door_rad_now(task, door)) - rad_start
         if abs(moved) > CLEAR_LEAF_TOL or (fresh and float(np.linalg.norm(dp)) < 0.01):
             break
@@ -923,7 +1013,11 @@ def lower_the_hand(env, planner, task, *, door, dz: float = LOWER_M):
     edge at bar height, and from under the leaf's bottom edge no arm motion reaches the leaf.
     Watched by the leaf's angle like the clear. Returns the last 5-tuple, or -1 if no step was
     taken."""
-    servo = HandServo(task, planner)
+    try:
+        servo = HandServo(task, planner)
+    except Exception as exc:
+        say(env, "lower the hand: no kinematic model", why=f"{type(exc).__name__}"[:80])
+        return -1
     drv = _Driver(planner, task, servo, _torso(task))
     T = _T(task.agent.tcp.pose.sp)
     goal = T.copy()
@@ -963,3 +1057,9 @@ REGRASP_OFF_FACE_M = 0.02
 """The bar is taken again with the TCP 2 cm out from its axis along the face's normal. The open
 pads stand 5 cm either side of the TCP and the bar 5 cm off the face, so this puts the inner
 pad mid-way in the 3.7 cm between the bar's surface and the face (1 cm brushed the face)."""
+
+
+LEAF_STOP_STEPS = int(_f("MIKASA_BD_LEAF_STOP_STEPS", 8))
+
+
+LEAF_STOP_EPS = _f("MIKASA_BD_LEAF_STOP_EPS", 0.005)

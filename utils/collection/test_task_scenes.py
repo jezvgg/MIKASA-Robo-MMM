@@ -661,11 +661,15 @@ def test_nudge_arm_move_refusal_returns_failure_without_unpacking(monkeypatch, f
         agent=SimpleNamespace(build_grasp_pose=lambda *args: object()),
         _spawn_centre_x=None,
     )
+    # The touch-dock drive succeeds (the recording oracle ends the attempt early, as a miss,
+    # when it cannot reach the dock); every arm stage before the touch is refused.
     planner = SimpleNamespace(
         planner=SimpleNamespace(update_from_simulation=lambda: None),
-        drive_base=lambda **kwargs: -1,
+        drive_base=lambda **kwargs: step,
+        drive_straight=lambda *args, **kwargs: -1,
         close_gripper=lambda **kwargs: -1,
         cabinet_waypoint_noise=None,
+        truncated=False,
     )
 
     monkeypatch.setattr(cabinet, 'door_mode', lambda _task: 'arc')
@@ -683,8 +687,11 @@ def test_nudge_arm_move_refusal_returns_failure_without_unpacking(monkeypatch, f
 
     monkeypatch.setattr(common, 'arm_move', arm_move)
     result = cabinet.nudge_the_cube(SimpleNamespace(), planner, task, -1)
-    assert result == -1
-    assert len(calls) == cabinet.NUDGE_TRIES * (1 if failed_stage == 'pre-touch' else 2)
+    # The refused arm_move is never unpacked: the oracle returns the last executed step (the
+    # drive to the dock), a physical miss. A refused push still retracts before the next try.
+    assert result is step
+    per_try = ['pre-touch'] if failed_stage == 'pre-touch' else ['pre-touch', 'push', 'retract']
+    assert [c.split(' (')[0] for c in calls] == per_try * cabinet.NUDGE_TRIES
 
 
 # Source group: test_season_shakes.py (the shake counter and the scene; the planner tests of the

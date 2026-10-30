@@ -509,3 +509,82 @@ def plan_joints(env, planner, task, targets: dict, *, label: str, tries: int = 2
             return planner.follow_forward_path_w_refinement(result, refine=True)
         say(env, who, f"{label}: plan refused", status=result["status"], draw=i + 1)
     return -1
+
+
+REST_TORSO = 0.386
+
+
+def fold_via_tcp(env, planner, task, rest_tcp, *, stage: str, who: str = "oracle",
+                 rest_torso: float = REST_TORSO):
+    """Return to the rest CARRIAGE via the channels that measurably execute.
+
+    A torso LINE first (the duck's own form, reversed), then a Cartesian move
+    (`static_manipulation`, torso frozen) to the episode-start rest TCP point
+    re-based onto the current base pose, then a branch LINE from the actual
+    measured joint coordinates to the rest configuration. No qpos wrapping:
+    every physical change must be represented by recorded actions. Solo 5/6 (K111) measured
+    `plan_joints`' RRT branch executing 185 knots and moving the arm by NOTHING
+    (arm_vs_rest 0.562 before and after, bit-for-bit) — the line branch and
+    `static_manipulation` are the two channels this repo has verified end to end,
+    so the fold uses only those. Stage 2 exists because the screw lands the TCP on
+    the rest POINT while the arm can sit on another IK branch (solo 11:
+    arm_vs_rest ~4 rad with the fold "ok"), and a frozen weird-branch arm honestly
+    blocks the next drive's rotate; a branch line that flakes (arm_vs_rest > 1.0
+    after it) gets one full retry round from a re-screwed start. Non-fatal, like
+    the fold it replaces: the return value is the screw's, and the caller reads
+    `arm_vs_rest` from qpos if it needs the truth.
+
+    Args:
+        env, planner: as everywhere.
+        task: `env.unwrapped`.
+        rest_tcp: the rest TCP pose IN THE BASE FRAME, captured at solve start
+            (`base_link.pose.sp.inv() * tcp.pose.sp` with the arm still on the
+            reset keyframe), so the re-basing is exact under any dock yaw.
+        stage: prefix for the trace lines.
+        who: the oracle's tag for `say`.
+        rest_torso: the un-duck target (`REST_TORSO`, the rest keyframe's lift).
+
+    Returns:
+        The screw's result: the gym 5-tuple, or -1 when both draws refused.
+
+    Example:
+        >>> rest_tcp = task.agent.base_link.pose.sp.inv() * task.agent.tcp.pose.sp  # doctest: +SKIP
+        >>> ...                                                                   # doctest: +SKIP
+        >>> fold_via_tcp(env, planner, task, rest_tcp, stage="fold", who=WHO)     # doctest: +SKIP
+    """
+    plan_joints(env, planner, task, {"torso_lift_joint": float(rest_torso)},
+                label=f"{stage}: un-duck", who=who)
+    goal = task.agent.base_link.pose.sp * rest_tcp
+    r = planner.static_manipulation(goal, disable_lift_joint=True)
+    if r == -1:
+        r = planner.static_manipulation(goal, disable_lift_joint=True)
+    say(env, who, f"{stage}: fold via tcp {'ok' if r != -1 else 'REFUSED'}")
+    planner.planner.update_from_simulation()
+    rest_q = np.asarray(task.agent.keyframes["rest"].qpos,
+                        dtype=np.float64).reshape(-1)
+    jm = task.agent.robot.active_joints_map
+    arm_names = list(task.agent.controller.controllers["arm"].config.joint_names)
+    targets = {n: float(rest_q[jm[n].active_index[0].item()])
+               for n in arm_names}
+    plan_joints(env, planner, task, targets, label=f"{stage}: branch line",
+                tries=1, who=who)
+    q_now = _np(task.agent.robot.get_qpos()).reshape(-1)
+    d_rest = float(np.linalg.norm(q_now[3:11] - rest_q[3:11]))
+    say(env, who, f"{stage}: post-branch arm_vs_rest", d=round(d_rest, 3))
+    if d_rest > 1.0:
+        # the tf-sweep S2/S6 mechanism: a flaked branch line leaves the arm
+        # on a weird branch and every following fetch pre refuses. One full
+        # retry round — the TCP screw moves the arm first, so the line
+        # starts from a different config.
+        say(env, who, f"{stage}: branch line flaked — one retry round")
+        goal2 = task.agent.base_link.pose.sp * rest_tcp
+        r2 = planner.static_manipulation(goal2, disable_lift_joint=True)
+        if r2 == -1:
+            planner.static_manipulation(goal2, disable_lift_joint=True)
+        planner.planner.update_from_simulation()
+        plan_joints(env, planner, task, targets,
+                    label=f"{stage}: branch line retry", tries=1, who=who)
+        q_now = _np(task.agent.robot.get_qpos()).reshape(-1)
+        say(env, who, f"{stage}: post-retry arm_vs_rest",
+            d=round(float(np.linalg.norm(q_now[3:11] - rest_q[3:11])), 3))
+    return r
