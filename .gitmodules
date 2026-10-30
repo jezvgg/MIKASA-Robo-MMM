@@ -1,0 +1,16 @@
+[submodule "third_party/memer"]
+	path = third_party/memer
+	url = https://github.com/memer-policy/memer.git
+	branch = main
+[submodule "third_party/Qwen3-VL"]
+	path = third_party/Qwen3-VL
+	url = https://github.com/QwenLM/Qwen3-VL.git
+	branch = main
+[submodule "third_party/MemoryVLA"]
+	path = third_party/MemoryVLA
+	url = https://github.com/shihao1895/MemoryVLA.git
+	branch = mikasa-robo
+[submodule "third_party/openpi"]
+	path = third_party/openpi
+	url = https://github.com/Physical-Intelligence/openpi.git
+	branch = main

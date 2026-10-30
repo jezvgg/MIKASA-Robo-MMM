@@ -1,0 +1,16 @@
+diff --git a/scripts/generate_sft_data.py b/scripts/generate_sft_data.py
+index 56a04a1..99275b3 100644
+--- a/scripts/generate_sft_data.py
++++ b/scripts/generate_sft_data.py
+@@ -759,6 +759,11 @@ def build_qwen_example(
+     timestep: int,
+ ) -> Dict[str, Any]:
+     start_frame_offset = timestep % job.frame_subsample
++    # MIKASA-Robo-MMM (vla/TRAINING_DEVIATIONS.md): a keyframe before this sample's first
++    # subsampled frame (k < timestep % frame_subsample) moves to that frame; otherwise
++    # align_frames_with_subsampling drops it and a keyframe on frames 0-3 reaches only some
++    # of the episode's samples.
++    all_keyframe_indices = [max(int(k), start_frame_offset) for k in all_keyframe_indices]
+     all_context_indices = list(range(start_frame_offset, timestep + 1, job.frame_subsample))
+     recent_frame_indices = all_context_indices[-job.recent_frames_length :]
+     start_context_idx = recent_frame_indices[0]

@@ -1,0 +1,22 @@
+diff --git a/qwen-vl-finetune/qwenvl/data/__init__.py b/qwen-vl-finetune/qwenvl/data/__init__.py
+index 68d3dea..fa8586d 100755
+--- a/qwen-vl-finetune/qwenvl/data/__init__.py
++++ b/qwen-vl-finetune/qwenvl/data/__init__.py
+@@ -34,6 +34,17 @@ data_dict = {
+     "videochatgpt": VIDEOCHATGPT,
+ }
+ 
++# MemER on the six Fetch tasks (MIKASA-Robo-MMM): each task's export by
++# memer/scripts/generate_sft_data.py, under $MEMER_SFT_ROOT (default ~/memer-sft).
++import os
++
++_MEMER_SFT_ROOT = os.path.expanduser(os.environ.get("MEMER_SFT_ROOT", "~/memer-sft"))
++for _task in ("samedrawer", "seasondish", "cabinetsearch", "depthrecall", "takeitback", "veggie"):
++    data_dict[f"memer_{_task}"] = {
++        "annotation_path": os.path.join(_MEMER_SFT_ROOT, _task, "train.json"),
++        "data_path": os.path.join(_MEMER_SFT_ROOT, _task),
++    }
++
+ 
+ def parse_sampling_rate(dataset_name):
+     match = re.search(r"%(\d+)$", dataset_name)

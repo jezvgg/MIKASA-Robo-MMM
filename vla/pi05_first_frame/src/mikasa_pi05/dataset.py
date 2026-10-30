@@ -11,8 +11,9 @@ evaluation go through the same openpi input transforms:
 
     observation.state                    (12,) float32, qpos[3:] in qpos order
     observation.images.<camera>          HxWx3 uint8 at frame t
-    observation.first_frame              HxWx3 uint8, frame 0 of the same episode
-    prompt                               the task instruction
+    observation.first_frame              HxWx3 uint8, frame 0 of the same episode (unless first_frame=False)
+    prompt                               the task instruction, or with prompt="subtask" the frame's
+                                         MemER subtask (`subtask_index` + meta/subtasks.parquet)
     actions                              (action_horizon, 13) float32, targets for frames t..t+H-1
 
 At the end of an episode the action chunk repeats the last action, as LeRobot's
@@ -76,6 +77,8 @@ class SameDrawerDataset:
         action_horizon: int,
         *,
         first_frame_camera: str = "left_base_camera_link",
+        first_frame: bool = True,
+        prompt: str = "task",
         episodes: list[int] | None = None,
         load_images: bool = True,
         max_open_files: int = 8,
@@ -86,14 +89,18 @@ class SameDrawerDataset:
             raise ValueError(f"Expected a LeRobot v3.0 dataset, got {info['codebase_version']}")
         if first_frame_camera not in CAMERAS:
             raise ValueError(f"Unknown camera {first_frame_camera!r}")
+        if prompt not in ("task", "subtask"):
+            raise ValueError(f"prompt must be 'task' or 'subtask', got {prompt!r}")
+        self.with_first_frame = first_frame
         self.fps = float(info["fps"])
         self.action_horizon = action_horizon
         self.first_frame_camera = first_frame_camera
         self.load_images = load_images
         self.max_open_files = max_open_files
 
+        prompt_column = f"{prompt}_index"
         data = _read_parquets(sorted((self.root / "data").glob("*/*.parquet")),
-                              ["observation.state", "action", "episode_index", "frame_index", "index", "task_index"])
+                              ["observation.state", "action", "episode_index", "frame_index", "index", prompt_column])
         order = np.argsort(data["index"])
         if not np.array_equal(data["index"][order], np.arange(len(order))):
             raise ValueError("Dataset frame index is not contiguous")
@@ -101,10 +108,10 @@ class SameDrawerDataset:
         self.action = np.stack(data["action"][order]).astype(np.float32)
         self.episode_of_frame = data["episode_index"][order].astype(np.int64)
         self.frame_in_episode = data["frame_index"][order].astype(np.int64)
-        task_of_frame = data["task_index"][order].astype(np.int64)
+        task_of_frame = data[prompt_column][order].astype(np.int64)
 
-        tasks = pq.read_table(self.root / "meta/tasks.parquet").to_pandas()
-        self.tasks = {int(row["task_index"]): str(name) for name, row in tasks.iterrows()}
+        tasks = pq.read_table(self.root / f"meta/{prompt}s.parquet").to_pandas()
+        self.tasks = {int(row[prompt_column]): str(name) for name, row in tasks.iterrows()}
 
         meta = _read_parquets(sorted((self.root / "meta/episodes").glob("*/*.parquet")), None)
         self.episode_range: dict[int, tuple[int, int]] = {}
@@ -158,7 +165,8 @@ class SameDrawerDataset:
         if self.load_images:
             for camera in CAMERAS:
                 sample[IMAGE_PREFIX + camera] = self.image(episode, frame, camera)
-            sample[FIRST_FRAME_KEY] = self.first_frame(episode)
+            if self.with_first_frame:
+                sample[FIRST_FRAME_KEY] = self.first_frame(episode)
         return sample
 
     def image(self, episode: int, frame: int, camera: str) -> np.ndarray:
@@ -186,6 +194,22 @@ class SameDrawerDataset:
         state = dict(self.__dict__)
         state["_files"], state["_first_frames"] = {}, {}
         return state
+
+
+class ConcatDataset:
+    """Several datasets as one, in order: MemER's low level is one policy over all the tasks."""
+
+    def __init__(self, parts: list):
+        self.parts = list(parts)
+        self.offsets = np.cumsum([0] + [len(p) for p in self.parts])
+
+    def __len__(self) -> int:
+        return int(self.offsets[-1])
+
+    def __getitem__(self, index) -> dict:
+        i = index.__index__()
+        k = int(np.searchsorted(self.offsets, i, side="right") - 1)
+        return self.parts[k][i - int(self.offsets[k])]
 
 
 def _read_parquets(paths: list[Path], columns: list[str] | None) -> dict[str, np.ndarray]:
