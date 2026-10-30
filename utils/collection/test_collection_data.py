@@ -190,14 +190,14 @@ def test_campaign_stops_queued_workers_after_storage_error(tmp_path, monkeypatch
     assert calls == [("oracle", 0)]
 
 
-@pytest.mark.parametrize("task_name", ["cabinet_search", "season_dish", "same_drawer"])
+@pytest.mark.parametrize("task_name", ["cabinet_search5", "season_dish", "same_drawer"])
 def test_robot_adapter_keeps_finger_counter_contact(task_name):
     """The old all-link ignore mask makes the penetrating finger fall through."""
     import sapien
-    from my_scenes.cabinet_search import CabinetSearchTask
+    from my_scenes.cabinet_search import CabinetSearch5Task
     from my_scenes.season_dish import SeasonDishTask
     from my_scenes.same_drawer import SameDrawerTask
-    task_class = {"cabinet_search": CabinetSearchTask, "season_dish": SeasonDishTask,
+    task_class = {"cabinet_search5": CabinetSearch5Task, "season_dish": SeasonDishTask,
                   "same_drawer": SameDrawerTask}[task_name]
 
     system = sapien.physx.PhysxCpuSystem()

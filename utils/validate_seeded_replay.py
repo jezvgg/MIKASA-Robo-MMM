@@ -68,7 +68,7 @@ PLANNER_CASES = (
     PlannerCase(
         "MikasaCabinetRetrieval-v0", "cabinet_retrieval_planner", "pd_joint_pos"
     ),
-    PlannerCase("MikasaCabinetSearch-v0", "cabinet_search_planner", "pd_joint_pos"),
+    PlannerCase("MikasaCabinetSearch5-v0", "cabinet_search_planner", "pd_joint_pos"),
     PlannerCase("MikasaDepthRecall-v1", "depth_recall_v1_planner", "pd_joint_pos"),
 )
 

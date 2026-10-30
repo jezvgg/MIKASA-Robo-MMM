@@ -133,7 +133,7 @@ fixture sharing a bit with the robot's word 2 is intangible to this robot and
 only to this robot.
 
 HOW IT WAS SCANNED, and why over the WHOLE word. The table was produced by
-walking the live `MikasaCabinetSearch-v0` scene (scene_idx=0, one env) shape by
+walking the live cabinet-search scene (scene_idx=0, one env, five compartments) shape by
 shape and printing `fixture_word2 & robot_word2_union` across all 32 bits —
 never a 25-29 window and never from prose. The window would not have been
 enough to support the word "every": the robot's word-2 UNION is bits 0-9 and
@@ -1279,17 +1279,18 @@ def step_search_latches(latches, *, step: torch.Tensor, theta: torch.Tensor,
 # ------------------------------------------------------------------ the task --
 
 
-@register_env(
-    "MikasaCabinetSearch-v0",
-    max_episode_steps=CabinetSearchConfig.horizon,
-    asset_download_ids=["RoboCasa"],
-)
 class CabinetSearchTask(AssistedGraspTask, BaseEnv):
     """Find the hidden cube; close behind you; home between openings; never twice.
 
+    The task is registered once, as the five-compartment `MikasaCabinetSearch5-v0`
+    (`CabinetSearch5Task`); this class is its shared body and its four-compartment
+    config is only the base of `CabinetSearch5Config`. The four-compartment env was
+    dropped on 2026-10-30: its dataset (`cabinetsearch-ag-1000ep`, profile 16) is
+    superseded and the owner fixed the task at five compartments on 2026-10-25.
+
     Example:
         >>> import gymnasium as gym  # doctest: +SKIP
-        >>> env = gym.make("MikasaCabinetSearch-v0", num_envs=1, robot_uids="ds_fetch",
+        >>> env = gym.make("MikasaCabinetSearch5-v0", num_envs=1, robot_uids="ds_fetch",
         ...                control_mode="pd_joint_pos", obs_mode="state",
         ...                scene_idx=0, sim_backend="cpu")  # doctest: +SKIP
     """
@@ -1566,9 +1567,9 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
         goes straight through to -2.1000. The box itself keeps bit 26, so
         nothing about how cab_1's carcass sits in the room changes.
 
-        What the edit does, read off both live builds (Mac, 2026-09-02): in
-        `MikasaCabinetSearch-v0` this method is never called and cab_1's eight
-        `hingedoor` shapes keep word 2 = 0x4000000; in
+        What the edit does, read off both live builds (Mac, 2026-09-02): under the
+        four-compartment config this method is never called and cab_1's eight
+        `hingedoor` shapes keep word 2 = 0x4000000; under the five-compartment
         `MikasaCabinetSearch5-v0` the same eight go 0x4000000 -> 0x0 (bit 26 was
         their only ignore bit) while the carcass's six shapes stay at 0x4200000
         (bits 26 and 21) and every robot shape stays at 0b11111 for bits 25-29.
@@ -1989,6 +1990,9 @@ class CabinetSearch5Config(CabinetSearchConfig):
     asset_download_ids=["RoboCasa"],
 )
 class CabinetSearch5Task(CabinetSearchTask):
-    """`MikasaCabinetSearch-v0` with the west wall unit as a fifth compartment (index 0)."""
+    """The cabinet search: five compartments, the west wall unit (index 0) opened by the fist.
+
+    This is the task's only registered env; the four-compartment variant it is built on
+    is no longer a task (its dataset is superseded, see `CabinetSearchTask`)."""
 
     cfg = CabinetSearch5Config()

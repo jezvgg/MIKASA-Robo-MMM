@@ -525,7 +525,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="command", required=True)
     collect = subs.add_parser("collect")
-    collect.add_argument("--profile", choices=TASKS, default="cabinet_search")
+    collect.add_argument("--profile", choices=TASKS, default="cabinet_search5")
     collect.add_argument("--tokenizer", type=Path)
     collect.add_argument("--output", type=Path, required=True)
     collect.add_argument("--start-seed", type=int, required=True)

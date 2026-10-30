@@ -14,13 +14,13 @@ from pathlib import Path
 from .contract import ACTION_NAMES, CAMERAS, read_json
 
 REPO = Path(__file__).resolve().parents[2]
-PROFILE = Path(__file__).with_name("cabinet_search_profile.json")
+PROFILE = Path(__file__).with_name("cabinet_search5_profile.json")
 # This registry is the currently executable profile set, not the six-dataset inventory.
-# Its cabinet_search entry is the four-compartment profile16, not HF's five-compartment task.
+# The cabinet search is the five-compartment task only: the four-compartment profile 16 and
+# its dataset (`cabinetsearch-ag-1000ep`) are superseded (owner, 2026-10-25 and 2026-10-30).
 # The folder-to-planner dataset scope lives in contract.DATASET_TASK_PLANNERS.
 TASKS = {
     "same_drawer": ("MikasaSameDrawer-v0", "my_scenes.same_drawer", "SameDrawerTask"),
-    "cabinet_search": ("MikasaCabinetSearch-v0", "my_scenes.cabinet_search", "CabinetSearchTask"),
     "cabinet_search5": ("MikasaCabinetSearch5-v0", "my_scenes.cabinet_search", "CabinetSearch5Task"),
     "season_dish": ("MikasaSeasonDish-v0", "my_scenes.season_dish", "SeasonDishTask"),
     "depth_recall": ("MikasaDepthRecall-v1", "my_scenes.depth_recall_v1", "DepthRecallV1Task"),
@@ -67,7 +67,7 @@ def release(version: str) -> str:
     return str(version).split("+", 1)[0]
 
 
-def load_profile(name="cabinet_search"):
+def load_profile(name="cabinet_search5"):
     profile = read_json(PROFILE.with_name(profile_name(name) + "_profile.json"))
     overrides = {k: v for k, v in os.environ.items() if k.startswith("MIKASA_")}
     if overrides:
@@ -112,7 +112,7 @@ def runtime_signature(profile=None):
                 continue
             if "collection" in path.parts and path.name not in {
                 "__init__.py", "pipeline.py", "contract.py", "client.py", "profile.py", "campaign.py", "drawer_balance.py",
-                "cabinet_search_profile.json", "cabinet_search5_profile.json", "season_dish_profile.json", "same_drawer_profile.json", "depth_recall_profile.json",
+                "cabinet_search5_profile.json", "season_dish_profile.json", "same_drawer_profile.json", "depth_recall_profile.json",
             }:
                 continue
             files[str(path.relative_to(REPO))] = hashlib.sha256(path.read_bytes()).hexdigest()

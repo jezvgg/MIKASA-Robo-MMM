@@ -407,7 +407,7 @@ def check_package(r: Report) -> None:
         "MyRoboCasa-v1",
         "MyRoboCasa_TakeItBack-v1",
         "MikasaCabinetRetrieval-v0",
-        "MikasaCabinetSearch-v0",
+        "MikasaCabinetSearch5-v0",
         "MikasaSeasonDish-v0",
     ]:
         if env_id in REGISTERED_ENVS:

@@ -29,7 +29,7 @@ uv run python -m planners.myrobocasa_takeitback_planner --help
 | `MikasaSeasonDish-v0` | `season_dish_planner` | `pd_joint_pos` |
 | `MikasaWaterPlants-v0` | `water_plants_planner` | `pd_joint_pos` |
 | `MikasaCabinetRetrieval-v0` | `cabinet_retrieval_planner` | `pd_joint_pos` |
-| `MikasaCabinetSearch-v0` | `cabinet_search_planner` | `pd_joint_pos` |
+| `MikasaCabinetSearch5-v0` | `cabinet_search_planner` | `pd_joint_pos` |
 | `MikasaDepthRecall-v1` | `depth_recall_v1_planner` | `pd_joint_pos` |
 
 Standalone запуск одного сида:
@@ -55,11 +55,11 @@ Standalone-скрипты имеют разный формат выходных 
 
 ## Валидация на 100 сидах
 
-Пример для `MikasaCabinetSearch-v0`, сида `0..99`, CPU simulation/rendering и без RGB-наблюдений:
+Пример для `MikasaCabinetSearch5-v0`, сида `0..99`, CPU simulation/rendering и без RGB-наблюдений:
 
 ```bash
 uv run python -m utils.test_planner \
-  --scene MikasaCabinetSearch-v0 \
+  --scene MikasaCabinetSearch5-v0 \
   --planner cabinet_search_planner \
   --num-episodes 100 \
   --start-seed 0 \

@@ -66,6 +66,27 @@ APPLE_REACH_STARTS = (
         wrist_roll_joint=-1.470573)),
 )
 
+# Standoff arm medoids of the successful closing approaches of each drawer in
+# profile 17 (drawer-final-004): 7, 10 and 10 episodes. Offered only after every
+# random-restart goal fails the contact-and-push lookahead of that approach.
+DRAWER_CLOSE_STARTS = {
+    1: (("close_drawer1_standoff", dict(
+        shoulder_pan_joint=-1.552237, shoulder_lift_joint=0.182986,
+        upperarm_roll_joint=0.933785, elbow_flex_joint=1.767808,
+        forearm_roll_joint=-0.340111, wrist_flex_joint=0.332939,
+        wrist_roll_joint=-1.778397)),),
+    2: (("close_drawer2_standoff", dict(
+        shoulder_pan_joint=-1.505170, shoulder_lift_joint=0.173107,
+        upperarm_roll_joint=1.640604, elbow_flex_joint=1.706350,
+        forearm_roll_joint=-0.906887, wrist_flex_joint=0.983043,
+        wrist_roll_joint=-0.998324)),),
+    3: (("close_drawer3_standoff", dict(
+        shoulder_pan_joint=-1.377302, shoulder_lift_joint=0.911281,
+        upperarm_roll_joint=2.005231, elbow_flex_joint=1.536953,
+        forearm_roll_joint=-1.068235, wrist_flex_joint=1.170071,
+        wrist_roll_joint=-1.310662)),),
+}
+
 # Bezier progress control values. q(s)=q0+(q1-q0)*B(0,c1,c2,1;s).
 # Pan's necessary excursion provides clearance around the counter; it is reported,
 # not described as monotone. The other overshoots are bounded by URDF screening.
@@ -422,7 +443,8 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
         log(label, waited_steps=waited, reached=bool(condition()))
         return result
 
-    def move(label, pose, *, noisy=True, axes=(True, True, True), sync=True, stop_on_touch=None, stretch=1):
+    def move(label, pose, *, noisy=True, axes=(True, True, True), sync=True, contact=True,
+             stop_on_touch=None, stretch=1, contact_stretch=None):
         if noisy:
             pose = noise.pose(label, pose, axes)
         log(label, goal=pose.p.tolist())
@@ -431,12 +453,16 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
         # Contact must follow a Cartesian line, not a joint-space/RRT detour.
         # Freeze the lift first: a lowered torso otherwise jams the Jacobian
         # solver at its lower limit despite a feasible arm-only stroke.
-        fixed_lift = same_drawer.screw_plans(planner, pose, disable_lift_joint=True)
-        if not fixed_lift and not same_drawer.screw_plans(planner, pose):
-            return common.fail(env, WHO, "no straight contact path", waypoint=label)
+        fixed_lift = False
+        if contact:
+            fixed_lift = same_drawer.screw_plans(planner, pose, disable_lift_joint=True)
+            if not fixed_lift and not same_drawer.screw_plans(planner, pose):
+                return common.fail(env, WHO, "no straight contact path", waypoint=label)
         return planner.static_manipulation(pose, disable_lift_joint=fixed_lift,
             n_init_qpos=REACH_N_INIT, max_knots=160, knot_draws=1, knot_refuse=True,
-            by_line=False, stretch=stretch, stop_on_touch=stop_on_touch)
+            by_line=not contact,
+            stretch=(contact_stretch if contact and contact_stretch is not None else stretch),
+            stop_on_touch=stop_on_touch)
 
     def drive(label, point, yaw=math.pi/2, *, already_at_station=False):
         p = noise.point(label, [float(point[0]), float(point[1]), 0.], (True, True, False))
@@ -536,6 +562,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
         # pick an approach from which that push also plans (same goal as below).
         push_preview = (None if opening or drawer == 0 else
                         sapien.Pose(grasp.p + [0, amount + .04, 0], grasp.q))
+        close_starts = () if opening else DRAWER_CLOSE_STARTS.get(drawer, ())
         if direct_contact:
             planner.set_grasp_branch(elbow=1, wrist=1)
             planner._drawer_initial_wrist_budget = False
@@ -578,37 +605,47 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
                 else:
                     torso, n_init = None, 80
                 # Reserve enough wrist roll for the later apple grasp before
-                # committing the arm.
-                planner._drawer_initial_wrist_budget = not opening
+                # committing the arm. The low closing handle is not budgeted: it is
+                # lowered outside the worktop and keeps its own roll range (the
+                # measured closing approaches of profile 17 do).
+                budgeted = middle_handle or (not opening and not low_handle)
+                planner._drawer_initial_wrist_budget = budgeted and not opening
                 log("approach drawer", goal=reach.p.tolist(), torso_height_m=torso)
-                result = approach_for_contact(
-                    reach, grasp, n_init, torso_height=torso,
-                    contact_context=lambda: common.contact_stroke(
-                        planner, [DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX]),
-                    follow_through=push_preview)
-                if (not opening and low_handle and torso == 0.10
-                        and isinstance(result, (int, np.integer)) and result == -1):
-                    # At 0.10 m some lower-middle handles need wrist_flex below the
-                    # grasp-branch margin at contact. Nothing has moved yet; plan the
-                    # same approach at the bottom-handle torso height.
-                    torso = 0.01
-                    log("lower torso for closing approach", torso_height_m=torso)
-                    result = approach_for_contact(reach, grasp, n_init, torso_height=torso,
-                                                  follow_through=push_preview)
-                if opening and low_handle and isinstance(result, (int, np.integer)) and result == -1:
+                with reference_ik_starts(planner, task, close_starts) as reference_used:
+                    # The contact stroke is the upper closing approach's precondition;
+                    # the low handle plans its reach clean and takes contact later, in
+                    # `grasp drawer handle`.
+                    result = approach_for_contact(
+                        reach, grasp, n_init, torso_height=torso,
+                        contact_context=None if low_handle else lambda: common.contact_stroke(
+                            planner, [DRAWER_FIXTURES[drawer] + DRAWER_ART_SUFFIX]),
+                        follow_through=push_preview)
+                    if (not opening and low_handle and torso == 0.10
+                            and isinstance(result, (int, np.integer)) and result == -1):
+                        # At 0.10 m some lower-middle handles need wrist_flex below the
+                        # grasp-branch margin at contact. Nothing has moved yet; plan the
+                        # same approach at the bottom-handle torso height.
+                        torso = 0.01
+                        log("lower torso for closing approach", torso_height_m=torso)
+                        result = approach_for_contact(reach, grasp, n_init, torso_height=torso,
+                                                      follow_through=push_preview)
                     # Unfold the upper arm before lowering through the countertop
                     # edge. The direct diagonal joint line from the travel posture
                     # can sweep the sink at the bottom handle even when both endpoint
                     # poses are reachable.
-                    result = common.plan_joints(
-                        env, planner, task,
-                        {"shoulder_lift_joint": 0.0, "elbow_flex_joint": 1.8,
-                         "wrist_flex_joint": 1.7},
-                        label="clear counter for low handle", who=WHO,
-                        )
-                    if stopped(result):
-                        return result, False
-                    result = approach_for_contact(reach, grasp, 120, torso_height=torso)
+                    if (opening and low_handle and isinstance(result, (int, np.integer))
+                            and result == -1):
+                        result = common.plan_joints(
+                            env, planner, task,
+                            {"shoulder_lift_joint": 0.0, "elbow_flex_joint": 1.8,
+                             "wrist_flex_joint": 1.7},
+                            label="clear counter for low handle", who=WHO,
+                            )
+                        if stopped(result):
+                            return result, False
+                        result = approach_for_contact(reach, grasp, 120, torso_height=torso)
+                if reference_used:
+                    log("drawer approach IK from fixed reference start", starts=list(reference_used))
                 if stopped(result):
                     return result, False
             if bottom_pull:
@@ -766,6 +803,9 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
     x_offset = float(apple_p[0] - base.p[0])
     if abs(x_offset) > 0.04:
         log("apple off the dock alignment band", x_offset_m=x_offset)
+        result = drive("align with apple", [apple_p[0], base.p[1]])
+        if stopped(result):
+            return result
     result = open_gripper()
     if stopped(result):
         return result
@@ -784,7 +824,8 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
     planner.set_grasp_branch(elbow=1, wrist=1)
     with reference_ik_starts(planner, task, APPLE_REACH_STARTS) as reference_used:
         result, held = same_drawer.try_grasp(env, planner, task, task.apple, grasp, reach,
-            n_init_qpos=REACH_N_INIT, approach_max_knots=160, grasp_max_knots=80,
+            resync_before_grasp=True, close_on_contact=True, n_init_qpos=REACH_N_INIT,
+            approach_by_line=True, approach_max_knots=160, grasp_max_knots=80,
             grasp_knot_draws=1)
     if reference_used:
         log("apple reach IK from fixed reference start", starts=list(reference_used))
@@ -834,8 +875,10 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
     apple = task.apple.pose[0].sp
     placement = (sapien.Pose(task.plate.pose[0].sp.p + [0, 0, 0.035], apple.q)
                  * (tcp.inv() * apple).inv())
+    planner.planner.update_from_simulation()
     with common.touchable(planner, "plate"):
-        result = move("lower apple onto plate", placement, noisy=False, sync=False)
+        result = move("lower apple onto plate", placement, noisy=False, sync=False,
+                      contact=True, contact_stretch=1)
     if stopped(result):
         return result
     # Enforce settling before release. The prior six-step wait ignored failure

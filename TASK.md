@@ -72,8 +72,8 @@
 - `utils/mikasa/assisted_grasp.py` — прокси-драйв, `AssistedGraspConfig.hand_collides`;
 - профили: `same_drawer_profile.json` 21, `depth_recall_profile.json` 6,
   `season_dish_profile.json` 26 (с тех пор перенесён на 28, см. ниже),
-  `cabinet_search_profile.json` 19,
-  `cabinet_search5_profile.json` 7;
+  `cabinet_search5_profile.json` 7 (профиль 19 четырёхотсечной задачи и её
+  датасет `cabinetsearch-ag-1000ep` сняты, см. ниже);
 - `my_scenes/depth_recall_v1.py` — `INSTRUCTION_VERSIONS` и `instruction_version`;
 - `my_scenes/cabinet_search.py` — пятиотсечная `MikasaCabinetSearch5-v0`,
   коврик вместо диска (`my_scenes/assets/home_rug/`);
@@ -120,6 +120,29 @@
   `pour_and_shake`; `pour_with_wrist` и `tilt_angles` удалены вместе с тестами
   one-tip-наклона: остался один путь налива.
 
+### Снята четырёхотсечная задача cabinet search
+
+Канон — пятиотсечная `MikasaCabinetSearch5-v0` (профиль 7, датасет
+`cabinetsearch5-ag-1000ep`, пересобран 20/20 идентично); четырёхотсечная
+(`MikasaCabinetSearch-v0`, профиль 19, датасет `cabinetsearch-ag-1000ep`)
+снята как superseded (владелец зафиксировал пять отсеков 2026-10-25):
+
+- `my_scenes/cabinet_search.py` — с `CabinetSearchTask` снят
+  `@register_env("MikasaCabinetSearch-v0", ...)`; класс остался общим телом
+  для `CabinetSearch5Task`, `CabinetSearchConfig` — базой
+  `CabinetSearch5Config`;
+- `utils/collection/profile.py` — из `TASKS` убрана запись `cabinet_search`,
+  `load_profile()` по умолчанию грузит `cabinet_search5`, `PROFILE`
+  указывает на `cabinet_search5_profile.json`;
+- удалён `utils/collection/cabinet_search_profile.json`;
+- `utils/collection/pipeline.py` (`--profile` по умолчанию), тесты
+  (`test_collection_data.py`, `test_task_scenes.py`), `utils/mikasa/preflight.py`,
+  `utils/mikasa/test_assisted_grasp.py` (пять листьев вместо четырёх),
+  `utils/validate_seeded_replay.py`, `README.md` — переведены на
+  `cabinet_search5`;
+- `tools/collection_gangway/driver/*` не тронуты: это архив кампании на H100
+  (пути `~/sd-collect/repo-cab`), он описывает снятый датасет, а не запускает env.
+
 ## Результаты на валидационных сидах (oracle-фаза, 100 сидов)
 
 Сиды 0–99, `MIKASA_IK_BACKEND=mplib`, восемь параллельных процессов.
@@ -130,7 +153,18 @@
 | DepthRecall 6 | 98 | 2 | 0 | 0 | 98 / 2 / 0 / 0 |
 | SeasonDish 26 (repo v2) | 83 | 1 | 16 | 0 | 83 / 0 / 17 / 0 |
 | SeasonDish 28 (карточка+встряхивания) | 91 | 0 | 9 | 0 | 91 / 0 / 9 / 0 на `origin/train/vla` (`c6a429d`), те же сиды |
-| CabinetSearch5 7 | 83 | 17 | 0 | 0 | нет (сцены не было в ветке) |
+| CabinetSearch5 7 | 98 | 2 | 0 | 0 | 100 / 0 / 0 / 0 на `origin/train/vla` (`c6a429d`), те же сиды |
+
+CabinetSearch5 до порта потерянных тактик давал 83/17/0/0: 17 сидов падали
+`cube nudge refused` (не было подготовительной стадии «ready arm за 0.10 м до
+дока, затем roll in» и ветки кулака по линии «стойка → куб») либо
+`the door did not close` (`close_and_verify` не возвращал успех после удачной
+попытки, а закрытие ручкой оставляло кисть на штанге, из-за чего латч
+`is_open` не снимался). Остались 2 сида — 39 и 74: ручка закрыта по углу,
+эпизод кончается `home credited ... any_open`; снимать кисть с закрытой штанги
+нельзя — и отъезд базой, и вытягивание руки распахивают створку до ~1.07 рад,
+а без этого `is_open` не снимается (нужны 10 подряд тиков с TCP > 0.25 м от
+штанги).
 
 Вывод: регрессий нет — множества успешных сидов совпадают с baseline, у
 SameDrawer один сид добавлен (8250082). Оставшиеся `no_plan` — те же сиды, что

@@ -93,7 +93,7 @@ def test_nearest_one_finger_body_blocks_a_farther_grasp():
 #: links (doors or drawers) come with them.
 TASKS = {"MikasaSeasonDish-v0": (("shaker", "condiment_bottle"), 0),
          "MikasaSameDrawer-v0": (("apple",), 4),
-         "MikasaCabinetSearch-v0": (("cube",), 4),
+         "MikasaCabinetSearch5-v0": (("cube",), 5),
          "MikasaDepthRecall-v1": (("prop_0", "prop_1", "prop_2", "prop_3"), 0)}
 
 
