@@ -209,6 +209,24 @@ setup_server.sh` клонирует его в `$OPENPI_DIR` и ставит от
 В основном venv нет `jax`, `flax`, `openpi.shared`, `mme_vla_suite` —
 тесты `utils/policies` проходят не импортируя их на верхнем уровне.
 
+### Зависимости: ManiSkill из PyPI, без соседнего клона
+
+`pyproject.toml` и `uv.lock` взяты из `origin/wt/takeitwithhead-worktree-20260921`
+(коммиты `174db21` и `dc48eed`): `mani_skill==3.0.0b22` и `mplib==0.2.1`
+(`override-dependencies`, потому что ManiSkill объявляет `mplib==0.1.1`), плюс
+группа `openpi-eval = ["openpi-client"]` с путём
+`third_party/openpi/packages/openpi-client` (ставится только при явном
+запросе группы). До этого в ветке жил `[tool.uv.sources] mani_skill = { path =
+"../ManiSkill", editable = true }` со времён миграции (`b2c098f`), из-за него
+установка требовала соседний клон ManiSkill.
+
+`uv sync --frozen` по этому локу ставит `mani-skill 3.0.0b22` колесом (97 MB)
+и ровно те версии, что запинены в профилях: gymnasium 0.29.1, sapien 3.0.3,
+torch 2.14.0, numpy 1.26.4, h5py 3.16.0, mplib 0.2.1. `load_profile()`
+проходит для всех четырёх профилей, `423 passed, 6 skipped`, эпизод
+`depth_recall 7` — `verdict=success steps=2742`. Соседний клон
+`../ManiSkill` больше не нужен: ни один файл репозитория на него не ссылается.
+
 ## Результаты на валидационных сидах (oracle-фаза, 100 сидов)
 
 Сиды 0–99, `MIKASA_IK_BACKEND=mplib`, восемь параллельных процессов.

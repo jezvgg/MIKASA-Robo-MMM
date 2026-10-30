@@ -1,6 +1,6 @@
 # MIKASA-Robo-MMM
 
-Benchmark VLA-памяти на базе ManiSkill. ManiSkill находится в `../ManiSkill` и подключается как editable-зависимость.
+Benchmark VLA-памяти на базе ManiSkill. ManiSkill (ManiSkill 3.0.0b22) ставится из PyPI с пином версии; `mplib` держится на 0.2.1 через `override-dependencies`, потому что ManiSkill объявляет 0.1.1, а профили коллекции записаны на 0.2.1.
 
 ## Установка
 
