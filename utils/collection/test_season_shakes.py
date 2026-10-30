@@ -244,8 +244,13 @@ def test_count_success_and_fail_in_the_scene(env, monkeypatch):
     assert info["success"].item() and not info["fail"].item() and int(info["shake_count"].item()) == n
     n, info = episode(shaken + [2] * 2 * task.cfg.hold_steps)       # held upside down instead
     assert int(info["shake_count"].item()) == n and not info["success"].item()
-    n, info = episode([180, 90, 5] + [30, 2] * (n - 1) + upright)  # one shake short
-    assert int(info["shake_count"].item()) == n - 1 and not info["success"].item() and not info["fail"].item()
+    n, info = episode([180, 90, 5] + [30, 2] * (n - 1) + upright)  # one shake short, then upright: fails
+    assert int(info["shake_count"].item()) == n - 1 and not info["success"].item() and info["fail"].item()
+    n, info = episode([180, 90, 5] + [30, 2] * (n - 1) + [90])     # on the way up, not yet upright
+    assert not info["fail"].item()
+    # The memoryless probe (one shake, upright and hold, back down, ...) fails at its first early upright.
+    n, info = episode([180, 90, 5, 30, 2] + upright)
+    assert info["fail"].item() == (n > 1) and info["success"].item() == (n == 1)
     n, info = episode(shaken + [30, 2] + upright)
     assert info["fail"].item() and not info["success"].item() and int(info["shake_count"].item()) == n + 1
 
