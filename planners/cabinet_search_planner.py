@@ -76,6 +76,7 @@ import math
 import os
 
 import numpy as np
+import sapien
 
 from planners import cabinet_door_bimbo as _bimbo
 from planners.oracle import oracle_common as common
@@ -143,6 +144,12 @@ same 0.20 m torso, not a new centred joint configuration.
 
 CLOSE_SPEED_M_S = 0.20
 CLOSE_ARRIVE_TOL = 0.15
+BAR_SLIDE_M = 0.20
+"""How far along the closed leaf the hand slides off the bar: past the handle end,
+and along the panel, which pulls the leaf nowhere (see `close_and_verify`)."""
+
+BAR_CLEAR_DROP_M = 0.35
+"""How far the hand drops under a just-closed leaf before it leaves the bay."""
 """The K109 ARRIVED-despite-refusal tolerance handed to `close_the_door` for the
 search round. W20a run 6, seeds 11-14: from the search's entry state the shipped
 ladder books EVERY rung refused, yet the base stands 0.012-0.017 m from the first
@@ -742,9 +749,54 @@ def close_and_verify(env, planner, task, door: DoorSpec, res, record=None):
                 door_rad=door_rad_now(task, door), dwell_steps=task.cfg.close_dwell_steps)
             return result, True
         if shut and door_rad_now(task, door) <= _crp.CLOSE_MARGIN_RAD:
-            say(env, "the leaf is shut; the latch clears when the hand folds away",
+            # The leaf is shut but the hand is still on the bar, and the latch wants
+            # `close_dwell_steps` still ticks with the TCP more than `hand_far_m`
+            # (0.25 m) away. Leaving the way the fold does — straight back — swings
+            # the leaf open again: the pads sit behind the panel edge, and on seeds
+            # 39 and 74 the retreat tore it to 0.54 rad, which is past `theta_closed`
+            # and short of `theta_count`: no new rising edge, but the compartment's
+            # `closed_count` never starts and `is_open` never clears, so the next
+            # round books `two_open` and `skipped_home`.
+            #
+            # A force along the CLOSED leaf's own plane cannot swing it: the lever
+            # arm (from the vertical hinge) and the force are parallel. So slide
+            # toward the hinge, off the end of the bar, and only then let go.
+            tcp = task.agent.tcp.pose.sp
+            along = -float(door.panel_dir) * BAR_SLIDE_M
+            goal = sapien.Pose(p=[float(tcp.p[0]) + along, float(tcp.p[1]),
+                                  float(tcp.p[2])], q=tcp.q)
+            r = common.arm_move(env, planner, goal, who=WHO,
+                                stage="slide the hand off the closed bar")
+            if r != -1:
+                result = r
+            if common.stopped_by_horizon(planner):
+                return result, False
+            planner.planner.update_from_simulation()
+            for _ in range(int(task.cfg.close_dwell_steps)):
+                if closed_now():
+                    break
+                result = planner.idle_steps(t=1)
+                if common.stopped_by_horizon(planner):
+                    return result, False
+            if closed_now():
+                say(env, "physical compartment closed after the hand slid off the bar",
+                    door_rad=round(float(door_rad_now(task, door)), 3))
+                # The hand is still inside the bay, in front of the leaf it just shut.
+                # Lowering it is parallel to the leaf's own plane too (no lever arm),
+                # and it takes the pads under the leaf's bottom edge, so the fold and
+                # the next round's dock drive do not have to sweep them through it
+                # (`rotation sweep hits ...ds_fetch_r_gripper_finger_link<->...
+                # cab_main_main_group_0_hingerightdoor`, cabinet search seed 74).
+                tcp = task.agent.tcp.pose.sp
+                common.arm_move(
+                    env, planner,
+                    sapien.Pose(p=[float(tcp.p[0]), float(tcp.p[1]),
+                                   float(tcp.p[2]) - BAR_CLEAR_DROP_M], q=tcp.q),
+                    who=WHO, stage="drop the hand under the closed leaf", tries=1)
+                return result, True
+            say(env, "the leaf is shut; the latch did not clear after the slide",
                 door_rad=round(float(door_rad_now(task, door)), 3))
-            return result, True
+            return result, False
         return result, False
 
     _crp.LAST_PUSH.clear()
