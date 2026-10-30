@@ -17,8 +17,9 @@ The subtasks and keyframe rules are the ones in `~/Downloads/memer_subtasks_2026
 (owner-approved 2026-10-20). Since 2026-10-22 (owner) SeasonDish and DepthRecall call salt and
 pepper "the white salt shaker" and "the black pepper shaker": in both tasks they are one
 RoboCasa shaker in two colours (shaker_1, shaker_0), and the colour is all that tells them
-apart on camera. The copy's task text (`meta/tasks.parquet`, `meta/episodes`) is rewritten to
-the environments' current instruction the same way (`TASK_TEXT`). If any episode's events do
+apart on camera. The source must carry each environment's one current instruction
+(`CURRENT_TEXT`), as the HF datasets do since 2026-10-30; an older download is refused, to be
+fetched again from HF, and the copy keeps the source's text. If any episode's events do
 not fit its task's sequence, nothing is written (LeRobot v3 indexes frames globally, so an
 episode cannot simply be dropped): the report lists them and the rules get fixed first.
 `--check` writes only the report. CabinetSearch5 (since 2026-10-26) also reads the oracle's
@@ -58,27 +59,21 @@ SHAKE_TEXT = ("Remember whether the picture on the fridge shows the white salt s
               "shaker, and the number next to it. After the picture disappears, take that shaker, turn it "
               "upside down over the bowl, shake it as many times as the number showed and turn it upright "
               "again, leaving the other shaker untouched.")
-# The recorded task text -> the environment's current INSTRUCTIONS[0] (season_dish.py,
-# depth_recall_v1.py). The datasets were collected before the shakers' colours were named.
-TASK_TEXT = {
-    "seasondish": {
-        "Remember the salt or pepper shown in the picture on the fridge. After the picture "
-        "disappears, take that condiment and tip it over the bowl to season the dish, leaving "
-        "the other condiment untouched.":
-        "Remember whether the picture on the fridge shows the white salt shaker or the black "
-        "pepper shaker. After the picture disappears, take that shaker and tip it over the bowl "
-        "to season the dish, leaving the other shaker untouched.",
-        # profile 28 (shaking): recorded with the current instruction already
-        SHAKE_TEXT: SHAKE_TEXT,
-    },
-    "depthrecall": {
-        "Take the props out of the cabinet onto the counter pads (ketchup on the red pad, pepper "
-        "on the green pad, salt on the blue pad, mustard on the yellow pad), keep the one from "
-        "the back, and put the others back where they stood.":
-        "Take the props out of the cabinet onto the counter pads (ketchup on the red pad, black "
-        "pepper shaker on the green pad, white salt shaker on the blue pad, mustard on the yellow "
-        "pad), keep the one from the back, and put the others back where they stood.",
-    },
+# The environments' one current instruction per task (owner 2026-10-30): INSTRUCTIONS[0] of
+# same_drawer.py, season_dish.py and depth_recall_v1.py, INSTRUCTIONS_NUDGE[0] of cabinet_search.py.
+# The HF datasets carry it and every policy trains on it; a source with any other text is an old
+# download (`check_task_text`).
+CURRENT_TEXT = {
+    "samedrawer": "Remember which drawer is open and close it. Keep it closed while putting the apple on the plate "
+                  "at the far counter, then return and open the same drawer. Keep the apple on the plate until "
+                  "the end and leave every other drawer closed.",
+    "seasondish": SHAKE_TEXT,
+    "depthrecall": "Take the props out of the cabinet onto the counter pads (ketchup on the red pad, black pepper "
+                   "shaker on the green pad, white salt shaker on the blue pad, mustard on the yellow pad), keep "
+                   "the one from the back, and put the others back where they stood.",
+    "cabinetsearch": "Find the cola can in the wall cabinets and gently push it. Start at the rug. Close empty "
+                     "cabinets and return directly to the rug before searching another. Never inspect a cabinet "
+                     "twice. Finish after pushing the can.",
 }
 KEYFRAME_RULES = {
     "samedrawer": [{"pattern": "^close the .* drawer$", "select": "first"}],
@@ -284,20 +279,15 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict,
     raise ValueError(task)
 
 
-def rewrite_task_text(dst: Path, texts: dict[str, str]) -> None:
-    """Replace the recorded task strings in the copy's tasks.parquet and episode table."""
-    new = set(texts.values())
-    tasks = pd.read_parquet(dst / "meta/tasks.parquet")
-    unknown = [t for t in tasks.index if t not in texts and t not in new]
-    if unknown:
-        raise SystemExit(f"task text not in TASK_TEXT: {unknown}")
-    tasks.index = pd.Index([texts.get(t, t) for t in tasks.index], name=tasks.index.name)
-    tasks.to_parquet(dst / "meta/tasks.parquet")
-    for f in sorted(glob.glob(f"{dst}/meta/episodes/*/*.parquet")):
-        ep = pd.read_parquet(f)
-        ep["tasks"] = [[texts.get(t, t) for t in row] for row in ep["tasks"]]
-        ep.to_parquet(f, index=False)
-
+def check_task_text(src: Path, task: str) -> None:
+    """The source's task texts must be the environment's one current instruction (`CURRENT_TEXT`)."""
+    if task not in CURRENT_TEXT:
+        return
+    texts = list(pd.read_parquet(src / "meta/tasks.parquet").index)
+    if texts != [CURRENT_TEXT[task]]:
+        raise SystemExit(f"{src}: task text {texts} is not the current instruction {CURRENT_TEXT[task]!r}; "
+                         "download meta/ and data/ again from the HF dataset (one instruction per task since "
+                         "2026-10-30)")
 
 def per_frame(starts: list[tuple[int, str]], n: int) -> list[str]:
     starts = sorted(starts)
@@ -320,6 +310,7 @@ def main():
                     "(CabinetSearch5: .../cabinet_search5-*/oracle/{seed}/events.jsonl)")
     args = ap.parse_args()
     src, dst = args.dataset, args.out
+    check_task_text(src, args.task)
     if str(args.params) == "-":
         meta = json.loads((src / "meta/source_rlds_metadata.json").read_text())
         params = {int(e): {"seed": int(s)} for e, s in zip(meta["episode_indices"], meta["episode_seeds"])}
@@ -358,8 +349,6 @@ def main():
         raise SystemExit(f"{dst} exists")
     shutil.copytree(src / "videos", dst / "videos", copy_function=os.link)
     shutil.copytree(src / "meta", dst / "meta")
-    if args.task in TASK_TEXT:
-        rewrite_task_text(dst, TASK_TEXT[args.task])
     for f in files:
         t = pd.read_parquet(f)
         t["subtask_index"] = [index[labels[int(e)][int(i)]] for e, i in zip(t.episode_index, t.frame_index)]
