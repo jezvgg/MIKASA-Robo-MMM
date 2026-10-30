@@ -1,14 +1,17 @@
-"""Action-only oracle for the profile-26 SeasonDish task.
+"""Action-only oracle for the profile-28 SeasonDish task.
 
-Read the fixed fridge picture, then travel to the condiment station with the arm
-in the canonical rest pose. The scene hides the picture at control step 100.
+Read the fixed fridge picture and the number card next to it, then travel to the
+condiment station with the arm in the canonical rest pose. The scene hides both after
+`cue_steps` (50 control steps in profile 28).
 Grasp with an upright wrist camera and a consistent elbow/wrist branch, lift
 clear of the neighbouring condiment, and fold to the compact upright carry pose when the bowl needs a drive.
 Track the condiment before the grasp and the bowl afterwards.
 
 Drive to the bowl with the same compact pose, move to an upright hover, then
-rotate only wrist_roll on a collision-checked joint line. The other arm and torso
-commands stay fixed throughout the pour and hold. All paths obey the recorded roll
+rotate only wrist_roll on collision-checked joint lines: to just short of upside down, then one
+30 deg swing back toward upright and return per shake, then upright again
+(`oracle_season_dish.pour_and_shake`; one-sided because of checklist D2). The other arm and
+torso commands stay fixed throughout the pour and hold. All paths obey the recorded roll
 history. Execution noise is limited to transfer motions; contacts and pouring
 are clean. Poll the environment's hold counter until success or the horizon.
 
@@ -52,8 +55,13 @@ from planners.oracle.oracle_season_dish import (
     kinematics,
     measured,
     preview_roll_history,
-    pour_with_wrist,
+    pour_and_shake,
+    rest_angles,
     rotation,
+    SHAKE_AMPLITUDE_DEG,
+    SHAKE_LEAN_MARGIN_DEG,
+    shake_geometry_ok,
+    swing_angle,
     tilt_angles,
     upright_path,
     upright_wrist_candidates,
@@ -91,7 +99,11 @@ def held_transform(task, target):
 
 
 def pour_targets(planner, task, q, hand_object):
-    """Cheap endpoint geometry and joint-budget checks; no path or IK calls."""
+    """Cheap endpoint geometry and joint-budget checks; no path or IK calls.
+
+    Yields (goal, reserve): the near-upside-down goal and, as the rows of `reserve`, it and the shake
+    swing, so the roll window and the joint limits are checked for the whole pour before the robot
+    commits to the transfer."""
     p = planner.planner
     fk = kinematics(planner, task)
     wrist = fk.matrix(q, 'wrist_roll_link')
@@ -100,7 +112,7 @@ def pour_targets(planner, task, q, hand_object):
     bowl = task.bowl.pose[0].sp.p
     index = fk.indices['wrist_roll_joint']
     # Preview needs room for the measured model-to-physics deviation. These
-    # reserves tighten candidate selection; execution and checker stay at 165/155.
+    # reserves tighten candidate selection only.
     parameters=getattr(task,'motion_parameters',{})
     clearance_reserve=float(parameters.get('pour_preview_clearance_reserve_m',0.))
     wrist_reserve=float(parameters.get('pour_preview_wrist_reserve_rad',0.))
@@ -108,15 +120,20 @@ def pour_targets(planner, task, q, hand_object):
     def note(key, delta):
         if reasons is not None:
             reasons.append(f"{key}{'+' if delta > 0 else '-'}")
-    for delta in tilt_angles(axis, obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body), 165.):
-        end = pivot + rotation(axis, delta) @ (obj[:3, 3] - pivot)
-        if np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius:
+    object_axis = obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body)
+    for delta in rest_angles(axis, object_axis, task.cfg.shake_return_deg - SHAKE_LEAN_MARGIN_DEG):
+        if not shake_geometry_ok(axis, object_axis, delta, task.cfg):
+            note('shake_lean', delta); continue
+        swing = swing_angle(delta, SHAKE_AMPLITUDE_DEG)
+        ends = [pivot + rotation(axis, d) @ (obj[:3, 3] - pivot) for d in (delta, swing)]
+        if any(np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius for end in ends):
             note('miss_xy', delta); continue
-        if not task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve:
+        if not all(task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve for end in ends):
             note('miss_height', delta); continue
         goal = q.copy(); goal[index] += delta
-        reserve=goal.copy();reserve[index]+=np.sign(delta)*wrist_reserve
-        if not p.accepts(np.vstack([q,goal,reserve])):
+        out = q.copy(); out[index] += swing
+        reserve = np.vstack([goal + 0., out]); reserve[0, index] += np.sign(delta) * wrist_reserve
+        if not p.accepts(np.vstack([q, goal, reserve])):
             note('roll_window', delta); continue
         yield goal, reserve
 
@@ -130,10 +147,27 @@ def preview_pour(planner, task, q, hand_object):
                                     ref_yaw=float(q[2]), qpos_step=.02)
         except RuntimeError:
             continue
-        if path.get('status') == 'Success' and path_clear(planner, q, path['position']):
-            path['preview_reserve_qpos'] = reserve
-            return path
+        if path.get('status') != 'Success' or not path_clear(planner, q, path['position']):
+            continue
+        if not _swings_clear(planner, task, goal, np.atleast_2d(reserve)[1:]):
+            continue
+        path['preview_reserve_qpos'] = reserve
+        return path
     return None
+
+
+def _swings_clear(planner, task, rest, swings):
+    """The shake swings from the near-upside-down rest plan as clear wrist-only lines."""
+    p = planner.planner
+    for swing in swings:
+        try:
+            path = p.plan_qpos_line(swing, rest, time_step=task.control_timestep,
+                                    ref_yaw=float(rest[2]), qpos_step=.02)
+        except RuntimeError:
+            return False
+        if path.get('status') != 'Success' or not path_clear(planner, rest, path['position']):
+            return False
+    return True
 
 
 def hover_goals(p, current, tcp, *, n_init=32, preferred=None, mode='dual'):
@@ -182,9 +216,35 @@ def hover_goals(p, current, tcp, *, n_init=32, preferred=None, mode='dual'):
     return chosen, records
 
 
+def rest_shifts(fk, task, desired, obj_inverse):
+    """For a hover with the condiment at `desired`, the horizontal shifts that would put the shaking
+    pour's rest (one per turn direction) where the hover is: the roll axis runs beside the condiment,
+    so turning it nearly upside down carries it sideways, and a hover that leaves it off the bowl
+    (`miss_xy`) can be moved by the opposite amount."""
+    grip = desired @ obj_inverse
+    wrist = grip @ np.linalg.inv(fk.joints['gripper_link'][3])
+    axis, pivot = wrist[:3, 0], wrist[:3, 3]
+    up = desired[:3, :3] @ np.asarray(task.cfg.pour_axis_body, dtype=float)
+    shifts = []
+    for delta in rest_angles(axis, up, task.cfg.shake_return_deg - SHAKE_LEAN_MARGIN_DEG)[:2]:
+        moved = pivot + rotation(axis, delta) @ (desired[:3, 3] - pivot) - desired[:3, 3]
+        shifts.append(tuple(np.round(-moved[:2], 4)))
+    return shifts
+
+
+#: The shaking pour's extra hovers (2026-10-28, owner: raise SR without changing the robot or its
+#: speed), tried only on the way to a bowl dock and only after every shipped hover failed, so an
+#: episode that hovers today hovers the same way. More spins put the arm, and so the wrist roll the
+#: pour starts from, elsewhere in checklist D2's roll window (`roll_window`); shifted hovers bring
+#: the pour's rest over the bowl (`miss_xy`).
+EXTRA_SPINS = ((0., 0., 60.), (0., 0., -60.), (0., 0., 90.), (0., 0., -90.), (-.05, 0., 30.), (-.05, 0., -30.))
+SHIFTED_MIN_M = .02
+
+
 @measured
-def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferred=None):
-    """Preview only: neither unsuccessful candidates nor lookahead execute steps."""
+def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferred=None, more=False):
+    """Preview only: neither unsuccessful candidates nor lookahead execute steps. `more` adds the
+    shaking pour's extra hovers after the shipped ones."""
     p = planner.planner
     failures=[];planner._hover_failures=failures
     fk = kinematics(planner, task)
@@ -208,15 +268,26 @@ def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferr
     tcp_now = hand @ local_tcp
     approach_now = tcp_now[:3,2]
     yaw_anchor = math.atan2(away[1],away[0]) - math.atan2(approach_now[1],approach_now[0])
-    options=[(0.,0.,0.),(.06,0.,0.),(0.,.06,0.),(-.05,0.,0.),
+    shipped=[(0.,0.,0.),(.06,0.,0.),(0.,.06,0.),(-.05,0.,0.),
              (0.,0.,30.),(0.,0.,-30.),(.06,0.,30.),(.06,0.,-30.)]
+    options=[v + (None,) for v in shipped]
+    if more:
+        options += [v + (None,) for v in EXTRA_SPINS]
+        for extra, back, spin in shipped:
+            desired = obj.copy()
+            desired[:3, :3] = rotation([0., 0., 1.], yaw_anchor + math.radians(spin)) @ obj[:3, :3]
+            options += [(extra, back, spin, shift) for shift in rest_shifts(fk, task, desired, obj_inverse)
+                        if np.hypot(*shift) >= SHIFTED_MIN_M]
     if preferred is not None:
-        chosen=tuple(preferred[k] for k in ('hover_extra','hover_back','hover_spin'))
+        chosen=tuple(preferred[k] for k in ('hover_extra','hover_back','hover_spin')) + (
+            None if preferred.get('hover_shift') is None else tuple(preferred['hover_shift']),)
         options=[chosen]+[v for v in options if v!=chosen]
     with elbow_only(planner, task):
-        for extra, back, spin in options:
+        for extra, back, spin, shift in options:
             desired = obj.copy()
             desired[:3, 3] = bowl - back * away + np.array([0., 0., .20 + extra])
+            if shift is not None:
+                desired[:2, 3] += shift
             desired[:3, :3] = rotation([0., 0., 1.], yaw_anchor + math.radians(spin)) @ obj[:3, :3]
             tcp = sapien.Pose(desired @ obj_inverse @ local_tcp)
             mode = getattr(task, 'motion_parameters', {}).get('hover_ik_start', 'dual')
@@ -235,8 +306,10 @@ def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferr
                 planner._pour_reasons = []
                 arc = preview_pour(planner, task, reached, hand_object)
                 if arc is not None and p.accepts(np.vstack([path['position'], arc['position'],
-                                                           arc['preview_reserve_qpos'][moves]]), move_group=True):
-                    return dict(approach=path, pour=arc, hover_extra=extra, hover_back=back, hover_spin=spin, hover_yaw_anchor=math.degrees(yaw_anchor), hover_ik_records=ik_records, hover_goal=goal.tolist())
+                                                           np.atleast_2d(arc['preview_reserve_qpos'])[:, moves]]), move_group=True):
+                    return dict(approach=path, pour=arc, hover_extra=extra, hover_back=back, hover_spin=spin,
+                                hover_shift=None if shift is None else list(shift), hover_yaw_anchor=math.degrees(yaw_anchor),
+                                hover_ik_records=ik_records, hover_goal=goal.tolist())
                 failures.append(dict(stage='wrist_pour',reason='pour:' + ','.join(sorted(set(planner._pour_reasons))) or 'pour_line_refused',
                                      extra=extra,back=back,spin=spin))
     return None
@@ -282,7 +355,7 @@ def plan_bowl_drive(planner, task, current, hand_object, dock, face):
             failures.append(dict(offset_x_m=offset, stage='base_sweep',
                                  collision=getattr(planner, '_last_path_collision', None)))
             continue
-        hover = plan_loaded_hover(planner, task, arrival, hand_object)
+        hover = plan_loaded_hover(planner, task, arrival, hand_object, more=True)
         if hover is not None:
             return dict(dock=candidate, offset_x_m=offset, hover=hover)
         failures.append(dict(offset_x_m=offset, stage='hover', hover=hover_summary(planner)))
@@ -1471,11 +1544,18 @@ def navigation_posture(env, planner, task, target):
         return planner.follow_forward_path_w_refinement(path, refine=True)
 
 
+def cue_point(task):
+    """Where the cue is looked at: midway between the picture and the number card (the same
+    point for every answer), or the picture where a task has no card."""
+    focus = getattr(task, "cue_focus", None)
+    return _np(task.fridge_pictures.home)[0, :3] if focus is None else _np(focus)[0, :3]
+
+
 def cue_head_target(task):
-    """Aim the unchanged DSFetch cameras at the fixed fridge picture."""
+    """Aim the unchanged DSFetch cameras at the fixed fridge cue."""
     from planners.oracle.head_tracking import HeadTracker
     tracker = HeadTracker(task.agent, task.control_timestep)
-    tracker.target = _np(task.fridge_pictures.home)[0, :3]
+    tracker.target = cue_point(task)
     return tuple(tracker.desired())
 
 
@@ -1646,7 +1726,7 @@ def _solve(
     # Look at the fixed fridge picture, independent of which condiment it names.
     # Thus head proprioception does not encode the answer after the cue disappears.
     pan, tilt = cue_head_target(task)
-    planner.track_target(_np(task.fridge_pictures.home)[0, :3])
+    planner.track_target(cue_point(task))
     say(env, "fridge cue observation", phase="fridge_cue_observation")
     gaze = planner.hold_head(pan=pan, tilt=tilt, t=20, ramp=10)
     info = season.wait_cue(env, planner, gaze[-1])
@@ -1658,8 +1738,9 @@ def _solve(
 
     # -- STAGE 1: read the profile cue ---------------------------------------------
     target_is_shaker = bool(_np(info["target_is_shaker"]).reshape(-1)[0])
+    shakes = int(_np(info["num_shakes"]).reshape(-1)[0])
     target = task.shaker if target_is_shaker else task.condiment_bottle
-    say(env, "target chosen", target_is_shaker=target_is_shaker)
+    say(env, "target chosen", target_is_shaker=target_is_shaker, shakes=shakes)
     planner.track_target(lambda: _np(target.pose.p)[0])
     # Both answers use the same physical station dock.
     dock = _np(task._station_dock_np)[0].astype(np.float64)
@@ -1834,11 +1915,12 @@ def _solve(
                     return res
                 current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
                 with season.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-                    direct = plan_loaded_hover(planner, task, current, held_transform(task, target), preferred=route['hover'])
+                    direct = plan_loaded_hover(planner, task, current, held_transform(task, target), preferred=route['hover'],
+                                               more=True)
                 if direct is None:
                     return fail(env, "no loaded hover after bowl drive")
             say(env, "hover over bowl", route_prechecked=True, extra=direct['hover_extra'],
-                back=direct['hover_back'], spin_deg=direct['hover_spin'])
+                back=direct['hover_back'], spin_deg=direct['hover_spin'], shift_m=direct.get('hover_shift'))
             with transfer_phase(planner, "carry condiment over bowl"):
                 res = planner.follow_forward_path_w_refinement(direct['approach'], refine=True)
         if common.stopped_by_horizon(planner):
@@ -1848,4 +1930,4 @@ def _solve(
         if not bool(task.agent.is_grasping(target).any()):
             say(env, "physical miss: target lost on approach to bowl")
             return res
-        return pour_with_wrist(env, planner, task, target, target_degrees=165.0)
+        return pour_and_shake(env, planner, task, target, shakes)

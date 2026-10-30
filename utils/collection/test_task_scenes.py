@@ -661,11 +661,15 @@ def test_nudge_arm_move_refusal_returns_failure_without_unpacking(monkeypatch, f
         agent=SimpleNamespace(build_grasp_pose=lambda *args: object()),
         _spawn_centre_x=None,
     )
+    # The touch-dock drive succeeds (the recording oracle ends the attempt early, as a miss,
+    # when it cannot reach the dock); every arm stage before the touch is refused.
     planner = SimpleNamespace(
         planner=SimpleNamespace(update_from_simulation=lambda: None),
-        drive_base=lambda **kwargs: -1,
+        drive_base=lambda **kwargs: step,
+        drive_straight=lambda *args, **kwargs: -1,
         close_gripper=lambda **kwargs: -1,
         cabinet_waypoint_noise=None,
+        truncated=False,
     )
 
     monkeypatch.setattr(cabinet, 'door_mode', lambda _task: 'arc')
@@ -683,5 +687,152 @@ def test_nudge_arm_move_refusal_returns_failure_without_unpacking(monkeypatch, f
 
     monkeypatch.setattr(common, 'arm_move', arm_move)
     result = cabinet.nudge_the_cube(SimpleNamespace(), planner, task, -1)
-    assert result == -1
-    assert len(calls) == cabinet.NUDGE_TRIES * (1 if failed_stage == 'pre-touch' else 2)
+    # The refused arm_move is never unpacked: the oracle returns the last executed step (the
+    # drive to the dock), a physical miss. A refused push still retracts before the next try.
+    assert result is step
+    per_try = ['pre-touch'] if failed_stage == 'pre-touch' else ['pre-touch', 'push', 'retract']
+    assert [c.split(' (')[0] for c in calls] == per_try * cabinet.NUDGE_TRIES
+
+
+# Source group: test_season_shakes.py (the shake counter and the scene; the planner tests of the
+# shaking pour are in test_task_motion.py)
+import math
+import os
+
+import numpy as np
+import pytest
+import torch
+
+from utils.mikasa.shake_counter import step_shakes
+
+#: The scene tests read poses only; any renderer will do ("none" crashes SAPIEN 3.0.3's URDF loader on ds_fetch).
+SEASON_RENDER = os.environ.get("SEASON_TEST_RENDER", "sapien_cuda")
+
+
+def run_counter(leans, held=True):
+    count, armed, swung = torch.zeros(1, dtype=torch.int32), torch.zeros(1, dtype=torch.bool), torch.zeros(1, dtype=torch.bool)
+    over = torch.tensor([held])
+    for lean in leans:
+        count, armed, swung = step_shakes(count, armed, swung, torch.tensor([float(lean)]), over, 20., 10.)
+    return int(count[0]), bool(armed[0])
+
+
+def test_turning_the_shaker_over_is_not_a_shake():
+    assert run_counter([180, 120, 60, 25, 12, 4]) == (0, True)
+
+
+def test_each_excursion_from_upside_down_that_comes_back_is_one_shake():
+    over = [180, 90, 5]
+    assert run_counter(over + [30, 2]) == (1, True)
+    assert run_counter(over + [30, 2, 30, 2]) == (2, True)
+    assert run_counter(over + [30, 2, 30, 2, 30, 2]) == (3, True)
+
+
+def test_a_swing_counts_only_when_it_comes_back():
+    assert run_counter([180, 5, 30, 15, 30, 15, 30]) == (0, True)
+    assert run_counter([180, 5, 30, 15, 30, 2]) == (1, True)
+
+
+def test_turning_it_upright_again_after_the_last_shake_is_not_a_shake():
+    assert run_counter([180, 90, 5, 30, 2, 30, 2, 60, 120, 180]) == (2, True)
+
+
+def test_nothing_counts_off_the_bowl():
+    assert run_counter([180, 5, 30, 2, 30, 2], held=False) == (0, False)
+
+
+@pytest.fixture(scope="module")
+def season_env():
+    gym = pytest.importorskip("gymnasium")
+    pytest.importorskip("mani_skill")
+    import my_scenes  # noqa: F401
+    try:
+        e = gym.make("MikasaSeasonDish-v0", num_envs=1, robot_uids="ds_fetch", control_mode="pd_joint_pos",
+                     obs_mode="state", sim_backend="cpu", render_backend=SEASON_RENDER, scene_idx=0, assisted_grasp=False,
+                     sim_config={"control_freq": 20, "sim_freq": 100})
+    except Exception as error:   # no RoboCasa assets / no renderer here
+        pytest.skip(f"MikasaSeasonDish-v0 unavailable: {error}")
+    yield e
+    e.close()
+
+
+def test_the_number_is_drawn_per_seed_independently_of_the_condiment_and_shown_with_the_picture(season_env):
+    env = season_env
+    task = env.unwrapped
+    seen = set()
+    for seed in range(60):
+        env.reset(seed=seed)
+        n = int(task.num_shakes.item())
+        assert n in task.cfg.shake_counts
+        seen.add((bool(task.target_is_shaker.item()), n))
+        shown = [bool((a.pose.p[0, 2] < 10).item()) for a in task.fridge_digits.actors]
+        assert shown == [d == n for d in task.cfg.shake_counts]
+        env.reset(seed=seed)
+        assert int(task.num_shakes.item()) == n                       # the same seed, the same number
+    assert len({n for _, n in seen}) == len(task.cfg.shake_counts) and len(seen) > 3
+
+
+def test_the_card_disappears_with_the_picture(season_env):
+    env = season_env
+    task = env.unwrapped
+    env.reset(seed=5)
+    hold = np.zeros(env.action_space.shape)
+    hold[:] = np.r_[task.agent.controller.controllers["arm"].qpos[0].cpu().numpy(), 1.,
+                    task.agent.controller.controllers["body"].qpos[0].cpu().numpy(), 0., 0.]
+    for _ in range(task.cfg.cue_steps):
+        env.step(hold)
+    assert all(bool((a.pose.p[0, 2] > 10).item()) for a in task.fridge_digits.actors + task.fridge_pictures.actors)
+
+
+def test_count_success_and_fail_in_the_scene(season_env, monkeypatch):
+    """The held condiment is placed over the bowl at a given lean each step; the grasp is faked."""
+    from mani_skill.utils.structs import Pose
+    env = season_env
+    task = env.unwrapped
+
+    def episode(leans):
+        env.reset(seed=7)
+        target = task.shaker if bool(task.target_is_shaker.item()) else task.condiment_bottle
+        monkeypatch.setattr(task.agent, "is_grasping",
+                            lambda obj, min_force=0.5: torch.tensor([obj is target], device=task.device))
+        task._elapsed_steps[:] = task.cfg.cue_steps + task.cfg.delay_steps
+        bowl = task.bowl.pose.p[0]
+        hold = np.r_[task.agent.controller.controllers["arm"].qpos[0].cpu().numpy(), 1.,
+                     task.agent.controller.controllers["body"].qpos[0].cpu().numpy(), 0., 0.]
+        info = None
+        for lean in leans:
+            angle = math.radians(180. - lean)            # tilt about world x from upright
+            q = torch.tensor([math.cos(angle / 2), math.sin(angle / 2), 0., 0.], device=task.device)
+            target.set_pose(Pose.create_from_pq(p=bowl + torch.tensor([0., 0., .2], device=task.device), q=q[None]))
+            target.set_linear_velocity(torch.zeros(1, 3, device=task.device))
+            target.set_angular_velocity(torch.zeros(1, 3, device=task.device))
+            info = env.step(hold)[-1]
+        return int(task.num_shakes.item()), info
+
+    n, _ = episode([0])
+    shaken = [180, 90, 5] + [30, 2] * n
+    upright = [90] + [180] * task.cfg.hold_steps          # turned upright again, then held
+    n, info = episode(shaken + upright[:-1])
+    assert int(info["shake_count"].item()) == n and not info["success"].item()
+    n, info = episode(shaken + upright)
+    assert info["success"].item() and not info["fail"].item() and int(info["shake_count"].item()) == n
+    n, info = episode(shaken + [2] * 2 * task.cfg.hold_steps)       # held upside down instead
+    assert int(info["shake_count"].item()) == n and not info["success"].item()
+    n, info = episode([180, 90, 5] + [30, 2] * (n - 1) + upright)  # one shake short
+    assert int(info["shake_count"].item()) == n - 1 and not info["success"].item() and not info["fail"].item()
+    n, info = episode(shaken + [30, 2] + upright)
+    assert info["fail"].item() and not info["success"].item() and int(info["shake_count"].item()) == n + 1
+
+
+def test_the_counter_survives_a_state_round_trip(season_env):
+    env = season_env
+    task = env.unwrapped
+    env.reset(seed=3)
+    task.shake_count[:] = 2
+    task.shake_armed[:] = True
+    task.shake_swung[:] = True
+    state = task.get_state_dict()
+    env.reset(seed=4)
+    task.set_state_dict(state)
+    assert int(task.shake_count.item()) == 2 and bool(task.shake_armed.item()) and bool(task.shake_swung.item())
+    assert int(task.num_shakes.item()) == int(state["num_shakes"].item())

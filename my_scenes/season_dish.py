@@ -1,9 +1,11 @@
 """Season the dish — a memory task in a RoboCasa kitchen, driven by Fetch.
 
 The chore: a bowl waits on the counter and two condiments stand at a station
-further along it. A photo on the fridge shows which condiment the dish needs, then
-disappears. The robot must fetch **that** condiment, hold it over the bowl,
-tip it past an angle, and keep it there.
+further along it. A photo on the fridge shows which condiment the dish needs, with a
+card showing a number next to it, then both disappear. The robot must fetch **that**
+condiment, turn it upside down over the bowl, shake it **that** many times, turn it
+upright again and hold it still (the owner's task since 2026-10-27, upright at the end
+since 10-28; before, one tip past an angle was the pour).
 
 What makes it a memory task rather than a pick-and-place with a colour:
 
@@ -12,6 +14,8 @@ What makes it a memory task rather than a pick-and-place with a colour:
   is *identical* under swapping the answer;
 - the two condiments swap sides per episode, so "always go left" is worth 50 %,
   not 100 %;
+- the number is drawn per episode from `shake_counts`, independently of the condiment, and
+  shaking more than it is a failure (`fail`), so it too has to be remembered;
 - success requires the wrong condiment to be left untouched at its spawn. Without
   that clause a memoryless policy seasons with both and wins every time. That one
   predicate — `distractor_ok` in evaluate() — is what makes the 50 % ceiling true,
@@ -53,6 +57,7 @@ from mani_skill.utils.structs import Actor, Pose
 
 from utils.initial_pose import randomize_initial_joints
 from utils.mikasa.assisted_grasp import AssistedGraspTask
+from utils.mikasa.shake_counter import lean_from_down_deg, step_shakes, step_upright_hold
 from utils.fridge_picture import FridgePictures
 from utils.robocasa_utils import (
     parking_pose,
@@ -103,18 +108,32 @@ def decorate_bowl(builder):
             material=[0.64, 0.81, 0.35, 1.0], name=f"salad_cucumber_flesh_{i}")
 
 #: The task text a language-conditioned policy is given (the VLA dataset's `task`).
-#: It names the chore, never the answer: which condiment the dish needs is shown by
-#: the recipe marker during the cue and is the memory content. No numerals.
+#: It names the chore, never the answer: which condiment the dish needs and how many
+#: shakes it takes are shown by the fridge cue and are the memory content. No numerals.
+#: Salt and pepper are one RoboCasa shaker in two colours (shaker_1 white, shaker_0 black), so
+#: the text names the colour that tells them apart (the owner's call 2026-10-22).
 INSTRUCTIONS = (
+    "Remember whether the picture on the fridge shows the white salt shaker or the "
+    "black pepper shaker, and the number next to it. After the picture disappears, take "
+    "that shaker, turn it upside down over the bowl, shake it as many times as the "
+    "number showed and turn it upright again, leaving the other shaker untouched.",
+)
+#: The text `seasondish-ag-1000ep` was recorded with (profile 26: one tip, before the colours were named).
+INSTRUCTIONS_V1 = (
     "Remember the salt or pepper shown in the picture on the fridge. After the "
     "picture disappears, take that condiment and tip it over the bowl to season "
     "the dish, leaving the other "
     "condiment untouched.",
 )
-
-#: `instruction_version` -> the text. This checkout records the text
-#: `seasondish-ag-1000ep` was recorded with, so only version 1 exists.
-INSTRUCTION_VERSIONS = {1: INSTRUCTIONS}
+#: The one-tip task's text with the colours named (2026-10-22 to 10-27; never collected).
+INSTRUCTIONS_V2 = (
+    "Remember whether the picture on the fridge shows the white salt shaker or the "
+    "black pepper shaker. After the picture disappears, take that shaker and tip it "
+    "over the bowl to season the dish, leaving the other shaker untouched.",
+)
+#: `instruction_version` -> the instructions: 1 as recorded for the one-tip task, 2 its text with
+#: the colours named, 3 the current task (the number and the shakes).
+INSTRUCTION_VERSIONS = {1: INSTRUCTIONS_V1, 2: INSTRUCTIONS_V2, 3: INSTRUCTIONS}
 
 # Where the cue marker goes while it must not be seen. The constant, and the
 # teleport-in-evaluate idiom, are MIKASA-Robo's: memory_envs/chain_rule_transfer.py:47
@@ -145,8 +164,15 @@ class SeasonDishConfig:
     you can see `success=False` but not which of six criteria missed.
     """
 
-    horizon: int = int(os.environ.get("MIKASA_HORIZON", "1100"))
+    horizon: int = int(os.environ.get("MIKASA_HORIZON", "2000"))
     """Episode length. Must equal max_episode_steps in the decorator.
+
+    **2000 since 2026-10-28 (up to 9 shakes, upright again at the end), 1300 on 10-27, was
+    1100.** On the one-tip task the successes of seasondish-ag-1000ep took median 905 steps
+    and 294 of 1044 ended within 100 steps of 1100. Measured on the shaking pour at the
+    planner's own speed (2026-10-28): the turn over takes ~90 steps, each shake ~60, the turn
+    upright again ~90 and the hold ~22, and the pour started as late as step 970, so nine
+    shakes end near step 1710.
 
     Overridable with `MIKASA_HORIZON` (default unchanged, so the registered task is
     byte-identical unless it is set). K79g needs the horizon out of the way to test the
@@ -166,16 +192,53 @@ class SeasonDishConfig:
     initial_torso_jitter_m: float = 0.01
     initial_head_jitter_rad: float = 0.05
 
-    cue_steps: int = 100
-    "The fridge picture is visible at steps 0 through 99 and absent at step 100."
+    cue_steps: int = 50
+    """The fridge picture and the number card are visible at steps 0 through 49 and absent at
+    step 50: 2.5 s (owner 2026-10-28 «давай сократим до 50 шагов»; 100 until then). The head
+    settles on them by step ~20 (measured on 20 recorded episodes), so the cameras hold a
+    steady view for ~30 steps, 15 frames at 10 Hz."""
     fridge_picture_width: float = 0.3
     fridge_start_distance: float = 0.9
 
     delay_steps: int = 40
     "Blank window after the cue. Earliest possible success is cue_steps + delay_steps."
 
-    hold_steps: int = 15
-    "Consecutive steps the pour pose must hold. ~0.75 s at the default control rate."
+    hold_steps: int = 10
+    """Steps the condiment must be held upright and still after the last shake, 0.5 s at 20 Hz
+    (`shake_counter.step_upright_hold`; the owner 2026-10-28: «можно даже замереть на 0.5 секунд»;
+    20 upside down on 10-27, 15 when the task was one tip)."""
+
+    # --- the number and the shakes (owner 2026-10-27) ------------------------------
+    shake_counts: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9)
+    """The numbers the fridge card can show, drawn uniformly per episode: 1-9 (the owner,
+    2026-10-28 «только цифры 1-9»; 1-3 on 10-27)."""
+    shake_out_deg: float = 20.0
+    """Lean from straight down at which an armed shaker over the bowl counts one shake
+    (`utils/mikasa/shake_counter.py`). The oracle swings the wrist roll 30 deg back toward upright."""
+    shake_return_deg: float = 10.0
+    """Lean from straight down the shaker must come back within for a shake to count."""
+    # The final hold, upright again (owner 2026-10-28: «вернуть вверх, как была»; micro-jitter is
+    # fine, reasonably upright is enough). Numbers from a review by an Opus subagent, checked
+    # against 28 recorded episodes, which end 0.1-0.7 deg from upright.
+    upright_enter_deg: float = 15.0
+    """Tilt from straight up at which the held condiment counts as upright: the carry gate's 15."""
+    upright_leave_deg: float = 20.0
+    """Tilt past which it stops counting as upright once it did (hysteresis against chatter)."""
+    hold_grace_steps: int = 2
+    """Consecutive steps past `upright_leave_deg` that neither count nor reset the hold."""
+    hold_still_deg: float = 5.0
+    """Spread of tilt the counted hold steps may span (still, not turning through the cone). Tilt,
+    not angular velocity: SAPIEN's reads hundreds of deg/s under the grasp constraint."""
+    digit_card_width: float = 0.30
+    """Side of the square number card, metres (the condiment picture is `fridge_picture_width`).
+    Rendered 2026-10-27 from both head cameras at the cue gaze: 0.15 was a ~10 px digit, 0.20 reads
+    on every seed tried. 0.30, the picture's own size, with the digit drawn 1.3x taller on the card
+    (owner 2026-10-28 «сделай цифру побольше»)."""
+    digit_card_side: str = "below"
+    """Where the card hangs: 'below' or 'above' the picture. Below (2026-10-27): above, the resting
+    arm covers part of the card in both head cameras; below, neither."""
+    digit_card_gap: float = 0.03
+    "Clear door between the picture and the card, metres."
 
     # --- placement, in the counter's own frame -----------------------------
     bowl_along: float = 0.85
@@ -397,6 +460,27 @@ class SeasonDishConfig:
         assert self.placement_draw in ("joint", "pair-first"), self.placement_draw
         assert self.distractor_move_tol > 0 and self.grasp_min_force > 0
         assert self.marker_radius > 0 and self.marker_height > 0
+        assert self.shake_counts and len(set(self.shake_counts)) == len(self.shake_counts), self.shake_counts
+        assert all(1 <= int(n) <= 9 for n in self.shake_counts), self.shake_counts
+        assert 0.0 <= self.shake_return_deg < self.shake_out_deg < 90.0, (
+            self.shake_return_deg, self.shake_out_deg)
+        assert self.shake_return_deg <= 180.0 - self.pour_tilt_deg, (
+            "the rest pose after a shake must count as poured", self.shake_return_deg, self.pour_tilt_deg)
+        assert 0.0 < self.upright_enter_deg <= self.upright_leave_deg < 90.0, (
+            self.upright_enter_deg, self.upright_leave_deg)
+        assert self.hold_grace_steps >= 0 and self.hold_still_deg > 0.0, (self.hold_grace_steps, self.hold_still_deg)
+        assert self.digit_card_side in ("below", "above"), self.digit_card_side
+        assert self.digit_card_width > 0 and self.digit_card_gap >= 0
+
+    def digit_card_offset(self) -> float:
+        """Height of the number card's centre over the picture's, metres.
+
+        Example:
+            >>> round(SeasonDishConfig().digit_card_offset(), 3)
+            -0.33
+        """
+        reach = 0.5 * self.fridge_picture_width + self.digit_card_gap + 0.5 * self.digit_card_width
+        return -reach if self.digit_card_side == "below" else reach
 
 
 @register_env(
@@ -424,7 +508,9 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
     condiment_bottle: Actor
 
     def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0,
-                 instruction_version: int = 1, **kwargs):
+                 instruction_version: int = 3, **kwargs):
+        # instruction_version 3, the default, is the shaking task's text (INSTRUCTION_VERSIONS);
+        # 1 and 2 are the one-tip task's, kept so its recorded text stays known.
         if instruction_version not in INSTRUCTION_VERSIONS:
             raise ValueError(f"instruction_version must be one of {sorted(INSTRUCTION_VERSIONS)}")
         self.instruction_version = int(instruction_version)
@@ -745,6 +831,18 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
             width=self.cfg.fridge_picture_width,
             front_distance=self.cfg.fridge_start_distance,
         )
+        # The number card hangs next to the picture (tools/make_digit_cards.py draws them);
+        # card j shows `shake_counts[j]`. Shown and hidden with the picture.
+        self.fridge_digits = FridgePictures(
+            self, [pictures / f"digit_{int(n)}.png" for n in self.cfg.shake_counts],
+            width=self.cfg.digit_card_width,
+            front_distance=self.cfg.fridge_start_distance,
+            z_offset=self.cfg.digit_card_offset(),
+            name="fridge_digit",
+        )
+        # Where the cue is looked at: midway between the picture and the card, the same
+        # point for every answer.
+        self.cue_focus = 0.5 * (self.fridge_pictures.home[:, :3] + self.fridge_digits.home[:, :3])
 
         # Cache the homes as device tensors once. Rebuilding numpy every step costs
         # a host-to-device copy, and float64 numpy silently promotes the whole
@@ -793,6 +891,16 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         self.station_left_is_shaker = torch.zeros(n, dtype=torch.bool, device=dev)
         self.pour_hold = torch.zeros(n, dtype=torch.int32, device=dev)
         self._pour_last_eval_step = torch.full((n,), -1, dtype=torch.int32, device=dev)
+        # The number on the card, its card index, and the shake counter (shake_counter.py).
+        self.num_shakes = torch.ones(n, dtype=torch.int32, device=dev)
+        self._digit_index = torch.zeros(n, dtype=torch.long, device=dev)
+        self.shake_count = torch.zeros(n, dtype=torch.int32, device=dev)
+        self.shake_armed = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.shake_swung = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.hold_inside = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.hold_grace = torch.zeros(n, dtype=torch.int32, device=dev)
+        self.hold_low = torch.full((n,), math.inf, device=dev)
+        self.hold_high = torch.full((n,), -math.inf, device=dev)
         self._distractor_home = torch.zeros((n, 3), dtype=torch.float32, device=dev)
         self._marker_home = torch.zeros((n, 3), dtype=torch.float32, device=dev)
         # The bowl where it comes to rest, captured at `cue_steps` (K73).
@@ -893,6 +1001,15 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
             self._robot_start[env_idx] = torch.as_tensor(starts, device=self.device)
             self._restore_robot(env_idx)
 
+            # The number on the card, from its own generator keyed by the episode seed, as
+            # the heading above: every other draw of this reset, and so the layout, stays
+            # what the one-tip task drew for the same seed.
+            digits = [int(np.random.default_rng([int(episode_seeds[min(e, len(episode_seeds) - 1)]), 0x5AC])
+                          .integers(len(self.cfg.shake_counts))) for e in env_idx.tolist()]
+            self._digit_index[env_idx] = torch.as_tensor(digits, dtype=torch.long, device=self.device)
+            self.num_shakes[env_idx] = torch.as_tensor(
+                [int(self.cfg.shake_counts[d]) for d in digits], dtype=torch.int32, device=self.device)
+
             left = self._station_left[env_idx]
             right = self._station_right[env_idx]
             side = side_bits.unsqueeze(-1)
@@ -933,9 +1050,18 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
                 (~self.target_is_shaker).long(),
                 torch.ones(self.num_envs, dtype=torch.bool, device=self.device), env_idx,
             )
+            self.fridge_digits.update(
+                self._digit_index, torch.ones(self.num_envs, dtype=torch.bool, device=self.device), env_idx)
 
             # Task state is not sim state — mask it by hand.
             self.pour_hold[env_idx] = 0
+            self.shake_count[env_idx] = 0
+            self.shake_armed[env_idx] = False
+            self.shake_swung[env_idx] = False
+            self.hold_inside[env_idx] = False
+            self.hold_grace[env_idx] = 0
+            self.hold_low[env_idx] = math.inf
+            self.hold_high[env_idx] = -math.inf
             # Seeded with the drawn pose so `bowl_moved` is defined before `cue_steps`;
             # overwritten with the settled pose at that step (K73).
             self._bowl_settled[env_idx] = bowl_pos[..., :2]
@@ -1127,6 +1253,7 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         # --- the cue, on its schedule --------------------------------------
         cue_visible = self.elapsed_steps < self.cfg.cue_steps
         self.fridge_pictures.update((~self.target_is_shaker).long(), cue_visible)
+        self.fridge_digits.update(self._digit_index, cue_visible)
 
         # --- select target vs distractor by mask, never by indexing actors ---
         m = self.target_is_shaker
@@ -1198,7 +1325,7 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
 
         pour_now = grasp_target & over_bowl & height_ok & tilted & distractor_ok
 
-        # --- the hold counter, idempotent within a step ----------------------
+        # --- the hold and shake counters, idempotent within a step -------------
         # evaluate() mutates, and three call sites invoke it out of band:
         # myrobocasa_planner.py:284 and diagnose_task.py:58,108. Review §11 names
         # exactly this hazard in TakeItBack, where placed_on_sink latches on any
@@ -1206,23 +1333,49 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         # makes a second call within the same step a no-op.
         step = self.elapsed_steps.to(torch.int32)
         advance = step != self._pour_last_eval_step
-        self.pour_hold = torch.where(
-            advance & pour_now,
-            self.pour_hold + 1,
-            torch.where(advance, torch.zeros_like(self.pour_hold), self.pour_hold),
-        )
+        lean_deg = lean_from_down_deg(tilt_rad)
+        held_over_bowl = grasp_target & over_bowl & height_ok & distractor_ok
+        count, armed, swung = step_shakes(self.shake_count, self.shake_armed, self.shake_swung, lean_deg,
+                                          held_over_bowl, self.cfg.shake_out_deg, self.cfg.shake_return_deg)
+        self.shake_count = torch.where(advance, count, self.shake_count)
+        self.shake_armed = torch.where(advance, armed, self.shake_armed)
+        self.shake_swung = torch.where(advance, swung, self.shake_swung)
+        # The hold runs only after the last shake, with the condiment upright again and still
+        # (owner 2026-10-28) and exactly the number on the card counted.
+        held = grasp_target & distractor_ok & (self.shake_count == self.num_shakes)
+        hold, inside, grace, low, high = step_upright_hold(
+            self.pour_hold, self.hold_inside, self.hold_grace, self.hold_low, self.hold_high,
+            torch.rad2deg(tilt_rad), held, self.cfg.upright_enter_deg, self.cfg.upright_leave_deg,
+            self.cfg.hold_grace_steps, self.cfg.hold_still_deg)
+        self.pour_hold = torch.where(advance, hold, self.pour_hold)
+        self.hold_inside = torch.where(advance, inside, self.hold_inside)
+        self.hold_grace = torch.where(advance, grace, self.hold_grace)
+        self.hold_low = torch.where(advance, low, self.hold_low)
+        self.hold_high = torch.where(advance, high, self.hold_high)
+        upright = self.hold_inside
         self._pour_last_eval_step = torch.where(advance, step, self._pour_last_eval_step)
 
         earliest = self.cfg.cue_steps + self.cfg.delay_steps
-        success = (self.pour_hold >= self.cfg.hold_steps) & (self.elapsed_steps >= earliest)
+        success = ((self.pour_hold >= self.cfg.hold_steps) & (self.elapsed_steps >= earliest)
+                   & (self.shake_count == self.num_shakes))
+        # One shake too many can never be taken back: the episode fails there (and ends,
+        # as CabinetSearch's `fail` does).
+        overshaken = self.shake_count > self.num_shakes
 
         # A brace literal, not dict(success=...): the convention check is
         # `"dict(success=" in src.replace(" ", "")` (test_task_conventions.py:161),
         # which a multi-line dict(...) call trips even when it returns intermediates.
         return {
             "success": success,
+            "fail": overshaken & ~success,
             "pour_now": pour_now,
             "pour_hold": self.pour_hold,
+            "num_shakes": self.num_shakes,
+            "shake_count": self.shake_count,
+            "shake_armed": self.shake_armed,
+            "shake_swung": self.shake_swung,
+            "upright": upright,
+            "lean_deg": lean_deg,
             "tilted": tilted,
             "tilt_rad": tilt_rad,
             "over_bowl": over_bowl,
@@ -1247,7 +1400,7 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
     # -------------------------------------------------------------------- obs --
 
     def get_language_instruction(self, **kwargs):
-        """The recorded text for every env: the chore, the answer is the cue."""
+        """The version's first text for every env: the text is the chore, the answer is the cue."""
         return [INSTRUCTION_VERSIONS[self.instruction_version][0]] * self.num_envs
 
     def _get_obs_extra(self, info: dict) -> dict:
@@ -1260,7 +1413,7 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
            in that order, and no key is ever named for the target.
         2. **Conditional keys.** The observation space is frozen from the t=0
            observation (sapien_env.py:330, :377). Emitting the cue only during the
-           cue phase changes the dict shape at step 100. It is always emitted, and
+           cue phase changes the dict shape at `cue_steps`. It is always emitted, and
            masked to zeros instead.
         3. **Obs mode.** _get_obs_extra runs in every mode, so an ungated cue hands
            an image policy the answer in clean symbolic form and the marker becomes
@@ -1285,6 +1438,8 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
             cue = torch.stack([self.target_is_shaker, ~self.target_is_shaker,
                                torch.zeros_like(self.target_is_shaker)], dim=-1).float()
             zero = torch.zeros_like(cue)
+            # The number as a one-hot over 1..9, masked like the condiment.
+            digit = torch.nn.functional.one_hot((self.num_shakes - 1).long(), 9).float()
             obs.update(
                 bowl_pose=self.bowl.pose.raw_pose,
                 shaker_pose=self.shaker.pose.raw_pose,
@@ -1292,6 +1447,7 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
                 # Masked, not omitted. After the cue phase this is exactly zeros,
                 # which is the same tensor in both halves of the answer symmetry.
                 recipe_cue=torch.where(cue_visible.unsqueeze(-1), cue, zero),
+                count_cue=torch.where(cue_visible.unsqueeze(-1), digit, torch.zeros_like(digit)),
             )
         return obs
 
@@ -1313,6 +1469,15 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         state["marker_home"] = self._marker_home.clone()
         state["bowl_settled"] = self._bowl_settled.clone()
         state["placement_fell_back"] = self._placement_fell_back.clone()
+        state["num_shakes"] = self.num_shakes.clone()
+        state["digit_index"] = self._digit_index.clone()
+        state["shake_count"] = self.shake_count.clone()
+        state["shake_armed"] = self.shake_armed.clone()
+        state["shake_swung"] = self.shake_swung.clone()
+        state["hold_inside"] = self.hold_inside.clone()
+        state["hold_grace"] = self.hold_grace.clone()
+        state["hold_low"] = self.hold_low.clone()
+        state["hold_high"] = self.hold_high.clone()
         return state
 
     def set_state_dict(self, state: dict, env_idx: torch.Tensor = None):
@@ -1337,6 +1502,15 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
             "marker_home": "_marker_home",
             "bowl_settled": "_bowl_settled",
             "placement_fell_back": "_placement_fell_back",
+            "num_shakes": "num_shakes",
+            "digit_index": "_digit_index",
+            "shake_count": "shake_count",
+            "shake_armed": "shake_armed",
+            "shake_swung": "shake_swung",
+            "hold_inside": "hold_inside",
+            "hold_grace": "hold_grace",
+            "hold_low": "hold_low",
+            "hold_high": "hold_high",
         }
         for key, attr in restore.items():
             if key in state:
