@@ -165,10 +165,13 @@ class SeasonDishConfig:
     you can see `success=False` but not which of six criteria missed.
     """
 
-    horizon: int = int(os.environ.get("MIKASA_HORIZON", "2000"))
+    horizon: int = int(os.environ.get("MIKASA_HORIZON", "2500"))
     """Episode length. Must equal max_episode_steps in the decorator.
 
-    **2000 since 2026-10-28 (up to 9 shakes, upright again at the end), 1300 on 10-27, was
+    **2500 since 2026-10-30 (owner)**: 1.5 x the longest oracle episode of
+    seasondish-shake-ag-1000ep (1656 steps; median 1156), so that an evaluated policy slower than
+    the oracle is not cut off; the oracle ends at success long before, so the recorded episodes
+    are the same. **2000 from 2026-10-28 (up to 9 shakes, upright again at the end), 1300 on 10-27, was
     1100.** On the one-tip task the successes of seasondish-ag-1000ep took median 905 steps
     and 294 of 1044 ended within 100 steps of 1100. Measured on the shaking pour at the
     planner's own speed (2026-10-28): the turn over takes ~90 steps, each shake ~60, the turn
