@@ -384,6 +384,8 @@ def accepts_scene_idx(env_id: str) -> bool:
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--scene", "-s", default="MyRoboCasa-v1")
+    p.add_argument("--assisted-grasp", action="store_true",
+                   help="Enable CPU-only contact-gated PhysX grasp assistance")
     p.add_argument(
         "--planner",
         "-p",
@@ -579,6 +581,8 @@ def run_sweep(args, *, make_env=gym.make, recorder_cls=RecordEpisode) -> SweepRe
         robot_uids="ds_fetch",
         control_mode=args.control_mode,
     )
+    if getattr(args, "assisted_grasp", False):
+        make_kwargs["assisted_grasp"] = True
     # Only when asked: passing sim_backend=None is not the same as not passing it,
     # and the defaults here have to stay exactly what they were.
     for flag, value in (("sim_backend", args.sim_backend), ("render_backend", args.render_backend)):

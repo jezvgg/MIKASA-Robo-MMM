@@ -835,7 +835,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
     common.hold_object_in_planner(env, planner, task, task.apple, True, who=WHO)
     tcp = task.agent.tcp.pose[0].sp
     result = move("lift apple", sapien.Pose(tcp.p + [0, 0, 0.07], tcp.q),
-                  axes=(False, False, True))
+                  axes=(False, False, True), contact=True, contact_stretch=1)
     if stopped(result):
         return result
     if not bool(array(task.agent.is_grasping(task.apple)).item()):
@@ -858,9 +858,24 @@ def solve(env, seed=None, debug=False, vis=False, blind=False, *,
     planner.planner.update_from_simulation()
     with transfer_phase(planner, "carry apple over plate"):
         log("transfer apple over plate", goal=hover.p.tolist())
-        result = approach_for_contact(
-            hover, placement_preview, 160,
-            contact_context=lambda: common.touchable(planner, "plate"))
+        # The standoff the first restart set finds can put the held apple through
+        # the plate or the counter eight knots into the straight line (HF seeds
+        # 8250001/25/43/103/122). Nothing has executed yet, so trying a higher
+        # hover and then a wider restart set costs only planning, and a seed whose
+        # first attempt plans sees exactly the motion it saw before.
+        for attempt, (raise_m, restarts) in enumerate(
+                ((0.0, 160), (0.05, 160), (0.10, 160), (0.0, 500))):
+            if attempt:
+                log("transfer hover refused; retrying",
+                    raise_m=raise_m, ik_restarts=restarts)
+                planner.planner.update_from_simulation()
+            result = approach_for_contact(
+                sapien.Pose(hover.p + [0, 0, raise_m], hover.q), placement_preview, restarts,
+                contact_context=lambda: common.touchable(planner, "plate"))
+            if result != -1:
+                break
+        if result == -1:
+            return common.fail(env, WHO, "no transfer path to the plate")
     planner.planner.update_from_simulation()
     if stopped(result):
         return result

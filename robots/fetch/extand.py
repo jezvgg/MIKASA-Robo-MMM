@@ -2488,8 +2488,9 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         return self.follow_forward_path_w_refinement(result, refine)
 
     def follow_forward_path_w_refinement(
-        self, result, refine: bool = False, stop_when=None
+        self, result, refine: bool = False, stop_when=None, body_hold=None
     ):
+        self._reset_execution_noise()
         # K55. A plan can come back `Success` with **no knots**: the goal was already
         # satisfied to within the planner's tolerance, so there is nothing to
         # interpolate. `_final_qpos_dict` then indexes `[-1]` into an empty array and
@@ -2542,6 +2543,12 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
             # measured angles; deliberate gaze changes use hold_head().
             body_action = self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
             body_action[2] = qpos_dict[f"scene-0-{self.robot.name}_torso_lift_joint"]
+            if body_hold is not None:
+                # The TakeIt path holds the torso where the plan started while the arm
+                # plays its knots, so a lifted torso cannot drift with the arm. Yaw is
+                # zeroed because the body controller drives a 3-vector: torso height,
+                # torso yaw, base yaw.
+                body_action[:] = body_hold
 
             base_direction = (
                 self.env_agent.base_link.pose.sp.to_transformation_matrix()[:3, 0]

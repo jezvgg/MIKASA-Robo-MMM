@@ -12,19 +12,27 @@ GRASP_ARRIVE_M = float(os.environ.get("MIKASA_GRASP_ARRIVE_M", "0.03"))
 
 
 def try_grasp(env, planner, task, obj, grasp, reach, *, n_init_qpos: int,
-              approach_max_knots: int, grasp_max_knots: int, grasp_knot_draws: int):
-    """Execute the measured SameDrawer reach, sync, grasp, and contact-stop close."""
+              approach_max_knots: int, grasp_max_knots: int, grasp_knot_draws: int,
+              resync_before_grasp: bool = True, close_on_contact: bool = True,
+              approach_by_line: bool = True):
+    """Execute the measured SameDrawer reach, sync, grasp, and contact-stop close.
+
+    The three trailing switches are the caller's vocabulary from upstream's
+    `oracle_common.try_grasp`; the measured arm here is the same behaviour, so they
+    default to the values `planners/same_drawer_planner.py` passes.
+    """
     reach_result = planner.static_manipulation(
         reach,
         n_init_qpos=int(n_init_qpos),
-        by_line=True,
+        by_line=bool(approach_by_line),
         skim_max_knots=int(approach_max_knots),
     )
     if reach_result == -1 or common.stopped_by_horizon(planner):
         return reach_result, False
 
     # The executed reach moves the apple; plan the grasp against the resulting world.
-    planner.planner.update_from_simulation()
+    if resync_before_grasp:
+        planner.planner.update_from_simulation()
     grasp_result = planner.static_manipulation(
         grasp,
         n_init_qpos=int(n_init_qpos),
@@ -41,9 +49,12 @@ def try_grasp(env, planner, task, obj, grasp, reach, *, n_init_qpos: int,
                    tcp_err=round(tcp_error, 3), tol=GRASP_ARRIVE_M)
         return grasp_result, False
 
-    close_result = planner.close_gripper(
-        stop_when=lambda: bool(common._np(task.agent.is_grasping(obj)).any())
-    )
+    if close_on_contact:
+        close_result = planner.close_gripper(
+            stop_when=lambda: bool(common._np(task.agent.is_grasping(obj)).any())
+        )
+    else:
+        close_result = planner.close_gripper()
     if close_result == -1 or common.stopped_by_horizon(planner):
         return close_result, False
     return close_result, bool(common._np(task.agent.is_grasping(obj)).any())
