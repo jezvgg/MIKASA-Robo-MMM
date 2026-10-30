@@ -273,3 +273,156 @@ def test_rejected_35_degree_grasp_cannot_pour_with_wrist_alone():
 
 def test_parallel_axis_cannot_change_tilt():
     assert tilt_angles([0, 0, 1], [0, 0, 1]) == []
+
+
+# Source group: test_season_shakes.py (the shaking pour of profile 28: the wrist geometry, the
+# planner's shake sequence on stubs, and the shifted hover; the counter and the scene are in
+# test_task_scenes.py)
+import math
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import sapien
+import torch
+
+from planners.oracle.oracle_season_dish import (SHAKE_AMPLITUDE_DEG, SHAKE_LEAN_MARGIN_DEG,
+                                                SHAKE_LEAN_MARGIN_EXECUTED_DEG, lean_after, pour_and_shake,
+                                                rest_angles, shake_geometry_ok, swing_angle)
+
+SHAKE_CFG = SimpleNamespace(shake_out_deg=20., shake_return_deg=10., pour_axis_body=[0, 0, 1], pour_xy_radius=.1,
+                            pour_min_clearance=.05, pour_max_clearance=.3, hold_steps=20)
+
+
+def test_horizontal_wrist_rests_short_of_upside_down_and_swings_back_toward_upright():
+    rest = 10. - SHAKE_LEAN_MARGIN_DEG
+    deltas = rest_angles([1, 0, 0], [0, 0, 1], rest)
+    assert [round(math.degrees(d)) for d in deltas[:2]] == [173, -173]
+    for d in deltas[:2]:
+        swing = swing_angle(d, SHAKE_AMPLITUDE_DEG)
+        assert abs(swing) < abs(d)                                  # toward the start: D2 spends no more
+        assert lean_after([1, 0, 0], [0, 0, 1], d) == pytest.approx(rest)
+        assert lean_after([1, 0, 0], [0, 0, 1], swing) == pytest.approx(rest + SHAKE_AMPLITUDE_DEG)
+        assert shake_geometry_ok([1, 0, 0], [0, 0, 1], d, SHAKE_CFG)
+
+
+def test_the_whole_roll_fits_checklist_d2():
+    """D2 (`paths.RollPathPlanner.accepts`): span <= pi - 0.05 rad, 177.1 deg."""
+    for margin in (SHAKE_LEAN_MARGIN_DEG, SHAKE_LEAN_MARGIN_EXECUTED_DEG):
+        d = rest_angles([1, 0, 0], [0, 0, 1], 10. - margin)[0]
+        assert math.degrees(abs(d)) <= math.degrees(math.pi - 0.05) - 3.
+
+
+@pytest.mark.parametrize("incline_deg,ok", [(3., True), (4., False), (12., False)])
+def test_an_inclined_wrist_axis_cannot_come_within_twice_its_incline_of_upside_down(incline_deg, ok):
+    """The upright shaker's axis sweeps a cone about the wrist axis; with that axis `i` below
+    horizontal the cone passes 2i from straight down, and the rest leans 10 - 3 deg."""
+    tilt = math.radians(incline_deg)
+    axis = [math.cos(tilt), 0, -math.sin(tilt)]
+    deltas = rest_angles(axis, [0, 0, 1], 10. - SHAKE_LEAN_MARGIN_DEG)
+    assert bool(deltas) is ok
+    if ok:
+        assert shake_geometry_ok(axis, [0, 0, 1], deltas[0], SHAKE_CFG)
+
+
+def stub(line_status="Success", grasped=True, shake_count=lambda wrist: 0):
+    """A held condiment at the wrist pivot over the bowl, wrist axis along world x (as the test_season_pour_paths group)."""
+    q = np.zeros(15)
+    names = ['shoulder_pan_joint', 'shoulder_lift_joint', 'upperarm_roll_joint', 'elbow_flex_joint',
+             'forearm_roll_joint', 'wrist_flex_joint', 'wrist_roll_joint']
+    indices = [5, 7, 8, 9, 10, 11, 12]
+    joints = {n: SimpleNamespace(active_index=[i]) for n, i in zip(names, indices)}
+    joints['torso_lift_joint'] = SimpleNamespace(active_index=[3])
+    robot = SimpleNamespace(
+        active_joints_map=joints, get_qpos=lambda: torch.tensor(q[None]),
+        links_map={'wrist_roll_link': SimpleNamespace(pose=[SimpleNamespace(sp=sapien.Pose([0, 0, .2]))])})
+    target = SimpleNamespace(pose=[SimpleNamespace(sp=sapien.Pose([0, 0, .2]))])
+    task = SimpleNamespace(
+        agent=SimpleNamespace(robot=robot, is_grasping=lambda _: torch.tensor([grasped]),
+                              controller=SimpleNamespace(controllers={'arm': SimpleNamespace(
+                                  config=SimpleNamespace(joint_names=names))})),
+        cfg=SHAKE_CFG, bowl=SimpleNamespace(pose=SimpleNamespace(p=torch.tensor([[0., 0., 0.]]))), control_timestep=.05)
+    calls, counts = [], {"n": 0}
+
+    def line(goal, current, **kwargs):
+        np.testing.assert_array_equal(np.delete(goal, 12), np.delete(current, 12))
+        calls.append(('plan', math.degrees(goal[12] - current[12])))
+        return {'status': line_status, 'goal': goal[12]}
+
+    def info():
+        return {'shake_count': np.array([counts["n"]]), 'shake_armed': np.array([True]), 'shake_swung': np.array([True]),
+                'upright': np.array([True]), 'grasp_target': np.array([True]),
+                'success': np.array([True]), 'pour_hold': np.array([SHAKE_CFG.hold_steps + 2])}
+
+    planner = SimpleNamespace(planner=SimpleNamespace(update_from_simulation=lambda: None, plan_qpos_line=line),
+                              fixed_action_targets={9: .42}, truncated=False)
+
+    def follow(path, *, refine):
+        calls.append(('move', math.degrees(path['goal'])))
+        assert planner.fixed_action_targets[7] == -1. and 6 not in planner.fixed_action_targets
+        counts["n"] = shake_count(path['goal'])
+        return (None, 0., False, False, info())
+
+    planner.follow_forward_path_w_refinement = follow
+    planner.idle_steps = lambda t=1: (None, 0., False, False, info())
+    return planner, task, target, calls
+
+
+def test_every_leg_is_planned_before_the_first_moves_and_each_shake_swings_back_toward_upright():
+    p, task, target, calls = stub()
+    pour_and_shake(SimpleNamespace(), p, task, target, shakes=3)
+    planned = [c for c in calls if c[0] == 'plan']
+    assert len(planned) == 4 and calls[:4] == planned                 # in, out, back, home
+    rest = 180. - (10. - SHAKE_LEAN_MARGIN_EXECUTED_DEG)
+    moves = [c[1] for c in calls if c[0] == 'move']
+    assert moves == pytest.approx([rest, rest - 30, rest, rest - 30, rest, rest - 30, rest, 0.], abs=1e-9)
+    assert p.fixed_action_targets == {9: .42}
+
+
+def test_a_leg_waits_only_until_the_counter_has_seen_it():
+    """No refinement wait (D6): once the counter has seen a leg (swung on an out leg, counted on a
+    back leg, upright on the way home), the next leg starts; only the final hold idles."""
+    outs = []
+
+    def count(goal):                                   # a shake counts when it comes back
+        if 100. < math.degrees(goal) < 160.:
+            outs.append(goal)
+            return len(outs) - 1
+        return len(outs)
+
+    p, task, target, calls = stub(shake_count=count)
+    idles, idle = [], p.idle_steps
+    p.idle_steps = lambda t=1: (idles.append(dict(p.fixed_action_targets)), idle(t))[1]
+    pour_and_shake(SimpleNamespace(), p, task, target, shakes=3)
+    assert len(outs) == 3 and len(idles) == 1
+
+
+def test_a_refused_leg_fails_before_any_motion():
+    p, task, target, calls = stub(line_status="collision")
+    assert pour_and_shake(SimpleNamespace(), p, task, target, shakes=2) == -1
+    assert calls and all(c[0] == 'plan' for c in calls)
+    assert p.fixed_action_targets == {9: .42}
+
+
+def test_no_grasp_no_plan():
+    p, task, target, calls = stub(grasped=False)
+    assert pour_and_shake(SimpleNamespace(), p, task, target, shakes=1) == -1
+    assert calls == []
+
+
+# ---- the scene (needs ManiSkill and the RoboCasa assets) ---------------------------------------------------
+
+
+def test_a_shifted_hover_puts_the_rest_where_the_hover_was():
+    """Roll axis along x through the wrist; the condiment 5 cm beside it along y. Turning it nearly
+    upside down carries it ~10 cm to the other side, so the hover moves 10 cm the other way."""
+    pytest.importorskip("mplib")
+    from planners.season_dish_planner import rest_shifts
+    fk = SimpleNamespace(joints={'gripper_link': (None, 'gripper_axis', 'fixed', np.eye(4), None)})
+    task = SimpleNamespace(cfg=SHAKE_CFG)
+    desired = np.eye(4); desired[:3, 3] = [0., .05, 0.]
+    shifts = rest_shifts(fk, task, desired, np.linalg.inv(desired))      # the wrist frame at the origin
+    rest = math.radians(180. - (10. - SHAKE_LEAN_MARGIN_DEG))
+    assert len(shifts) == 2
+    for shift in shifts:
+        assert shift == pytest.approx((0., .05 * (1 - math.cos(rest))), abs=1e-4)

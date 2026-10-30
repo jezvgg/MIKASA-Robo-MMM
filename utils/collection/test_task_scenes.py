@@ -688,7 +688,7 @@ def test_nudge_arm_move_refusal_returns_failure_without_unpacking(monkeypatch, f
 
 
 # Source group: test_season_shakes.py (the shake counter and the scene; the planner tests of the
-# shaking pour stay with its planner on feat/seasondish-planner)
+# shaking pour are in test_task_motion.py)
 import math
 import os
 
