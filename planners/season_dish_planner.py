@@ -56,7 +56,6 @@ from planners.oracle.oracle_season_dish import (
     measured,
     preview_roll_history,
     pour_and_shake,
-    pour_with_wrist,
     rest_angles,
     rotation,
     SHAKE_AMPLITUDE_DEG,
@@ -99,17 +98,12 @@ def held_transform(task, target):
             * target.pose[0].sp).to_transformation_matrix().astype(float)
 
 
-def shaking(task):
-    """Is this the shaking task (an upside-down pour and 30 deg shakes, 2026-10-27)?"""
-    return hasattr(task.cfg, 'shake_out_deg')
-
-
 def pour_targets(planner, task, q, hand_object):
     """Cheap endpoint geometry and joint-budget checks; no path or IK calls.
 
-    Yields (goal, reserve): the one-tip pour's 165 deg goal and its reserve, or for the shaking task
-    the near-upside-down goal and, as the rows of `reserve`, it and the shake swing, so the roll window
-    and the joint limits are checked for the whole pour before the robot commits to the transfer."""
+    Yields (goal, reserve): the near-upside-down goal and, as the rows of `reserve`, it and the shake
+    swing, so the roll window and the joint limits are checked for the whole pour before the robot
+    commits to the transfer."""
     p = planner.planner
     fk = kinematics(planner, task)
     wrist = fk.matrix(q, 'wrist_roll_link')
@@ -118,7 +112,7 @@ def pour_targets(planner, task, q, hand_object):
     bowl = task.bowl.pose[0].sp.p
     index = fk.indices['wrist_roll_joint']
     # Preview needs room for the measured model-to-physics deviation. These
-    # reserves tighten candidate selection; execution and checker stay at 165/155.
+    # reserves tighten candidate selection only.
     parameters=getattr(task,'motion_parameters',{})
     clearance_reserve=float(parameters.get('pour_preview_clearance_reserve_m',0.))
     wrist_reserve=float(parameters.get('pour_preview_wrist_reserve_rad',0.))
@@ -127,32 +121,19 @@ def pour_targets(planner, task, q, hand_object):
         if reasons is not None:
             reasons.append(f"{key}{'+' if delta > 0 else '-'}")
     object_axis = obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body)
-    if shaking(task):
-        for delta in rest_angles(axis, object_axis, task.cfg.shake_return_deg - SHAKE_LEAN_MARGIN_DEG):
-            if not shake_geometry_ok(axis, object_axis, delta, task.cfg):
-                note('shake_lean', delta); continue
-            swing = swing_angle(delta, SHAKE_AMPLITUDE_DEG)
-            ends = [pivot + rotation(axis, d) @ (obj[:3, 3] - pivot) for d in (delta, swing)]
-            if any(np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius for end in ends):
-                note('miss_xy', delta); continue
-            if not all(task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve for end in ends):
-                note('miss_height', delta); continue
-            goal = q.copy(); goal[index] += delta
-            out = q.copy(); out[index] += swing
-            reserve = np.vstack([goal + 0., out]); reserve[0, index] += np.sign(delta) * wrist_reserve
-            if not p.accepts(np.vstack([q, goal, reserve])):
-                note('roll_window', delta); continue
-            yield goal, reserve
-        return
-    for delta in tilt_angles(axis, object_axis, 165.):
-        end = pivot + rotation(axis, delta) @ (obj[:3, 3] - pivot)
-        if np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius:
+    for delta in rest_angles(axis, object_axis, task.cfg.shake_return_deg - SHAKE_LEAN_MARGIN_DEG):
+        if not shake_geometry_ok(axis, object_axis, delta, task.cfg):
+            note('shake_lean', delta); continue
+        swing = swing_angle(delta, SHAKE_AMPLITUDE_DEG)
+        ends = [pivot + rotation(axis, d) @ (obj[:3, 3] - pivot) for d in (delta, swing)]
+        if any(np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius for end in ends):
             note('miss_xy', delta); continue
-        if not task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve:
+        if not all(task.cfg.pour_min_clearance+clearance_reserve <= end[2] - bowl[2] <= task.cfg.pour_max_clearance-clearance_reserve for end in ends):
             note('miss_height', delta); continue
         goal = q.copy(); goal[index] += delta
-        reserve=goal.copy();reserve[index]+=np.sign(delta)*wrist_reserve
-        if not p.accepts(np.vstack([q,goal,reserve])):
+        out = q.copy(); out[index] += swing
+        reserve = np.vstack([goal + 0., out]); reserve[0, index] += np.sign(delta) * wrist_reserve
+        if not p.accepts(np.vstack([q, goal, reserve])):
             note('roll_window', delta); continue
         yield goal, reserve
 
@@ -168,7 +149,7 @@ def preview_pour(planner, task, q, hand_object):
             continue
         if path.get('status') != 'Success' or not path_clear(planner, q, path['position']):
             continue
-        if shaking(task) and not _swings_clear(planner, task, goal, np.atleast_2d(reserve)[1:]):
+        if not _swings_clear(planner, task, goal, np.atleast_2d(reserve)[1:]):
             continue
         path['preview_reserve_qpos'] = reserve
         return path
@@ -290,7 +271,7 @@ def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferr
     shipped=[(0.,0.,0.),(.06,0.,0.),(0.,.06,0.),(-.05,0.,0.),
              (0.,0.,30.),(0.,0.,-30.),(.06,0.,30.),(.06,0.,-30.)]
     options=[v + (None,) for v in shipped]
-    if more and shaking(task):
+    if more:
         options += [v + (None,) for v in EXTRA_SPINS]
         for extra, back, spin in shipped:
             desired = obj.copy()
