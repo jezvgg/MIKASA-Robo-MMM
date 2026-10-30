@@ -660,6 +660,39 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         self.max_refine_steps = (
             self.MAX_REFINE_STEPS if max_refine_steps is None else int(max_refine_steps)
         )
+        # Legacy planners (the TakeIt family, FridgeVeggies) drive their own execution
+        # noise through these; the collection profiles use `utils/collection/execution_noise`
+        # instead. The defaults leave both covered paths untouched: with `action_noise = 0`
+        # `_apply_execution_noise` is the identity.
+        self.action_noise = 0.0
+        self.noise_hold = 0
+        self.execution_noise_enabled = True
+        self._execution_noise_rng = np.random.default_rng()
+        self._execution_noise = None
+        self._execution_noise_steps = 0
+
+    def set_execution_noise_seed(self, seed: int) -> None:
+        self._execution_noise_rng = np.random.default_rng(2_000_003 + int(seed))
+        self._reset_execution_noise()
+
+    def _reset_execution_noise(self) -> None:
+        self._execution_noise = None
+        self._execution_noise_steps = 0
+
+    def _apply_execution_noise(self, arm_action):
+        if (
+            not getattr(self, "execution_noise_enabled", True)
+            or self.action_noise <= 0.0
+            or self.noise_hold <= 0
+        ):
+            return arm_action
+        if self._execution_noise is None or self._execution_noise_steps <= 0:
+            self._execution_noise = self._execution_noise_rng.normal(
+                0.0, self.action_noise, size=np.asarray(arm_action).shape
+            )
+            self._execution_noise_steps = self.noise_hold
+        self._execution_noise_steps -= 1
+        return np.asarray(arm_action, dtype=np.float64) + self._execution_noise
 
     @property
     def elapsed_steps(self) -> int:

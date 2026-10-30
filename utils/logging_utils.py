@@ -144,6 +144,7 @@ class PlannerLogger(gym.Wrapper):
         except OSError as e:
             raise OSError(f"cannot create event log in {self.dir}: {e}") from e
         self._objs = {}  # name -> open csv file handle
+        self._step_observers = []
         self._finished = False
 
     # --- public API -----------------------------------------------------
@@ -185,6 +186,13 @@ class PlannerLogger(gym.Wrapper):
             label: self.track_object(handle, label)
             for label, handle in candidates
         }
+
+    def add_step_observer(self, callback):
+        self._step_observers.append(callback)
+        return callback
+
+    def remove_step_observer(self, callback):
+        self._step_observers.remove(callback)
 
     def log_event(self, event, message="", **extra):
         rec = {
@@ -243,6 +251,8 @@ class PlannerLogger(gym.Wrapper):
     def step(self, action):
         self._step += 1
         obs, reward, terminated, truncated, info = self.env.step(action)
+        for observer in tuple(self._step_observers):
+            observer()
         if self.log_freq and self._step % self.log_freq == 0:
             for name in list(self._objs):
                 self._write_row(name)

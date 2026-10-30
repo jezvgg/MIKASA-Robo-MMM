@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "status": "robomme_paper_verified_remaining_execution_resolved_by_user_scope",
+  "reference_report": "research/memory_policy_finetuning_report.md",
+  "execution_deferrals": {
+    "hamlet_cogact": {
+      "status": "implementation_cancelled_by_user",
+      "reason": "Official CogACT/Prismatic dependency meta-llama/Llama-2-7b-hf denied access to the existing authorized token",
+      "training_allowed": false,
+      "legacy_hamlet_gr00t_n16_is_preserved_not_relabelled_as_cogact": true
+    },
+    "memoryvla": {
+      "status": "deferred_by_user_until_licensed_access",
+      "reason": "Original prism-dinosiglip-224px+7b registry and loader require gated meta-llama/Llama-2-7b-hf",
+      "training_allowed": false
+    },
+    "ponderpounce": {
+      "status": "deferred_by_user_until_grounding_annotations_exist",
+      "reason": "Fetch dataset lacks timed transition/subgoal targets required by the original RoboMME grounding loss",
+      "training_allowed": false,
+      "author_recipe_below_is_not_replaced_by_action_only_ablation": true
+    }
+  },
+  "rules": {
+    "author_recipe_is_not_smoke": true,
+    "smoke_optimizer_steps_per_mandatory_stage": 3,
+    "smoke_may_reduce": ["global_batch", "per_device_batch", "episode_context_duration", "history_count_if_declared"],
+    "smoke_must_preserve": ["train_freeze_map", "loss_terms_and_weights", "gradient_paths", "mandatory_stage_transfer", "real_weights", "both_dataset_tasks"],
+    "lora_in_author_recipes": false,
+    "unknown_is_not_permission_to_guess": true,
+    "success_rate_claimed_by_smoke": false,
+    "large_artifacts_committed": false
+  },
+  "fetch": {
+    "dataset": "jezv/MyRoboCasa",
+    "dataset_revision": "2ba02ba9a1fce1e94eb93c67ee62dbe5030ae6d4",
+    "tasks": ["takeitback", "veggie"],
+    "state_dim": 12,
+    "action_dim": 13,
+    "action_groups": ["arm_joint_targets:7", "gripper_target:1", "body_joint_targets:3", "base_forward_velocity:1", "base_yaw_velocity:1"],
+    "action_is_eef_delta": false,
+    "data_hz": 10,
+    "control_hz": 20,
+    "action_repeat": 2,
+    "available_cameras": ["left_base_camera_link", "fetch_hand", "right_base_camera_link"],
+    "camera_and_state_usage": "backbone-specific: do not add extra modality fusion and call it the original architecture",
+    "normalization": "train split only; valid channel mask; preserve mixed joint/velocity semantics",
+    "history": "causal, episode-isolated, no future-ready cognition; bounded cache",
+    "workspace": "~/policy-integration-20261019",
+    "maximum_workspace_bytes": 400000000000,
+    "watchdog_stop_bytes": 350000000000
+  },
+  "sources": {
+    "robomme": {"repository": "https://github.com/RoboMME/robomme_policy_learning", "revision": "ecf086c3be7c2223167d9bb2f6ef1f0a6e24353b", "paper": "https://arxiv.org/abs/2603.04639v1", "evidence": "Appendix A.1-A.3, B.3-B.4, Table7"},
+    "hamlet": {"repository": "https://github.com/myungkyuKoo/HAMLET-Isaac-GR00T", "revision": "63b40557503e32dd93baebb24923e8ebf42121ef", "paper": "https://arxiv.org/abs/2510.00695v3", "evidence": "Section3, Appendix A.3-A.4", "caution": "This release is GR00T N1.6, NOT an official CogACT implementation."},
+    "cogact_base": {"repository": "https://github.com/microsoft/CogACT", "revision": "b174a1b86deedfab4d198d935207e7bb0527994e", "checkpoint": "CogACT/CogACT-Base", "checkpoint_revision": "6550bf0992f162fc5d74f14ffee30771a9433363"},
+    "memoryvla": {"repository": "https://github.com/shihao1895/MemoryVLA", "revision": "d732ea9072bc063399ccc817aed74ab172eb50be", "paper": "https://arxiv.org/abs/2508.19236v2", "evidence": "Section4.1; Appendix C.1; train.py:179-200; script/train/libero/train_libero_spatial.sh"},
+    "memoryvla_robomme": {"repository": "https://github.com/RoboMME/MemoryVLA", "revision": "f7befabcddafc72738b23c78cf965ae39fbd22f9", "role": "benchmark adaptation reference, not a new author recipe"},
+    "openvla_base": {"checkpoint": "openvla/openvla-7b-prismatic", "checkpoint_revision": "5e44aaf23f992e150f26b257500144225ab6643b", "checkpoint_file": "checkpoints/step-295000-epoch-40-loss=0.2200.pt"},
+    "ponderpounce": {"repository": "https://github.com/worv-ai/PonderPounce", "revision": "723df35762bb641e1d520e4fa9359b98644adc21", "paper": "https://arxiv.org/abs/2608.24115v2", "evidence": "Sections III-B, IV-A; repository inference integration only", "checkpoint": "worv-ai/ponderpounce-9b-robomme", "checkpoint_revision": "5691e05614e8e6581d6358959e60561acfa73534"}
+  },
+  "shared": {
+    "robomme": {
+      "initialization": "gs://openpi-assets/checkpoints/pi05_base/params",
+      "checkpoint_pin": "record local content manifest before training; GCS prefix alone is not immutable",
+      "train_dense": ["VLM language expert", "action expert", "action input/output adapters", "new memory modules when present"],
+      "freeze": ["vision encoder"],
+      "stages": ["action_sft"],
+      "loss": {"name": "continuous_action_flow_matching_mse", "coefficient": 1.0},
+      "optimizer": {"name": "AdamW", "lr": 0.00005, "betas": [0.9, 0.95], "weight_decay": 0.0, "max_grad_norm": 1.0},
+      "schedule": {"name": "warmup_then_constant", "warmup_steps": 4000, "total_steps": 80000},
+      "ema_decay": 0.999,
+      "action_horizon": 20,
+      "paper_proprioception": false,
+      "fsdp_devices": 4,
+      "checkpoint_every": 10000,
+      "implementation_discrepancies": [
+        "Released config warmup10000 differs from paper5% of80000=4000.",
+        "Released optimizer uses1e-10 weight decay with an OOM comment; paper says0. Do not silently substitute.",
+        "Paper exact identity modulation versus released small-random output projection; must resolve/test initialization.",
+        "Paper max pooling versus released YAML mean; trace actual feature preparation before selecting paper path.",
+        "Disable proprioceptive token conditioning in the paper path rather than confusing historical use_state_emb with current proprioception."
+      ]
+    }
+  },
+  "configurations": {
+    "robomme_pi05": {
+      "inherits": "shared.robomme",
+      "source": "robomme",
+      "memory": null,
+      "global_batch": null,
+      "global_batch_status": "paper table does not separately identify baseline batch; released baseline128, perceptual64",
+      "released_baseline_global_batch": 128,
+      "new_memory_projection": false,
+      "fetch_internal_action_width": 32,
+      "fetch_valid_action_channels": 13
+    },
+    "robomme_framesamp_modul": {
+      "inherits": "shared.robomme",
+      "source": "robomme",
+      "global_batch": 64,
+      "memory": {"representation": "FrameSamp", "integration": "Modul", "budget": 512, "sampled_frames": 32, "tokens_per_frame": 16, "views": 1, "use_historical_state": false},
+      "train_new_dense": ["position projection768->768 and SiLU", "concat(image2048,position768) projection2816->1024", "action-query memory cross-attention", "AdaLN scale/shift projection"],
+      "projection_pretraining_stage": null,
+      "feature_cache": "frozen vision outputs only; never detach/cache a trainable memory projection"
+    },
+    "robomme_tokendrop_modul": {
+      "inherits": "shared.robomme",
+      "source": "robomme",
+      "global_batch": 64,
+      "memory": {"representation": "TokenDrop", "integration": "Modul", "budget": 512, "tokens_per_frame": 64, "views": 1, "rgb_difference_stride": 8, "rgb_difference_threshold": 0.0001, "preserve_initial_context": true, "use_historical_state": false},
+      "train_new_dense": ["position projection768->768 and SiLU", "concat(image2048,position768) projection2816->1024", "action-query memory cross-attention", "AdaLN scale/shift projection"],
+      "selection_trainable": false,
+      "projection_pretraining_stage": null,
+      "feature_cache": "causal prefix only; not an episode-final token-selection heap"
+    },
+    "hamlet_cogact": {
+      "source": "hamlet",
+      "backbone_source": "cogact_base",
+      "implementation_status": "project-owned CogACT integration required; do not substitute GR00T",
+      "moment_tokens": 4,
+      "history_observations": 4,
+      "memory_transformer_layers": 2,
+      "stages": {
+        "tcl": {
+          "train_dense": ["new moment token embeddings", "contrastive projection g"],
+          "freeze": ["pretrained VLM", "pretrained action head"],
+          "loss": {"name": "time_contrastive_cross_entropy", "temperature": 0.07, "positive": "two augmentations of same image", "negative": "same-episode frame distance greater than16"},
+          "contrastive_projection": "mean pool -> Linear(d,d) -> SiLU -> Linear(d,d) -> L2; released implementation reference, not pretrained VLM connector",
+          "lr": 0.00002,
+          "global_batch": 64,
+          "maximum_steps": 30000,
+          "reported_early_stop_steps": 10000,
+          "transfer_to_next_stage": ["moment token embeddings"],
+          "discard_from_action_policy": ["contrastive head g"]
+        },
+        "action_sft": {
+          "train_dense": ["VLM including moment embeddings", "memory transformer", "action expert and conditioning adapters"],
+          "freeze": [],
+          "freeze_map_note": "Unlike GR00T N1.5, CogACT VLM and moment tokens are trainable; verify original CogACT narrow-module defaults before implementation.",
+          "loss": "CogACT action diffusion noise-prediction objective, not pi05 flow matching",
+          "lr": 0.00002,
+          "global_batch": 32,
+          "steps": 20000
+        }
+      },
+      "optimizer_details": "inherit verified pinned original CogACT recipe; HAMLET appendix does not supply a separate complete optimizer table",
+      "history_stride": 16,
+      "history_stride_status": "Paper section3.2 Eq5 defines stride k as action chunk length; original CogACT H16 gives16. This is not inferred from the GR00T N1.6 RoboMME launcher."
+    },
+    "memoryvla": {
+      "source": "memoryvla",
+      "initialization_source": "openvla_base",
+      "stages": ["action_sft"],
+      "train_dense": ["DINOv2 vision", "SigLIP vision", "LLaMA7B", "pretrained Prismatic visual-language projector", "perceptual bottleneck256", "perceptual and cognitive memory QKV/FFN/gates/time embeddings", "DiT-L action expert"],
+      "freeze": ["EMA copy when enabled"],
+      "loss": "diffusion noise-prediction MSE",
+      "optimizer": {"lr": 0.00002, "weight_decay": 0.0, "max_grad_norm": 1.0},
+      "released_schedule": {"name": "constant", "warmup_ratio": 0.0, "max_steps": 20000},
+      "global_batch": 256,
+      "devices": 8,
+      "per_device_batch": 32,
+      "action_horizon": 16,
+      "future_window_parameter": 15,
+      "repeated_diffusion_steps": 4,
+      "dit": {"width": 1024, "layers": 24, "heads": 16},
+      "inference": {"ddim_steps": 10, "cfg_scale": 1.5},
+      "projection_alignment_stage": null,
+      "fetch_action_adaptation": "Replace incompatible real7-wide action input/output layers with13-wide layers, train them dense; remove hardcoded channel6 gripper handling; do not pad EEF deltas into Fetch joints.",
+      "modalities": "Original single external RGB + instruction; extra cameras/state require separately declared architecture changes."
+    },
+    "ponderpounce": {
+      "source": "ponderpounce",
+      "stages": ["joint_episode_sft"],
+      "ponder": "Qwen3.5-9B",
+      "pounce": "pi05",
+      "carrier_count": 1,
+      "train_dense": ["carrier embeddings", "cognition projection", "sinusoidal age learned projection", "null cognition", "Pounce language backbone", "Pounce action expert"],
+      "freeze": ["Pounce SigLIP vision"],
+      "ponder_backbone_freeze_map": null,
+      "ponder_backbone_freeze_map_status": "Resolve RoboMME-specific map; explicit full-Ponder/no-LoRA statement is for RoboCasa and must not be silently transplanted.",
+      "projection_pretraining_stage": null,
+      "loss": {"action_flow_matching_mse": 1.0, "grounding_cross_entropy": 0.1},
+      "required_labels": ["transition targets", "subgoal text targets", "demo reasoning targets when demonstration conditioning applies"],
+      "current_dataset_label_status": "Episode task instructions exist; timed subgoal/transition targets not established. Missing supervision requires user decision, not fake labels or silent action-only loss.",
+      "optimizer": {"name": "AdamW", "lr": 0.00002, "max_grad_norm": 1.0},
+      "schedule": {"name": "warmup_then_constant", "warmup_steps": 100, "episode_based_optimizer_steps": 4320},
+      "global_batch_episodes": 32,
+      "cognition_dropout": 0.0,
+      "action_horizon": 20,
+      "timing_ms": {"mean_pounce_prediction_interval": 100, "mean_ponder_query_interval": 1000, "simulated_cognition_delay": 300},
+      "gradient_routing": {"action_gradient_to_ponder_scale": 0.5, "grounding_gradient_scale": 1.0, "reuse_cognition_without_detach": true, "temporal_detach": false},
+      "causality": "Select latest-ready cognition at each action tick, not latest-issued cognition; age from source observation timestamp.",
+      "fetch_internal_action_width": 32,
+      "fetch_valid_action_channels": 13,
+      "time_adaptation": "Fetch labels10Hz make H20=2s, not author20Hz H20=1s. Never synthesize observations by pretending duplicated10Hz frames are new20Hz samples."
+    }
+  },
+  "unresolved_decisions": [
+    "Record base checkpoint content manifests and licenses before model execution.",
+    "CogACT implementation was cancelled by user; complete unversioned external CogACT optimizer dependency details remain explicitly unverified. Paper history cadence is Eq5 chunk length16.",
+    "Resolve PonderPounce RoboMME Ponder freeze-map and actual grounding supervision before starting its smoke.",
+    "RoboMME paper identity modulation and actual max pooling are implemented and covered by dedicated numerical tests; legacy-lora preserves released initialization/pooling."
+  ],
+  "verification": {
+    "entrypoint_commands_status": "RoboMME executable commands below and research/paper_fetch_implementation.md; deferred/cancelled model descriptors are references, not runnable trainers.",
+    "robomme_commands": {
+      "smoke_template": ".venv-robomme/bin/python -m utils.policies.robomme train --recipe paper --variant {pi05|framesamp|tokendrop} --root dataset --features logs/features_bounded --output logs/robomme_paper --base-params $BASE_PARAMS --batch-size 1 --fsdp-devices 1 --diagnostic-steps 3 --exp-name {fresh_name}",
+      "author_template": ".venv-robomme/bin/python -m utils.policies.robomme train --recipe paper --variant {pi05|framesamp|tokendrop} --root dataset --features logs/features_bounded --output logs/robomme_paper --base-params $BASE_PARAMS --batch-size $PAPER_BATCH --fsdp-devices 4 --exp-name {fresh_name}",
+      "author_batch_note": "Perceptual64; baseline128 follows released baseline launcher because the paper does not separately identify its batch. Full author reference requests4 GPUs, not the one-GPU smoke reduction.",
+      "containment_required": "Run inside utils.policies.workspace with cwd/HOME/caches inside the designated gangway workspace; never use the unguarded template outside that containment.",
+      "reload_probe": ".venv-eval/bin/python -m utils.policies.verify_robomme_paper --base-params $BASE_PARAMS --output logs/robomme_paper --exp-name {trained_name}",
+      "legacy_lora_is_explicit": "--recipe legacy-lora"
+    },
+    "record_for_each_stage": ["source/config hashes", "trainable and frozen parameter groups/count", "optimizer_steps==3", "actual task/sample IDs", "finite losses and gradients", "nonzero updates in each required group", "frozen checksums unchanged", "checkpoint save/reload", "finite valid output/action13", "stage transfer and reset/causality checks"],
+    "prior_lora_smokes_are_author_reproduction": false
+  }
+}

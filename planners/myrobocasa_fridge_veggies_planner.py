@@ -1,121 +1,70 @@
+"""Canonical staged vegetable planner: sequential waypoints 2–17, fail-fast."""
+
 import argparse
-import random
+import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 import gymnasium as gym
 import numpy as np
-import mplib
 import sapien
 import torch
-from trimesh.primitives import Box
-from my_scenes import MyRoboCasaFridgeVeggies
+
+import my_scenes  # noqa: F401 — register the benchmark environment
+from robots.fetch.actions import base_cmd as _base_cmd
 from robots.fetch.extand import FetchMotionPlanningSapienSolver
 from utils.logging_utils import PlannerLogger, StreamingVideoRecorder, capture_stdout
-from utils.planners_utils import (
-    _base_cmd,
-    lower_torso_smooth,
-)
-
-# lift offsets (world), tried in order: lifting straight up swings the elbow
-# into the fixture stack and the vegetable into the cabinet door behind the
-# counter, so prefer up + back toward the base (south)
-LIFT_OFFSETS = [
-    np.array([0.0, -0.20, 0.10]),
-    np.array([0.0, -0.22, 0.08]),
-    np.array([0.0, -0.18, 0.13]),
-    np.array([0.0, -0.15, 0.15]),
-    np.array([0.0, -0.15, 0.18]),
-    np.array([0.0, -0.12, 0.20]),
-]
-
-# Render cameras for the recorded video, takeitback-style: named static
-# cameras, one per view the benchmark needs. The CameraConfig poses are
-# PLACEHOLDERS: the pot and the vegetable are only placed at episode start
-# (inside env.reset), so _pose_render_cameras re-points every camera after
-# the reset. The env's inherited single diagnostic "render_camera" (fridge
-# picture scene) is replaced wholesale by _install_render_cameras.
-RENDER_CAMERA_NAMES = ("main_camera", "fridge_camera", "pot_camera", "veg_camera")
+from utils.planners_utils import lower_torso_smooth
+from utils.tray_episode_checkers import TrayEpisodeCheckers
 
 
-def _render_camera_configs():
-    """The four video cameras, one per view:
-      * main_camera: the whole counter band (robot + pot + vegetable);
-      * fridge_camera: the fridge door with the picture;
-      * pot_camera: the pot, from the side;
-      * veg_camera: the target vegetable, from the side above."""
-    from mani_skill.sensors.camera import CameraConfig
-    from mani_skill.utils import sapien_utils
-
-    placeholder = sapien_utils.look_at(
-        np.array([0.0, -1.5, 1.5]), np.array([0.0, 0.0, 0.5])
-    )
-    return [
-        CameraConfig(name, placeholder, 1600, 1600, 70 * np.pi / 180, 0.01, 100)
-        for name in RENDER_CAMERA_NAMES
-    ]
+CAMERA_NAMES = ("counter_side", "overhead_rear", "fridge_robot_start")
+WP4_TORSO_DROP_M = 0.22
+WP13_TORSO_RAISE_M = 0.04
+WP14_HOVER_CLEARANCE_M = 0.05
+VEGETABLE_APPROACH_STANDOFF_M = 0.50
+POT_APPROACH_RADIUS_M = 0.50
+WAYPOINT_NOISE = 0.05
+EXECUTION_ACTION_NOISE = float(os.environ.get("MIKASA_ACTION_NOISE", "0.001"))
+EXECUTION_NOISE_HOLD = int(os.environ.get("MIKASA_NOISE_HOLD", "10"))
 
 
-def _install_render_cameras(env):
-    """Replace the scene's single diagnostic render camera with the four
-    video cameras. MUST run before env.reset(): the camera configs are
-    consumed during the reset's reconfigure."""
-    type(env.unwrapped)._default_human_render_camera_configs = property(
-        lambda self: _render_camera_configs()
-    )
+def _waypoint_jitter(scale, rng):
+    """Return the TakeIt-style seeded, relative waypoint perturbation."""
+    return float(rng.uniform(-WAYPOINT_NOISE, WAYPOINT_NOISE) * scale)
 
 
-def _pose_render_cameras(env, target_veg):
-    """Point the four render cameras at their per-episode targets. Static
-    framing (like takeitback): main frames the counter band, fridge frames
-    the door picture, pot frames the pot, veg frames the vegetable's initial
-    spot (the grasp/lift happen there; the release is on the pot camera)."""
-    from mani_skill.utils import sapien_utils
+def _sample_waypoint_offsets(seed):
+    rng = np.random.default_rng(int(seed))
+    return {
+        "wp3_standoff_m": _waypoint_jitter(VEGETABLE_APPROACH_STANDOFF_M, rng),
+        "wp12_pot_radius_m": _waypoint_jitter(POT_APPROACH_RADIUS_M, rng),
+        "wp14_hover_clearance_m": _waypoint_jitter(WP14_HOVER_CLEARANCE_M, rng),
+    }
 
-    unwenv = env.unwrapped
-    cam = unwenv._human_render_cameras
-    cx, cy = unwenv.counter_pos[:2]
-    # main: elevated south view of the whole counter band (takeitback's
-    # main_camera framing)
-    main = sapien_utils.look_at(
-        np.array([cx + 0.7, cy - 1.8, 1.6]),
-        np.array([cx + 0.7, cy - 0.025, 0.9]),
-    )
-    # fridge: the picture is on the door face. The robot spawns 0.9 m in
-    # front of the door (robot_spawn_pos = picture_center + front * 0.9)
-    # with its folded gripper at picture height right at the door, which
-    # physically occludes the picture's lower half from every outside view;
-    # frame the door from in front, offset sideways and up so the sight line
-    # passes over the arm and the picture's upper part stays readable
-    pc = np.asarray(unwenv.picture_center, dtype=float)
-    front = np.asarray(unwenv.robot_spawn_pos, dtype=float) - pc
-    front = front / np.linalg.norm(front)
-    width = np.cross(np.array([0.0, 0.0, 1.0]), front)
-    fridge = sapien_utils.look_at(
-        pc + front * 1.1 + width * 0.85 + np.array([0.0, 0.0, 0.35]),
-        pc + np.array([0.0, 0.0, -0.05]),
-    )
-    # pot: east-side profile (flat tilt like the takeitback east camera; the
-    # release happens here)
-    plate = unwenv.plate.pose.p[0].cpu().numpy().copy()
-    pot = sapien_utils.look_at(
-        plate + np.array([0.6, 0.0, 0.15]),
-        plate + np.array([0.0, 0.0, 0.03]),
-    )
-    # vegetable: elevated south-east view (side from above)
-    veg = target_veg.pose.p[0].cpu().numpy().copy()
-    veggie = sapien_utils.look_at(
-        veg + np.array([0.8, -0.75, 0.95]),
-        veg + np.array([0.0, 0.0, -0.03]),
-    )
-    for name, pose in (
-        ("main_camera", main),
-        ("fridge_camera", fridge),
-        ("pot_camera", pot),
-        ("veg_camera", veggie),
-    ):
-        cam[name].camera.set_local_pose(pose.sp)
+
+def _waypoint_offset(planner, name):
+    offsets = getattr(planner, "waypoint_offsets", None)
+    if not isinstance(offsets, dict):
+        return 0.0
+    return float(offsets.get(name, 0.0))
+
+
+@contextmanager
+def _execution_noise_phase(planner, enabled):
+    """Temporarily gate execution noise around one motion primitive."""
+    previous = bool(getattr(planner, "execution_noise_enabled", False))
+    planner.execution_noise_enabled = bool(enabled)
+    reset_noise = getattr(planner, "_reset_execution_noise", None)
+    if callable(reset_noise):
+        reset_noise()
+    try:
+        yield
+    finally:
+        planner.execution_noise_enabled = previous
+        if callable(reset_noise):
+            reset_noise()
 
 
 def _fit_rim_circle(xy):
@@ -149,78 +98,6 @@ def _fit_rim_circle(xy):
     return best
 
 
-def _pot_bowl_center(env):
-    """World xyz of the pot's BOWL center (the aim point for transport and
-    descent), not the actor origin. The mjcf loader recenters the actor to
-    its AABB center; for a pan with a long handle that center sits 70-91% of
-    the rim radius toward the handle (measured 6.7-8.6 cm at rim R ~9.5 cm
-    in this pot family). Aiming the descent at the origin drops the
-    vegetable on the rim wall - observed: veg pressed against the wall
-    during the descend (IK failure -> release from height -> wedged ->
-    flung), and a drop test where the veg at the origin tipped over the rim
-    and fell off the counter. Fit a circle to the pot's upper wall vertices
-    and aim at its center. Falls back to the origin if the fit fails."""
-    import transforms3d.quaternions as tq
-    import trimesh
-
-    unwenv = env.unwrapped
-    plate = unwenv.plate
-    origin = plate.pose.p[0].cpu().numpy()
-    q = plate.pose.q[0].cpu().numpy()
-    Rm = tq.quat2mat(q)
-    mesh = plate.get_collision_meshes(to_world_frame=True)
-    full = trimesh.util.concatenate(mesh) if isinstance(mesh, list) else mesh
-    local = (np.asarray(full.vertices) - origin) @ Rm.T
-    zmin, zmax = local[:, 2].min(), local[:, 2].max()
-    wall = local[local[:, 2] > zmin + 0.5 * (zmax - zmin)][:, :2]
-    fit = _fit_rim_circle(wall) if len(wall) >= 10 else None
-    if fit is None:
-        print("[WARN] pot rim circle fit failed; aiming at the actor origin")
-        return origin.copy()
-    _, c, R = fit
-    bowl = origin + Rm @ np.array([c[0], c[1], 0.0])
-    print(f"[INFO] pot bowl center {np.round(bowl, 3)} (rim R={R:.3f}, "
-          f"offset {np.linalg.norm(c):.3f} m from the actor origin)")
-    return bowl
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Motion planner for MyRoboCasa_FridgeVeggies-v1 scene"
-    )
-    parser.add_argument("--seed", type=int, default=3, help="Random seed (default: 3)")
-    parser.add_argument(
-        "--render-mode",
-        type=str,
-        default="rgb_array",
-        choices=["rgb_array", "human", "sensors"],
-        help="Render mode (default: rgb_array)",
-    )
-    parser.add_argument(
-        "--debug", action="store_true", help="Enable debug mode in planner"
-    )
-    parser.add_argument(
-        "--info", action="store_true", help="Print environment info in planner"
-    )
-    parser.add_argument(
-        "--log-dir",
-        type=str,
-        default="logs",
-        help="Directory for log output (default: logs)",
-    )
-    parser.add_argument(
-        "--log-freq",
-        type=int,
-        default=10,
-        help="Write trajectory rows every N steps (default: 10)",
-    )
-    parser.add_argument(
-        "--no-video",
-        action="store_true",
-        help="Disable mp4 recording for batch runs",
-    )
-    return parser.parse_args()
-
 
 def _attach_object(planner, obj):
     """Register the grasped object as attached to the gripper in the mplib
@@ -238,119 +115,11 @@ def _attach_object(planner, obj):
     )
 
 
+
 def _detach_object(planner):
     """Release the object from the planning world (after the gripper is opened)."""
     planner.planner.detach_object()
 
-
-def _top_down_grasp_pose(agent, obj_center, closing, raise_z, pre_clear=0.14):
-    """Top-down grasp pose: the gripper approaches straight down (-z world)
-    and the fingers close along the horizontal `closing` axis. The grasp
-    center is the vegetable's xy at its center height, raised so the fingers
-    (which hang ~6 cm below the TCP) wrap the vegetable's upper body. The
-    pre-grasp is 18 cm above the grasp (the approach direction is -z)."""
-    approaching = np.array([0.0, 0.0, -1.0])
-    grasp_pose = agent.build_grasp_pose(approaching, closing, obj_center.copy())
-    # sapien.Pose.p returns a COPY: in-place `grasp_pose.p[2] += raise_z`
-    # silently does nothing (the raise_z sweep was dead without this), so the
-    # pose must be rebuilt
-    grasp_pose = sapien.Pose(
-        p=grasp_pose.p + np.array([0.0, 0.0, raise_z]), q=grasp_pose.q
-    )
-    # HIGH pre-grasp: 14 cm above the grasp (was 10 cm, tried 18 cm). The
-    # fingers hang ~6 cm below the TCP, so at 10 cm the fingers arrived at
-    # the vegetable's TOP height and the reach path swept them through it
-    # (the knock, seeds 30/42/47). At 14 cm the fingers end ~4-6 cm above the
-    # vegetable's top; the final approach is the base-fixed vertical descent
-    # (see _reach_and_grasp), so nothing sweeps at the vegetable's height.
-    # 18 cm was too high: the arm's horizontal reach shrinks with altitude
-    # (~0.60 m at z+0.18), and bases at 0.62-0.65 m (yaw drift) could not
-    # reach it (seeds 28/34/46/50); 14 cm keeps the over-the-top clearance
-    # while staying inside the reachable envelope from those bases.
-    reach_pose = grasp_pose * sapien.Pose([0, 0, -pre_clear])
-    return grasp_pose, reach_pose
-
-
-def _drive_base(
-    env, planner, target_pos, max_chunks=30, chunk=0.7, align_deg=3.0, yaw=True
-):
-    """Drive the base to target_pos (xy) WITHOUT teleportation.
-
-    The ds_fetch base only translates along its current facing direction
-    (move_base_forward's follow projects the screw velocity onto the base
-    x-axis and never commands yaw), so the loop is: yaw-align in place via
-    velocity control (unless yaw=False, which drives in the CURRENT facing -
-    forward or backward - without turning), resync the planning world, then
-    drive a short screw chunk. Re-aligning each chunk corrects the rotation
-    drift. Returns the final base position."""
-    unwenv = env.unwrapped
-    agent = unwenv.agent
-    arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-    body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-    body_action[:2] = 0.0
-    target = np.asarray(target_pos, dtype=float).copy()
-    target[2] = 0.0
-
-    def yaw_align(max_rot=500):
-        for _ in range(max_rot):
-            sp = agent.base_link.pose.sp
-            p = sp.p.copy()
-            p[2] = 0.0
-            delta = target - p
-            dist = np.linalg.norm(delta)
-            if dist < 1e-4:
-                return
-            xa = sp.to_transformation_matrix()[:3, 0]
-            xa[2] = 0.0
-            nx = np.linalg.norm(xa)
-            if nx < 1e-6:
-                return
-            xa /= nx
-            dt = delta / dist
-            he = float(np.arctan2(np.cross(xa, dt)[2], np.dot(xa, dt)))
-            if abs(he) < np.deg2rad(align_deg):
-                break
-            base_action = _base_cmd(
-                yaw=float(np.clip(1.5 * he, -0.6, 0.6))
-            )
-            env.step(np.hstack([arm_action, 1, body_action, base_action]))
-        planner.planner.update_from_simulation()
-
-    cur = agent.base_link.pose.p[0].cpu().numpy().copy()
-    cur[2] = 0.0
-    fails = 0
-    for _ in range(max_chunks):
-        dist = float(np.linalg.norm(target - cur))
-        if dist < 0.10:
-            break
-        if yaw:
-            yaw_align()
-        way = cur + (target - cur) / dist * min(dist, chunk)
-        res = planner.move_base_forward(way, n_init_qpos=100)
-        if res == -1:
-            # screw plans fail when an object is attached to the gripper
-            # (mplib treats it as colliding with the robot); fall back to the
-            # closed-loop velocity drive, which the takeitback transport uses
-            from utils.planners_utils import _velocity_segment
-
-            res = _velocity_segment(
-                env,
-                planner,
-                way,
-                arm_action,
-                body_action,
-                1,
-                max_bursts=250,
-            )
-        planner.planner.update_from_simulation()
-        cur = agent.base_link.pose.p[0].cpu().numpy().copy()
-        cur[2] = 0.0
-        if res == -1:
-            fails += 1
-            if fails > 3:
-                print(f"[WARN] base drive stuck at {np.round(cur, 3)}")
-                break
-    return cur
 
 
 def _yaw_base_to(env, planner, target_pos, max_rot=500, align_deg=3.0):
@@ -387,1205 +156,1346 @@ def _yaw_base_to(env, planner, target_pos, max_rot=500, align_deg=3.0):
     planner.planner.update_from_simulation()
 
 
-def _safe_manipulation(env, planner, pose, **kwargs):
-    """planner.static_manipulation that never crashes: the solver's refinement
-    path indexes result['position'][-1] and throws IndexError on degenerate
-    empty trajectories; treat that as a failed motion (-1)."""
-    try:
-        return planner.static_manipulation(pose, **kwargs)
-    except (IndexError, KeyError, ValueError, RuntimeError) as e:
-        print(f"[WARN] static_manipulation raised {type(e).__name__}: {e}")
-        return -1
 
+def _render_camera_configs():
+    from mani_skill.sensors.camera import CameraConfig
+    from mani_skill.utils import sapien_utils
 
-def _tcp_at(agent, target_pose, tol=0.04, z_only=False):
-    """True if the TCP actually reached target_pose (within tol meters; when
-    z_only, only the height must match).
-
-    static_manipulation returns a success tuple even when its refinement gave
-    up ("Robot is stuck") or the plan was only approximate, so the executed
-    pose must be verified before a motion counts as done."""
-    tcp = agent.tcp.pose.p[0].cpu().numpy()
-    target = np.asarray(target_pose.p, dtype=float)
-    if z_only:
-        return float(abs(tcp[2] - target[2])) <= tol
-    return float(np.linalg.norm(tcp - target)) <= tol
-
-
-def _veg_world_name(veg):
-    """The target vegetable's name in the mplib planning world (world objects
-    are named f"{name}_{per_scene_id}", e.g. veg_carrot_4_110)."""
-    from mplib.sapien_utils.conversion import convert_object_name
-
-    import sapien.physx as physx
-
-    component = veg._objs[0].find_component_by_type(physx.PhysxRigidBaseComponent)
-    return convert_object_name(component.entity)
-
-
-def _exclude_target_collision(planner, veg_name):
-    """Allow the robot to collide with the target vegetable in the mplib
-    planning world (allowed-collision matrix) so the grasp refinement can
-    close the fingers AROUND it. Without this a flat vegetable on the counter
-    is ungraspable: any collision-free pose keeps the fingers too high, and
-    any pose that reaches the vegetable intersects the still-obstacle object.
-
-    NOTE: the ACM starts EMPTY (entries are created on demand), so the robot
-    link names must be enumerated explicitly - get_all_entry_names() returns
-    [] and a loop over it would set nothing. The collision object names are
-    the raw sapien link names (see mplib conversion: FCLObject(comp.name))."""
-    acm = planner.planner.planning_world.get_allowed_collision_matrix()
-    robot = planner.base_env.agent.robot._objs[0]  # raw sapien articulation
-    for link in robot.get_links():
-        acm.set_entry(link.name, veg_name, True)
-
-
-def _exclude_veggies_collision(env, planner):
-    """Allow the robot to collide with ALL the vegetables on the counter (the
-    target AND the distractors) in the planning world. The reach's
-    collision-aware IK rejects every pre-grasp whose arm passes over or near
-    the other vegetables (the counter holds 5), producing the repeated
-    'IK Failed! Cannot find valid solution' failures; the distractors are
-    restored right after the grasp."""
-    acm = planner.planner.planning_world.get_allowed_collision_matrix()
-    robot = planner.base_env.agent.robot._objs[0]  # raw sapien articulation
-    for veg in env.unwrapped.veggies:
-        name = _veg_world_name(veg)
-        for link in robot.get_links():
-            acm.set_entry(link.name, name, True)
-
-
-def _restore_veggies_collision(env, planner, keep_target=None):
-    """Undo _exclude_veggies_collision; optionally keep the target excluded
-    (the caller attaches it right after the grasp)."""
-    acm = planner.planner.planning_world.get_allowed_collision_matrix()
-    robot = planner.base_env.agent.robot._objs[0]
-    for veg in env.unwrapped.veggies:
-        name = _veg_world_name(veg)
-        if name == keep_target:
-            continue
-        for link in robot.get_links():
-            acm.set_entry(link.name, name, False)
-
-
-def _descend_tcp_step(env, planner, dz, n_init_qpos=200):
-    """One small VERTICAL TCP descent planned with the base joints FIXED.
-
-    static_manipulation leaves the base free - its IK solutions swing the
-    whole robot sideways mid-descent, flinging the held vegetable off the
-    plate. Fixing root_x/y/z here keeps the descent strictly vertical."""
-    agent = env.unwrapped.agent
-    tcp_now = agent.tcp.pose.sp
-    tgt = sapien.Pose(p=tcp_now.p - np.array([0.0, 0.0, dz]), q=tcp_now.q)
-
-    # The pot (the "plate") is a CONTAINER: the descend must lower the
-    # vegetable INTO it, so the fingers and the held vegetable are allowed to
-    # touch it during the descent. Without this the collision-aware IK stops
-    # the vegetable ~10 cm above the pot's bottom and the release's drop
-    # bounces it out. Restore the collision after the step.
-    import sapien.physx as physx
-    from mplib.sapien_utils.conversion import convert_object_name
-    acm = planner.planner.planning_world.get_allowed_collision_matrix()
-    robot = planner.base_env.agent.robot._objs[0]  # raw sapien articulation
-    pot_comp = env.unwrapped.plate._objs[0].find_component_by_type(
-        physx.PhysxRigidBaseComponent
+    placeholder = sapien_utils.look_at(
+        np.array([0.0, -1.5, 1.5]), np.array([0.0, 0.0, 0.5])
     )
-    pot_name = convert_object_name(pot_comp.entity)
-    target_comp = env.unwrapped.veggies[
-        env.unwrapped._picture_target
-    ]._objs[0].find_component_by_type(physx.PhysxRigidBaseComponent)
-    target_name = convert_object_name(target_comp.entity)
-    pot_links = [link.name for link in robot.get_links()]
-    for ln in pot_links:
-        acm.set_entry(ln, pot_name, True)
-    # The held target is attached in the planning world during transport.
-    # Allow it to enter the pot as well; otherwise the robot-link allowance
-    # below is insufficient and release IK stops above the container floor.
-    acm.set_entry(target_name, pot_name, True)
-
-    # move-group order: root_x, root_y, root_z, torso, shoulder_pan,
-    # shoulder_lift, upperarm_roll, elbow_flex, forearm_roll, wrist_flex,
-    # wrist_roll - fix the first three (base translation); mask=True means
-    # the joint is NOT used by the IK (fixed)
-    mask = [True, True, True] + [False] * 12
-    res = planner.planner.plan_pose(
-        tgt, planner.robot.get_qpos().cpu().numpy()[0],
-        time_step=env.unwrapped.control_timestep, wrt_world=True,
-        planning_time=4, rrt_range=0.1, simplify=True, mask=mask,
-        fixed_joint_indices=[0, 1, 2], n_init_qpos=n_init_qpos,
-    )
-    for ln in pot_links:
-        acm.set_entry(ln, pot_name, False)
-    acm.set_entry(target_name, pot_name, False)
-    if not str(res.get("status", "")).startswith("Success"):
-        print(f"[WARN] descend step failed: {res.get('status')}")
-        return -1
-    pos = res.get("position", np.zeros((1, 11)))
-    print(f"[DBG] descend plan: dz_req={dz:.3f} tcp_z0={tcp_now.p[2]:.3f} "
-          f"plan_first={np.round(pos[0][3:5], 3).tolist()} "
-          f"plan_last={np.round(pos[-1][3:5], 3).tolist()} n={len(pos)}")
-    try:
-        planner.follow_path(res)
-    except AssertionError as e:
-        print("[DESCEND-DEBUG]",
-              "arm", agent.controller.controllers["arm"].qpos[0].shape,
-              "gs", repr(planner.gripper_state), np.shape(planner.gripper_state),
-              "body", agent.controller.controllers["body"].qpos[0].shape,
-              "| err:", e)
-        return -1
-    return 0
-
-
-def _descend_tcp_abs(env, planner, tgt, n_init_qpos=100):
-    """Reach grasp height with a fixed-base plan and a vertical fallback.
-
-    If the fixed-base RRT cannot solve the final drop, lower the torso slowly
-    while holding arm/base targets. This keeps the already aligned TCP on a
-    vertical corridor instead of retrying a blocked long plan.
-    """
-    agent = env.unwrapped.agent
-    mask = [True, True, True] + [False] * 12
-    res = planner.planner.plan_pose(
-        tgt, planner.robot.get_qpos().cpu().numpy()[0],
-        time_step=env.unwrapped.control_timestep, wrt_world=True,
-        planning_time=4, rrt_range=0.1, simplify=True, mask=mask,
-        fixed_joint_indices=[0, 1, 2], n_init_qpos=n_init_qpos,
-    )
-    if str(res.get("status", "")).startswith("Success"):
-        try:
-            planner.follow_path(res)
-            return 0
-        except AssertionError as exc:
-            print(f"[INFO] grasp descend path failed: {exc}")
-
-    current_z = float(agent.tcp.pose.sp.p[2])
-    drop = current_z - float(tgt.p[2])
-    if drop > 0.01:
-        print(f"[INFO] grasp descend fallback: torso drop {drop:.3f} m")
-        arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-        lower_torso_smooth(
-            env,
-            planner,
-            target_drop=min(drop, 0.16),
-            total_steps=50,
-            arm_action=arm_action,
-            gripper_action=planner.gripper_state,
-        )
-        if _tcp_at(agent, tgt, tol=0.06):
-            return 0
-    print(f"[WARN] grasp descend failed: {res.get('status')}")
-    return -1
-
-
-def _reach_and_grasp(env, planner, agent, pre_clear=0.14, rank_closings=False):
-    """Reach the pre-grasp pose then execute the grasp. ONLY top-down grasps
-    are attempted: the gripper approaches straight down (-z) and the fingers
-    close along a horizontal world axis (x or y). Straight/side grasps are
-    never tried (the low flat vegetables cannot clear the counter edge for a
-    side grasp). The grasp is a FINGERTIP grasp: the target poses the object
-    at the finger tips (the sweep raise_z ~ finger length), and the target
-    vegetable is excluded from the planning-world collisions during the final
-    close so the fingers can close around a flat object. Each motion is
-    VERIFIED with _tcp_at (static_manipulation can report success while its
-    refinement got stuck), and the vegetable is re-measured after every reach
-    (an approximate reach knocks it). The pre-grasp is HIGH (18 cm above the
-    grasp) and the reach is planned WITH the vegetables as collision
-    obstacles, so the arm routes over them; the final approach to the grasp
-    is a base-fixed VERTICAL descent (no lateral sweep at the vegetable's
-    height - the knock). Returns the executed grasp pose, or None if all
-    failed."""
-    # close ACROSS the vegetable's SHORT horizontal dimension: the fingers
-    # must wrap the narrow side. World-axis closings (x/y) align with the
-    # LONG axis of a diagonal vegetable, so the fingers only graze it and the
-    # lift slips (the "Grasp invalid" failures). Compute the OBB's shortest
-    # horizontal axis; world x/y remain as fallbacks. The sign is symmetric
-    # for a parallel gripper (the grasp frame rotates 180 deg about the
-    # approach axis).
-    closings = []
-    veg = env.unwrapped.veggies[env.unwrapped._picture_target]
-    mesh = veg.get_first_collision_mesh(to_world_frame=True)
-    if mesh is not None:
-        obb = mesh.bounding_box_oriented
-        T = np.asarray(obb.transform)[:3, :3]  # OBB axes (columns)
-        world_ext = np.asarray(obb.extents)
-        local_ext = np.asarray(obb.primitive.extents)
-        # Horizontal axes only (small world-z component). Correct the extent
-        # ranking only for near-equivalent widths; dramatic orientation swaps
-        # regressed otherwise-valid elongated grasps.
-        horiz = [i for i in range(3) if abs(T[2, i]) < 0.5]
-        ext = world_ext
-        if len(horiz) > 1:
-            old_i = min(horiz, key=lambda i: world_ext[i])
-            new_i = min(horiz, key=lambda i: local_ext[i])
-            if local_ext[old_i] <= 1.2 * local_ext[new_i]:
-                ext = local_ext
-        horiz.sort(key=lambda i: ext[i])
-        for i in horiz:
-            ax = np.asarray(T[:, i], dtype=float).copy()
-            ax[2] = 0.0
-            n = float(np.linalg.norm(ax))
-            if n > 1e-4:
-                closings.append(ax / n)
-    closings += [
-        np.array([1.0, 0.0, 0.0]),
-        np.array([0.0, 1.0, 0.0]),
+    return [
+        CameraConfig(name, placeholder, 1280, 720, 70 * np.pi / 180, 0.01, 100)
+        for name in CAMERA_NAMES
     ]
-    veg_name = _veg_world_name(veg)
-    if rank_closings:
-        center = veg.pose.p[0].cpu().numpy().copy()
-        qpos = planner.robot.get_qpos().cpu().numpy()[0]
-        masked_joints = ~np.array([True, True, True] + [False] * 12)
-
-        def closing_score(tc):
-            _, reach_pose = _top_down_grasp_pose(
-                agent, center, tc, 0.0, pre_clear
-            )
-            result = planner.planner.plan_screw(
-                mplib.Pose(p=reach_pose.p, q=reach_pose.q),
-                qpos,
-                time_step=env.unwrapped.control_timestep,
-                masked_joints=masked_joints,
-            )
-            if result.get("status") != "Success":
-                return float("inf")
-            path = np.asarray(result["position"])
-            return float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
-
-        closings.sort(key=closing_score)
-    for tc in closings:
-        # re-read the vegetable pose: the previous reach may have knocked it
-        obj_center = (
-            env.unwrapped.veggies[env.unwrapped._picture_target]
-            .pose.p[0]
-            .cpu()
-            .numpy()
-            .copy()
-        )
-        # the fingers are HORIZONTAL plates (the grip point is at the TCP's
-        # height, not below it): raise_z is the clamp height on the vegetable.
-        # Values 0.03-0.07 clamp ABOVE a flat vegetable's center (the fingers
-        # graze the top edge and the lift slips); start at 0.0 = clamp at the
-        # vegetable's middle. The collision-aware IK rejects the values that
-        # would push the plates into the counter.
-        for raise_z in (0.0, 0.02, 0.04, 0.06):
-            grasp_pose, reach_pose = _top_down_grasp_pose(
-                agent, obj_center, tc, raise_z, pre_clear
-            )
-            res = env.log_motion(
-                "Reach veggie",
-                _safe_manipulation,
-                env,
-                planner,
-                reach_pose,
-                disable_lift_joint=False,
-                n_init_qpos=100,
-            )
-            if res == -1 or not _tcp_at(agent, reach_pose, tol=0.10):
-                if res == -1:
-                    base_p = agent.base_link.pose.p[0].cpu().numpy()
-                    print(
-                        f"[DBG] reach fail: base={np.round(base_p[:2],2)} "
-                        f"veg={np.round(obj_center[:2],2)} "
-                        f"target={np.round(reach_pose.p,2)} "
-                        f"closing={np.round(tc,2)} raise_z={raise_z}"
-                    )
-                continue
-            # corrective second reach: the first RRT refinement often gives up
-            # a few cm short; re-planning the same target from the approximate
-            # pose converges to the exact pose
-            res = env.log_motion(
-                "Reach veggie (corrective)",
-                _safe_manipulation,
-                env,
-                planner,
-                reach_pose,
-                disable_lift_joint=False,
-                n_init_qpos=100,
-            )
-            if res == -1 or not _tcp_at(agent, reach_pose):
-                continue
-            # re-measure the vegetable after the reach and re-aim the grasp
-            obj_center = (
-                env.unwrapped.veggies[env.unwrapped._picture_target]
-                .pose.p[0]
-                .cpu()
-                .numpy()
-                .copy()
-            )
-            grasp_pose, _ = _top_down_grasp_pose(agent, obj_center, tc, raise_z, pre_clear)
-            # fingertip grasp: allow the fingers to touch the target vegetable
-            # in the planning world, otherwise the collision-aware IK refuses
-            # every pose that reaches a flat vegetable on the counter. The
-            # exclusion applies ONLY now (before the close): the reaches above
-            # are planned with the vegetables as collision obstacles, so the
-            # arm routes OVER them instead of sweeping through (the knock).
-            _exclude_veggies_collision(env, planner)
-            # the grasp is a BASE-FIXED VERTICAL descent to the grasp pose
-            # (see _descend_tcp_abs): no lateral swing at the vegetable's
-            # height, so the fingers descend straight onto it and the close
-            # wraps it
-            res = _descend_tcp_abs(env, planner, grasp_pose)
-            if res != -1 and _tcp_at(agent, grasp_pose):
-                # hold check BEFORE returning: the plan/execution can succeed
-                # while the fingers only graze a flat vegetable (the caller's
-                # lift-verify would then reject it and waste the whole stance).
-                # Close the fingers and confirm contact; if the vegetable is
-                # not held, open and try the next raise_z/closing instead.
-                planner.close_gripper()
-                planner.planner.update_from_simulation()
-                if agent.is_grasping(env.unwrapped.veggies[env.unwrapped._picture_target]):
-                    # keep the TARGET excluded (the caller attaches it right
-                    # after); restore the distractors
-                    _restore_veggies_collision(env, planner, keep_target=veg_name)
-                    return grasp_pose
-                planner.open_gripper()
-                planner.planner.update_from_simulation()
-            # every grasp attempt (failed, or executed but not holding) leaves
-            # the vegetable excluded from the planning world for the fingers
-            # to close; restore it immediately so the NEXT reach is planned
-            # with the vegetable as a collision obstacle again - otherwise the
-            # arm passes through it and knocks it away (observed: lemon
-            # knocked over the counter edge by the reach after a failed grasp)
-            _restore_veggies_collision(env, planner)
-    # all attempts failed: the next stance must still AVOID the vegetables, so
-    # restore them as collision obstacles
-    _restore_veggies_collision(env, planner)
-    return None
 
 
-def _lift_veggie(env, planner, agent, grasp_pose):
-    """Lift the grasped vegetable, trying several offsets (up + back first),
-    each three times: the RRT planner is stochastic and the workspace is
-    tight. The TCP must actually RISE to the lift height (static_manipulation
-    can report success while its refinement got stuck at the old height).
-    The lifted height must be HIGH: the transport yaw-swing only clears the
-    counter front wall if the vegetable is well above it (bottom > ~1.0)."""
-    res = -1
-    # first pass: require a real high lift (z >= grasp_z + 0.14)
-    for off in sorted(LIFT_OFFSETS, key=lambda o: -o[2]):
-        for _ in range(3):
-            lift_pose = sapien.Pose(grasp_pose.p + off, grasp_pose.q)
-            res = env.log_motion(
-                "Lift veggie",
-                _safe_manipulation,
-                env,
-                planner,
-                lift_pose,
-                disable_lift_joint=False,
-                n_init_qpos=100,
-            )
-            if (
-                res != -1
-                and (agent.tcp.pose.p[0].cpu().numpy()[2] - grasp_pose.p[2]) >= 0.12
-            ):
-                return res
-    # fallback: any verified rise
-    for off in LIFT_OFFSETS:
-        for _ in range(3):
-            lift_pose = sapien.Pose(grasp_pose.p + off, grasp_pose.q)
-            res = env.log_motion(
-                "Lift veggie",
-                _safe_manipulation,
-                env,
-                planner,
-                lift_pose,
-                disable_lift_joint=False,
-                n_init_qpos=100,
-            )
-            if res != -1 and _tcp_at(agent, lift_pose, z_only=True, tol=0.06):
-                return res
-    return res
+def _install_render_cameras(env):
+    type(env.unwrapped)._default_human_render_camera_configs = property(
+        lambda self: _render_camera_configs()
+    )
 
 
-def _transport_veg(env, planner, agent, target_veg, aim_xy, margin=0.05,
-                max_iter=30):
-    """Drive the base so the held vegetable reaches aim_xy (world xy).
+def _pose_render_cameras(env):
+    from mani_skill.utils import sapien_utils
 
-    Port of the takeitback _transport_cup pattern (which converges on the
-    fork's base): each iteration measures the vegetable's CURRENT local offset
-    in the base frame, scans the full circle of headings for a feasible drive
-    direction (the base target must stay south of the counter front y=-1.0),
-    rotates the base there SLOWLY (rot_cap=0.06 - a fast turn swings the held
-    vegetable on its ~0.6 m orbit and the lateral force drops it), then drives
-    a chunk with the fallback chain fixed-arm screw -> move_base_forward ->
-    closed-loop velocity segment. Convergence is measured on the actual
-    vegetable position, not on a calibrated map, so the final centimetres do
-    not stall (the P-drive stalled at 0.14-0.20 m; the map-based velocity
-    drive diverged after yaw drift). Returns 0 on convergence, -1 otherwise."""
-    from utils.planners_utils import _velocity_segment
+    scene = env.unwrapped
+    cameras = scene._human_render_cameras
+    veggie = scene.veggies[scene._picture_target].pose.p[0].cpu().numpy()
+    base = scene.agent.base_link.pose.p[0].cpu().numpy()
+    counter = np.asarray(scene.counter_pos, dtype=float)
+
+    table_z = counter[2] + scene.counter_size[2] / 2
+    side_position = veggie + np.array([0.65, -0.85, 0.0])
+    side_position[2] = table_z + 0.08
+    side_target = veggie.copy()
+    side_target[2] = table_z + 0.04
+    side = sapien_utils.look_at(side_position, side_target)
+    overhead_target = 0.55 * counter + 0.45 * base
+    overhead_target[2] = 0.65
+    overhead = sapien_utils.look_at(
+        overhead_target + np.array([0.4, -2.8, 3.0]), overhead_target
+    )
+
+    picture = np.asarray(scene.picture_center, dtype=float)
+    front = np.asarray(scene.robot_spawn_pos, dtype=float)[:2] - picture[:2]
+    front /= np.linalg.norm(front)
+    front = np.array([front[0], front[1], 0.0])
+    width = np.cross(np.array([0.0, 0.0, 1.0]), front)
+    fridge_target = 0.5 * (picture + base)
+    fridge_target[2] = 0.9
+    fridge = sapien_utils.look_at(
+        fridge_target + front * 2.5 + width * 0.45 + np.array([0.0, 0.0, 0.9]),
+        fridge_target,
+    )
+
+    for name, pose in zip(CAMERA_NAMES, (side, overhead, fridge)):
+        cameras[name].camera.set_local_pose(pose.sp)
+
+
+def _ready_qpos(agent):
+    robot = agent.robot
+    current = robot.get_qpos().cpu().numpy()[0].astype(np.float64)
+    rest = np.asarray(agent.keyframes["rest"].qpos, dtype=np.float64)
+    goal = current.copy()
+    names = list(agent.controller.controllers["arm"].config.joint_names)
+    names.append("torso_lift_joint")
+    for name in names:
+        index = robot.active_joints_map[name].active_index[0].item()
+        goal[index] = rest[index]
+    return current, goal
+
+
+def _heading_error_degrees(agent, target):
+    base = agent.base_link.pose.sp
+    direction = np.asarray(target, dtype=float)[:2] - base.p[:2]
+    direction = np.array([direction[0], direction[1], 0.0])
+    distance = np.linalg.norm(direction)
+    if distance < 1e-8:
+        return 0.0
+    direction /= distance
+    heading = base.to_transformation_matrix()[:3, 0].copy()
+    heading[2] = 0.0
+    heading /= np.linalg.norm(heading)
+    error = np.arctan2(np.cross(heading, direction)[2], np.dot(heading, direction))
+    return float(np.degrees(error))
+
+
+def _turn_toward_point(env, planner, target):
+    _yaw_base_to(env, planner, target, align_deg=0.05)
+    planner.idle_steps(t=10)
+    return abs(_heading_error_degrees(env.unwrapped.agent, target))
+
+
+def _drive_straight_to_point(
+    env, planner, target_position, max_speed=0.18, acceleration=0.35,
+    reverse=False, stop_when=None, tolerance=0.01,
+):
+    agent = env.unwrapped.agent
+    arm = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+    grip = planner.gripper_state
+    body = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
+    target = np.asarray(target_position, dtype=float)[:2]
+    dt = float(env.unwrapped.control_timestep)
+    speed = 0.0
+    stalled_steps = 0
+    max_steps = 1500
+
+    start = agent.base_link.pose.p[0].cpu().numpy()[:2].copy()
+    drive_direction = target - start
+    length = float(np.linalg.norm(drive_direction))
+    if length > 0.0:
+        drive_direction /= length
+
+    def remaining_distance():
+        base = agent.base_link.pose.p[0].cpu().numpy()
+        return float(np.dot(target - base[:2], drive_direction))
+
+    def target_error():
+        base = agent.base_link.pose.p[0].cpu().numpy()
+        return float(np.linalg.norm(base[:2] - target))
 
     def heading():
-        xa = agent.base_link.pose.sp.to_transformation_matrix()[:3, 0]
-        return np.arctan2(xa[1], xa[0])
+        value = agent.base_link.pose.sp.to_transformation_matrix()[:3, 0].copy()
+        value[2] = 0.0
+        return value / np.linalg.norm(value)
 
-    for _ in range(max_iter):
-        veg = target_veg.pose.p[0].cpu().numpy()
-        # veg-attach monitor: a weak grip can drop the vegetable during the
-        # first rotation; the held veg rides ~0.1-0.15 m from the TCP, a
-        # larger gap means it is lost
-        tcp = agent.tcp.pose.p[0].cpu().numpy()
-        if float(np.linalg.norm(tcp - veg)) > 0.25:
-            print(f"[INFO] transport: vegetable lost (TCP-veg "
-                  f"{np.linalg.norm(tcp - veg):.2f} m); aborting")
-            return -1
-        rem = np.asarray(aim_xy, dtype=float) - veg[:2]
-        if float(np.linalg.norm(rem)) < margin:
-            return 0
-        base = agent.base_link.pose.p[0].cpu().numpy()
-        h = heading()
-        # the vegetable's local offset in the base frame (the arm is rigid
-        # during the transport): re-measured every iteration
-        dx, dy = veg[0] - base[0], veg[1] - base[1]
-        cos_h, sin_h = np.cos(h), np.sin(h)
-        veg_local = np.array([cos_h * dx + sin_h * dy, -sin_h * dx + cos_h * dy])
-
-        def base_target(ang):
-            c, s = np.cos(ang), np.sin(ang)
-            return np.array([aim_xy[0] - (c * veg_local[0] - s * veg_local[1]),
-                             aim_xy[1] - (s * veg_local[0] + c * veg_local[1])])
-
-        d = np.arctan2(rem[1], rem[0])
-        # scan the full circle; pick the heading whose drive direction
-        # (forward or backward) is closest to the residual
-        h_drive, best_err = None, np.inf
-        for h in np.arange(-np.pi, np.pi, np.deg2rad(6.0)):
-            # the base-end must stay south of the drive's actual guard
-            # (y > -0.95 aborts in _velocity_segment), NOT the conservative
-            # -1.0 line: the bowl-center aim sits up to ~1 cm north of what
-            # -1.0 allows (observed: veg_local 0.44 -> min base-end y -0.993,
-            # 7 mm over the line, "no feasible drive heading" -> run lost)
-            if base_target(h)[1] <= -0.95:
-                for drive in (h, h + np.pi):
-                    err = abs(((drive - d + np.pi) % (2 * np.pi)) - np.pi)
-                    if err < best_err:
-                        best_err, h_drive = err, h
-        if h_drive is None:
-            print(f"[INFO] transport: no feasible drive heading at base "
-                  f"{np.round(base, 3)}, veg {np.round(veg[:2], 3)} "
-                  f"h={np.degrees(h):.1f} veg_local={np.round(veg_local, 3)} "
-                  f"rem={np.round(rem, 3)}")
-            return -1
-        # Execute each world leg through turn → straight drive → turn-back.
-        veg = target_veg.pose.p[0].cpu().numpy()
-        rem = np.asarray(aim_xy, dtype=float) - veg[:2]
-        if float(np.linalg.norm(rem)) < margin:
-            return 0
-        base = agent.base_link.pose.p[0].cpu().numpy()
-        step = min(1.0, 0.4 / max(float(np.linalg.norm(rem)), 1e-6))
-        waypoint = base + np.array([rem[0] * step, rem[1] * step, 0.0])
-        waypoint[1] = min(waypoint[1], -1.0)
-        arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-        body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-        body_action[0] = body_action[1] = 0.0
-        res = _velocity_segment(
-            env, planner, waypoint, arm_action, body_action,
-            planner.gripper_state, speed=0.18, max_bursts=80,
-            tol=0.06, y_guard=False, x_min=0.05,
+    initial_heading = heading()
+    initial_error = target_error()
+    initial_remaining = remaining_distance()
+    previous_remaining = initial_remaining
+    steps = 0
+    stalled = False
+    interrupted = False
+    for steps in range(1, max_steps + 1):
+        if stop_when is not None and stop_when():
+            interrupted = True
+            break
+        remaining = remaining_distance()
+        if remaining <= tolerance:
+            break
+        desired_speed = min(max_speed, 0.9 * remaining)
+        speed += float(
+            np.clip(desired_speed - speed, -acceleration * dt, acceleration * dt)
         )
-        if res == -1:
-            arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-            body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-            # pi-lens-ignore: unchecked-throwing-call-python
-            body_action[0] = body_action[1] = 0.0
-            # slow: the default 0.35 m/s bursts jerk a smooth vegetable out
-            # of the fingertip grip (observed drops); 0.18 is gentle enough
-            res = _velocity_segment(env, planner, waypoint, arm_action,
-                                    body_action, planner.gripper_state,
-                                    speed=0.18, x_min=0.05)
-        planner.planner.update_from_simulation()
-    print(f"[INFO] transport: did not converge after {max_iter} iterations")
-    return -1
-
-
-def planning(env, seed, debug=False, vis=None, info=False):
-    vis = vis or env.unwrapped.render_mode == "human"
-
-    unwenv: MyRoboCasaFridgeVeggies = env.unwrapped
-    if unwenv.render_mode is not None:
-        _install_render_cameras(env)  # configs are read during reconfigure
-    obs, _ = env.reset(seed=seed, options={"reconfigure": True})
-    # ManiSkill resolves agent/controller types dynamically at runtime.
-    agent: Any = unwenv.agent  # must be captured AFTER the reconfigure reset
-
-    # --- identify the target from the fridge picture -----------------------
-    # The scene shows the pictured vegetable's own photo texture; the planner
-    # reads the scene state directly (the picture actor shown this episode).
-    target_idx = unwenv._picture_target
-    target_veg = unwenv.veggies[target_idx]
-    print(f"Target vegetable (from fridge picture): {target_veg.name}")
-    if unwenv.render_mode is not None:
-        _pose_render_cameras(env, target_veg)  # per-episode camera poses
-
-    # --- Approach the target vegetable --------------------------------------
-    # No teleportation: the base DRIVES. The robot may spawn right next to the
-    # fridge with the extended arm poking INTO it (which makes every screw plan
-    # fail), so fold the arm to the rest config first, drive, then unfold.
-    mesh = target_veg.get_first_collision_mesh(to_world_frame=True)
-    severe_grasp_geometry = False
-    if mesh is not None:
-        obb: Box = mesh.bounding_box_oriented
-        veg_center = obb.center_mass.copy()
-        axes = np.asarray(obb.transform)[:3, :3]
-        world_ext = np.asarray(obb.extents)
-        local_ext = np.asarray(obb.primitive.extents)
-        horiz = [i for i in range(3) if abs(axes[2, i]) < 0.5]
-        if len(horiz) > 1:
-            old_i = min(horiz, key=lambda i: world_ext[i])
-            new_i = min(horiz, key=lambda i: local_ext[i])
-            severe_grasp_geometry = (
-                local_ext[old_i] > 0.10 and local_ext[new_i] < 0.035
+        # Slew-limit speed; hold yaw at zero for the entire straight segment.
+        forward = -speed if reverse else speed
+        env.step(np.hstack([arm, grip, body, _base_cmd(forward=forward, yaw=0.0)]))
+        remaining = remaining_distance()
+        stalled_steps = (
+            stalled_steps + 1 if remaining >= previous_remaining - 1e-5 else 0
+        )
+        previous_remaining = remaining
+        if steps % 100 == 0:
+            env.log_event(
+                "drive_progress",
+                "Straight approach to point",
+                remaining_m=round(remaining, 3),
+                target_error_m=round(target_error(), 3),
+                forward_speed=round(forward, 3),
+                yaw_command=0.0,
             )
+        if stalled_steps >= 50:
+            stalled = True
+            break
 
-    arm_idx = agent.controller.controllers["arm"].active_joint_indices.cpu().numpy()
-    rest_qpos = np.asarray(agent.keyframes["rest"].qpos)
-    # fold ONLY the arm joints: the rest keyframe's base joints are zero, so
-    # set_qpos(rest) would teleport the base back to the spawn (a hidden base
-    # teleportation that also breaks every subsequent drive)
-    q = agent.robot.qpos[0].cpu().numpy().copy()
-    q[arm_idx] = rest_qpos[arm_idx]
-    agent.robot.set_qpos(q)
-
-    planner: Any = FetchMotionPlanningSapienSolver(
-        env,
-        base_pose=agent.robot.pose,
-        vis=vis,
-        print_env_info=info,
-        debug=debug,
+    while speed > 1e-4:
+        speed = max(0.0, speed - acceleration * dt)
+        forward = -speed if reverse else speed
+        env.step(np.hstack([arm, grip, body, _base_cmd(forward=forward, yaw=0.0)]))
+    planner.planner.update_from_simulation()
+    final_error = target_error()
+    final_remaining = remaining_distance()
+    final_position = agent.base_link.pose.p[0].cpu().numpy()[:2]
+    displacement = final_position - start
+    cross_track = abs(
+        drive_direction[0] * displacement[1]
+        - drive_direction[1] * displacement[0]
     )
-    planner.MAX_REFINE_STEPS = 100
-    for i, veg in enumerate(unwenv.veggies):
-        env.track_object(veg, f"veg_{i}")
-    env.track_object(unwenv.plate, "plate")
-    env.track_object(agent.tcp, "robot_tcp")
-    env.track_object(agent.base_link, "robot_base")
-    env.log_event("start", "Planning started")
-    env.log_event("info", "Target identified", target=target_veg.name)
-
-    grasp_pose = None
-    # straight-south stances can put the base in the dishwasher/stack-cabinet
-    # corridor; diagonal stances approach the same strip from ±40 deg. The
-    # reach is a top-down grasp: the arm's effective reach at the grasp
-    # height is ~0.75 m, and the base cannot cross y=-1.0 (the counter front
-    # face), so stances closer than 0.6 m give the IK a much bigger feasible
-    # region (the 0.6-0.7 m band was marginal - the same geometry succeeded
-    # or failed depending on the mplib RNG). 0.8 m stances never succeeded
-    # (beyond the reach) and were dropped.
-    straight = np.array([0.0, -1.0])
-    diagonals = [
-        np.array([0.5, -0.8660254]),
-        np.array([-0.5, -0.8660254]),
-    ]
-    stance_dirs = diagonals + [straight] if severe_grasp_geometry else (
-        [straight] + diagonals
+    final_heading = heading()
+    heading_drift = float(
+        np.degrees(
+            np.arctan2(
+                np.cross(initial_heading, final_heading)[2],
+                np.dot(initial_heading, final_heading),
+            )
+        )
     )
-    for sdir in stance_dirs:
-        for dist in (0.5, 0.6):
-            # fold the arm again before any drive: after a failed grasp the arm
-            # can be in a pose that blocks screw planning (and the spawn is
-            # inside the fridge with the arm extended). Arm joints only - the
-            # base must NOT be teleported.
-            q = agent.robot.qpos[0].cpu().numpy().copy()
-            q[arm_idx] = rest_qpos[arm_idx]
-            agent.robot.set_qpos(q)
-            planner.planner.update_from_simulation()
-            # re-observe the target right before each stance: it may have been
-            # knocked or shifted during earlier attempts / base drive-in
-            veg_center = target_veg.pose.p[0].cpu().numpy().copy()
-            approach_pos = veg_center.copy()
-            approach_pos[:2] += sdir * dist
-            counter_front_y = float(
-                unwenv.counter_pos[1] - unwenv.counter_size[1] / 2
-            )
-            approach_pos[1] = min(approach_pos[1], counter_front_y - 0.02)
-            approach_pos[2] = 0.0
-            staging_pos = approach_pos.copy()
-            staging_pos[1] = min(staging_pos[1], counter_front_y - 0.35)
-            if np.linalg.norm(
-                agent.base_link.pose.p[0].cpu().numpy()[:2] - staging_pos[:2]
-            ) >= 0.10:
-                print(f"Staging base in open corridor at {np.round(staging_pos, 3)}")
-                _drive_base(env, planner, staging_pos)
-                planner.planner.update_from_simulation()
-            print(f"Approaching target: driving base to {np.round(approach_pos, 3)}")
-            env.log_event("phase", "Approach target")
-            _drive_base(env, planner, approach_pos)
-            planner.planner.update_from_simulation()
+    return {
+        "initial_target_error_m": initial_error,
+        "final_target_error_m": final_error,
+        "final_remaining_m": final_remaining,
+        "cross_track_m": cross_track,
+        "steps": steps,
+        "heading_drift_deg": heading_drift,
+        "stalled": stalled,
+        "interrupted": interrupted,
+    }
 
-            actual = agent.base_link.pose.p[0].cpu().numpy()
-            err = float(np.linalg.norm(actual[:2] - approach_pos[:2]))
-            if err >= 0.12:
-                print(f"[WARN] drive to stance failed (err {err:.2f} m), trying next")
-                env.log_event("warn", "Drive to stance failed", error_m=round(err, 3))
-                continue
 
-            # face the vegetable: the drive leaves the base yawed along the
-            # travel direction, which can put the garlic outside the arm's
-            # forward workspace; rotate in place (folded arm) toward it
-            _yaw_base_to(env, planner, veg_center)
-            planner.planner.update_from_simulation()
-            # The in-place yaw rotation DRIFTS the base (PhysX slide,
-            # pi-lens-ignore: unchecked-throwing-call-python
-            # measured up to 0.26 m - seed 5), pushing it beyond the arm's
-            # reach. The reachable envelope is SMALLER than the flat ~0.75 m:
-            # the pre-grasp is HIGH (18 cm above the grasp) and the grasp is
-            # a base-fixed vertical descent, so the base must stay close
-            # (observed: bases at 0.60-0.65 m made the high reach / fixed
-            # descend IK-infeasible, seeds 32/47). Re-measure after the yaw
-            # and re-drive toward the vegetable when out of reach. yaw=False:
-            # the base already faces it, and a second yaw near the vegetable
-            # would sweep the 0.5 m folded arm through it (observed: cucumber
-            # knocked under the cabinet overhang).
-            base_p = agent.base_link.pose.p[0].cpu().numpy()
-            b2v = float(np.linalg.norm(base_p[:2] - veg_center[:2]))
-            if b2v > 0.68:
-                print(f"[INFO] yaw drift: base {b2v:.2f} m from vegetable "
-                      f"(reach ~0.60 m at the high pre-grasp), re-driving closer")
-                _drive_base(
-                    env, planner,
-                    base_p + (veg_center - base_p) / b2v * (b2v - 0.55),
-                    yaw=False,
-                )
-                planner.planner.update_from_simulation()
-            # NOTE: the arm stays folded; the reach plans FROM the folded pose
-            # pi-lens-ignore: unchecked-throwing-call-python
-            # (a set_qpos unfold would push the TCP into the counter volume)
+def _narrow_closing_axis(mesh, reference):
+    """Choose the minimum-width horizontal grasp from real collision vertices.
 
-            print("Reaching + grasping target vegetable")
-            env.log_event("phase", "Reaching target vegetable")
-            # Keep proven high clearance first; a lower pre-grasp can recover
-            # poses whose high target is outside the arm's collision-free
-            # envelope without disturbing seeds that already work.
-            grasp_pose = None
-            for pre_clear in (0.14, 0.10):
-                grasp_pose = _reach_and_grasp(
-                    env,
-                    planner,
-                    agent,
-                    pre_clear=pre_clear,
-                    rank_closings=severe_grasp_geometry,
-                )
-                planner.planner.update_from_simulation()
-                if grasp_pose is not None:
-                    break
-            if grasp_pose is None:
-                continue
+    A 3D OBB's short axes can roll out of the horizontal plane (e.g. corn),
+    leaving only its long axis after a tilt filter. Project the mesh into XY
+    instead. The parallel jaws are symmetric, so search modulo 180 degrees.
+    """
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    if (vertices.ndim != 2 or vertices.shape[1] != 3
+            or len(vertices) < 3 or not np.isfinite(vertices).all()):
+        raise ValueError("vegetable collision mesh needs finite 3D vertices")
+    xy = vertices[:, :2] - vertices[:, :2].mean(axis=0)
+    if np.linalg.matrix_rank(xy, tol=1e-10) < 2:
+        raise ValueError("vegetable has degenerate horizontal collision geometry")
+    angles = np.arange(1800, dtype=np.float64) * (np.pi / 1800)
+    directions = np.column_stack((np.cos(angles), np.sin(angles)))
+    widths = np.array([np.ptp(xy @ direction) for direction in directions])
+    closing = np.r_[directions[int(np.argmin(widths))], 0.0]
+    return -closing if np.dot(closing, reference) < 0.0 else closing
 
-            # grasp-validity gate: a stuck reach still returns non-(-1), so
-            # close the gripper, LIFT, and verify the vegetable actually rose
-            # with the gripper (the weak tcp-distance test passes when the TCP
-            # merely hovers near the vegetable without holding it). An empty
-            # grasp is rejected here and the next stance is tried.
-            print("Grasp vegetable")
-            env.log_event("phase", "Grasp target vegetable")
-            planner.close_gripper(t=12 if severe_grasp_geometry else 6)
-            planner.planner.update_from_simulation()
-            veg_z0 = float(target_veg.pose.p[0].cpu().numpy()[2])
 
-            _attach_object(planner, target_veg)
-            planner.planner.update_from_simulation()
+def _grasp_and_lift(env, planner, target_veg):
+    agent = env.unwrapped.agent
+    body = agent.controller.controllers["body"]
+    torso_index = int(body.active_joint_indices[2])
+    torso_start = float(body.qpos[0, 2])
+    torso_min = float(agent.robot.get_qlimits()[0, torso_index, 0])
+    base_start = agent.base_link.pose.p[0].cpu().numpy().copy()
+    tcp_start = agent.tcp.pose.p[0].cpu().numpy().copy()
+    counter = env.unwrapped.counter_pos
+    table_z = float(counter[2] + env.unwrapped.counter_size[2] / 2)
 
-            print("Lift vegetable")
-            env.log_event("phase", "Lift vegetable")
-            _lift_veggie(env, planner, agent, grasp_pose)
-            planner.planner.update_from_simulation()
-
-            tcp_pos = agent.tcp.pose.p[0].cpu().numpy()
-            veg_now = target_veg.pose.p[0].cpu().numpy()
-            # Require both physical contact and a measured lift. Contact
-            # alone can be a finger/counter collision that falsely licenses
-            # transport with an empty gripper.
-            grasped = bool(agent.is_grasping(target_veg)) and (
-                np.linalg.norm(tcp_pos - veg_now) < 0.08
-                and (veg_now[2] - veg_z0) > 0.03
-            )
-            if not grasped:
-                print(
-                    f"Grasp invalid: vegetable did not rise with gripper "
-                    f"(z {veg_z0:.3f} -> {veg_now[2]:.3f}), trying next stance."
-                )
-                env.log_event("error", "Grasp invalid (vegetable not lifted)")
-                planner.open_gripper()
-                _detach_object(planner)
-                grasp_pose = None
-                continue
-            # validated grasp: stop trying stances
-            break
-        if grasp_pose is not None:
-            break
-
-    if grasp_pose is None:
-        print("Grasping failed entirely.")
-        success = bool(unwenv.evaluate()["success"].item())  # pyright: ignore[reportAttributeAccessIssue]
-        env.log_event("result", "Task failed at grasp", success=success)
-        env.reset()
-        return success
-
-    # --- transport to the plate ---------------------------------------------
-    # The takeitback-proven transport: rotate toward the transfer direction,
-    # then drive velocity bursts with the arm frozen (the fork's burst driver
-    # measures the actual motion and rotates only to correct it). The close
-    # verified high lift keeps the vegetable clear of the counter front wall.
-    # aim the transport/centering/descent at the pot's BOWL center, not the
-    # actor origin: the origin is the AABB center (incl. the long handle),
-    # which sits 70-91% of the rim radius toward the handle (see
-    # _pot_bowl_center)
-    plate_center = _pot_bowl_center(env)
-    print("\n--- Drive base toward plate ---")
-    env.log_event("phase", "Drive base toward plate")
-    for drive_attempt in range(3):
-        veg_now = target_veg.pose.p[0].cpu().numpy()
-        dxy = np.linalg.norm(veg_now[:2] - plate_center[:2])
-        # drive until the vegetable is actually over the plate center (0.05):
-        # with yaw_sweep=False the transport translates DIRECTLY (no rotation
-        # swings the held veg away), so the final few centimetres are safe to
-        # close by driving. The old 0.60 break belonged to the orbit-swung
-        # transport, where driving closer only arced the veg away.
-        if dxy < 0.05:
-            break
-        if veg_now[2] < 1.0:
-            print("Transport: vegetable dropped, aborting transport.")
-            env.log_event("error", "Vegetable dropped during transport")
-            break
-        res = env.log_motion(
-            "Drive base to plate",
-            _transport_veg,
-            env,
-            planner,
-            agent,
-            target_veg,
-            plate_center[:2],
-            # tight: the raise-then-open release drops the veg ~5 cm and the
-            # bounce rolls it up to ~5 cm further, so release near the rim
-            # (0.05) ends up oscillating on it. Deliver to 0.03.
-            margin=0.03,
+    def finger_bottom():
+        return min(
+            float(obj.get_global_aabb_fast()[0][2])
+            for link in (agent.finger1_link, agent.finger2_link)
+            for obj in link._objs
         )
-        planner.planner.update_from_simulation()
-        veg_now = target_veg.pose.p[0].cpu().numpy()
-        dxy = np.linalg.norm(veg_now[:2] - plate_center[:2])
-        print(f"[WARN] veggie {dxy:.2f} m from plate after transport")
-        env.log_event("warn", "Veggie not over plate", dxy=round(float(dxy), 3))
 
-    # --- center the vegetable over the plate (base rotation ONLY) ---------
-    # The arm-alignment loop (small TCP steps toward the plate) is REMOVED:
-    # it pushes the arm to the workspace edge, after which the base-fixed
-    # vertical descent cannot find IK solutions and the vegetable releases
-    # from >15 cm (bounces off the plate). Centering is done by ROTATING the
-    # base: the held veg rides a ~0.5 m orbit around the base, so a yaw sweep
-    # swings it onto the plate without touching the arm. Center to <=0.04 m
-    # (a long vegetable released at 0.06-0.10 off-center has its end past the
-    # 0.116 m rim and tips off during the settle).
-    veg_now = target_veg.pose.p[0].cpu().numpy()
-    # pi-lens-ignore: unchecked-throwing-call-python
-    dxy = np.linalg.norm(veg_now[:2] - plate_center[:2])
-    if 0.05 <= dxy < 0.35 and veg_now[2] >= 1.0:
-        # If the pot lies on the held payload's current orbit around the base,
-        # yaw alone can finish a stalled transport without moving the arm.
-        base_xy = agent.base_link.pose.p[0].cpu().numpy()[:2]
-        veg_from_base = veg_now[:2] - base_xy
-        pot_from_base = plate_center[:2] - base_xy
-        radius_error = abs(
-            np.linalg.norm(veg_from_base) - np.linalg.norm(pot_from_base)
-        )
-        if radius_error <= 0.04:
-            heading = np.arctan2(
-                agent.base_link.pose.sp.to_transformation_matrix()[1, 0],
-                agent.base_link.pose.sp.to_transformation_matrix()[0, 0],
-            )
-            local_angle = np.arctan2(veg_from_base[1], veg_from_base[0]) - heading
-            goal_heading = (
-                np.arctan2(pot_from_base[1], pot_from_base[0]) - local_angle
-            )
-            from utils.planners_utils import _yaw_sweep_with_pass_check
-
-            _yaw_sweep_with_pass_check(
-                env,
-                planner,
-                np.array([np.cos(goal_heading), np.sin(goal_heading)]),
-                plate_center,
-                target_obj=target_veg,
-                rot_cap=0.06,
-                pass_dxy=0.04,
-            )
-            planner.planner.update_from_simulation()
-
-    veg_now = target_veg.pose.p[0].cpu().numpy()
-    dxy = np.linalg.norm(veg_now[:2] - plate_center[:2])
-    if 0.05 <= dxy < 0.60 and veg_now[2] >= 1.0:
-        # arm alignment: step the TCP toward the plate center in small
-        # verified motions (a single long arm motion at the workspace edge
-        # swings the vegetable out of the fingers). The prop-drive transport
-        # reliably delivers the veg to ~0.13 m; these steps close the gap to
-        # the release gate (0.05).
-        for _ in range(6):
-            veg_now = target_veg.pose.p[0].cpu().numpy()
-            dxy = np.linalg.norm(veg_now[:2] - plate_center[:2])
-            if dxy < 0.05 or veg_now[2] < 1.0:
-                break
-            tcp_now = agent.tcp.pose.sp
-            residual = plate_center[:2] - veg_now[:2]
-            rdist = float(np.linalg.norm(residual))
-            if rdist < 0.01:
-                break
-            step = residual / rdist * min(rdist, 0.10)
-            target_tcp = sapien.Pose(
-                p=tcp_now.p + np.array([step[0], step[1], 0.0]), q=tcp_now.q
-            )
-            res = env.log_motion(
-                "Align veggie over plate",
-                _safe_manipulation,
-                env,
-                planner,
-                # pi-lens-ignore: unchecked-throwing-call-python
-                target_tcp,
-                disable_lift_joint=False,
-                n_init_qpos=300,
-            )
-            if res != -1 and _tcp_at(agent, target_tcp, tol=0.10):
-                # corrective second motion: converges from the approximate pose
-                res = env.log_motion(
-                    "Align veggie over plate (corrective)",
-                    _safe_manipulation,
-                    env,
-                    planner,
-                    target_tcp,
-                    disable_lift_joint=False,
-                    n_init_qpos=300,
-                )
-            elif res == -1:
-                # one retry: a single IK miss at the workspace edge often
-                # succeeds on re-planning from the same pose
-                res = env.log_motion(
-                    "Align veggie over plate (retry)",
-                    _safe_manipulation,
-                    env,
-                    planner,
-                    target_tcp,
-                    disable_lift_joint=False,
-                    n_init_qpos=300,
-                )
-            planner.planner.update_from_simulation()
-            if res == -1 or not _tcp_at(agent, target_tcp, tol=0.05):
-                print("[WARN] arm alignment step failed")
-                break
-        veg_now = target_veg.pose.p[0].cpu().numpy()
-        dxy = np.linalg.norm(veg_now[:2] - plate_center[:2])
-        print(f"Aligned veggie over plate (residual {dxy:.3f} m)")
-        env.log_event("info", "Veggie aligned over plate")
-
-    # gate: only lower/release when the held veggie is actually OVER the plate
-    # (well within its radius - a long vegetable released near the rim tips
-    # off during the settle); a looser gate releases the veg beside the plate
-    # and it falls off the counter
-    veg_now = target_veg.pose.p[0].cpu().numpy()
-    dxy = np.linalg.norm(veg_now[:2] - plate_center[:2])
-    if dxy < 0.05:
-        print("Lower vegetable onto plate (smooth vertical movement)")
-        env.log_event("phase", "Lower vegetable onto plate")
-        # drop the vegetable to just above the plate: a fixed 0.10 m drop is
-        # not enough after a high lift (the release then bounces the vegetable
-        # off the plate). Compute the drop from the held height to the plate
-        # top plus the vegetable's LYING half height plus a small gap.
-        veg_z = float(target_veg.pose.p[0].cpu().numpy()[2])
-        plate_z = float(unwenv.plate.pose.p[0].cpu().numpy()[2])
-        # the vegetable lies FLAT once released: its resting half-height is
-        # the MINIMUM half-extent (for an elongated carrot the max is its
-        # half-length, which would leave it hanging centimetres above the
-        # plate - it then stays wedged in the open fingers and gets shaken
-        # off during retract)
-        half = float(np.min(obb.extents) / 2) if obb is not None else 0.02
-        target_drop = max(0.005, veg_z - (plate_z + half + 0.005))
-        # lower with small VERTICAL BASE-FIXED TCP steps: a torso drop swings
-        # the near-full-extension arm like a pendulum - the object lands
-        # centimetres off target; a free-base descent swings the whole robot.
-        # pi-lens-ignore: unchecked-throwing-call-python
-        # The follow_path executor writes ABSOLUTE plan qpos into the delta
-        # pi-lens-ignore: unchecked-throwing-call-python
-        # arm controller, so each step lands ~50% of the requested dz; loop
-        # on the MEASURED vegetable height instead of a fixed step count.
-        n_desc = 40
-        # raise the TORSO fully BEFORE the descent: the base-fixed descend
-        # executes via the torso (the IK keeps the arm angles ~fixed), so a
-        # raised torso gives the descent the full travel to lower the
-        # pi-lens-ignore: unchecked-throwing-call-python
-        # vegetable deep into the pot. The pot's walls hold it even if the
-        # release bounces it off the fingers.
-        arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-        body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-        body_action[0] = body_action[1] = 0.0
-        body_action[2] += 0.06  # torso UP (absolute target)
-        for _ in range(30):
-            a = np.hstack(
-                [arm_action, planner.gripper_state, body_action, _base_cmd()]
-            )
-            env.step(a)
-        planner.planner.update_from_simulation()
-        # the base-fixed plan descends via the TORSO (the IK keeps the arm
-        # angles ~fixed) and the veg drops only ~40% of the requested dz, so
-        # request a chunk (target_drop/6) and loop on the MEASURED height
-        dz_step = max(target_drop / 6, 0.02)
-        # the pot's bottom (the kinematic pot keeps its origin at the spawn
-        # height; its half-extent places the bottom at the counter top), plus
-        # the vegetable's lying half-height and a small gap - the vegetable
-        # rests INSIDE the pot with its top below the rim
-        # pi-lens-ignore: unchecked-throwing-call-python
-        release_z = plate_z - float(unwenv.plate_half[2]) + half + 0.005
-        fail_streak = 0
-        stall_streak = 0
-        for _k in range(n_desc):
-            # pi-lens-ignore: unchecked-throwing-call-python
-            veg_z_now = float(target_veg.pose.p[0].cpu().numpy()[2])
-            if veg_z_now <= release_z + 0.01:
-                break
-            res = _descend_tcp_step(env, planner, dz_step)
-            if res == -1:
-                # descent limit reached - work with the current height
-                fail_streak += 1
-                if fail_streak >= 2:
-                    break
-            else:
-                fail_streak = 0
-            planner.planner.update_from_simulation()
-            # pi-lens-ignore: unchecked-throwing-call-python
-            veg_z_after = float(target_veg.pose.p[0].cpu().numpy()[2])
-            print(f"[INFO] descend step {_k}: veg z {veg_z_now:.3f} -> {veg_z_after:.3f}")
-            if veg_z_now - veg_z_after < 0.005:
-                # a single short step is a plan/measurement transient; only
-                # give up after 3 consecutive no-progress steps
-                stall_streak += 1
-                if stall_streak >= 3:
-                    print("[WARN] descent stalled, releasing at current height")
-                    break
-            else:
-                stall_streak = 0
-
-        # low-orbit sweep: at this height a gentle yaw carries the vegetable
-        # along its LOW orbit; when it passes over the plate, release there.
-        # Trigger only when clearly off the plate (beyond radius+margin): a
-        # sweep started ON the plate swings it off the rim instead.
-        veg_now = target_veg.pose.p[0].cpu().numpy()
-        # pi-lens-ignore: unchecked-throwing-call-python
-        dxy_low = float(np.linalg.norm(veg_now[:2] - plate_center[:2]))
-        if dxy_low > 0.045:
-            base_xy = agent.base_link.pose.p[0].cpu().numpy()[:2]
-            from utils.planners_utils import _yaw_sweep_with_pass_check
-            _yaw_sweep_with_pass_check(
-                env, planner,
-                np.asarray(plate_center)[:2] - base_xy,
-                plate_center,
-                target_obj=target_veg,
-                rot_cap=0.10, pass_dxy=0.04,
-            )
-            planner.planner.update_from_simulation()
-            veg_now = target_veg.pose.p[0].cpu().numpy()
-            # pi-lens-ignore: unchecked-throwing-call-python
-            dxy_low = float(np.linalg.norm(veg_now[:2] - plate_center[:2]))
-            print(f"[INFO] low-orbit sweep done: {dxy_low:.3f} m from plate")
-
-        print("Release vegetable")
-        env.log_event("phase", "Release vegetable")
-        # The fingers are horizontal PLATES (±3 cm around the TCP) that wrap
-        # the vegetable's middle. If the descend stalled above the pot floor,
-        # the vegetable hangs between the plates and OPENING it lets the
-        # plates' bottom edges catch its top as it falls - the vegetable is
-        # LAUNCHED out of the pot (observed: veg flung 0.7 m after a descend
-        # that stalled 13 cm above the floor). First LOWER the torso to press
-        # the vegetable onto the pot floor (small increments, measured), then
-        # open: with the vegetable supported, the open is safe and the walls
-        # contain it.
-        arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-        body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-        body_action[0] = body_action[1] = 0.0
-        for _ in range(15):
-            # pi-lens-ignore: unchecked-throwing-call-python
-            veg_z_now = float(target_veg.pose.p[0].cpu().numpy()[2])
-            if veg_z_now <= release_z + 0.02:
-                break
-            body_action[2] -= 0.02  # absolute torso target, small steps
-            for _ in range(6):
-                a = np.hstack(
-                    [arm_action, planner.gripper_state, body_action, _base_cmd()]
-                )
-                env.step(a)
-        planner.planner.update_from_simulation()
-        # the torso alone cannot always press the vegetable onto the floor
-        # (the arm's lever is ~0.4, the torso hits its limit with the veg
-        # still above the pot bottom): retry the base-fixed vertical descent
-        # from the pressed pose - the arm can now flex to reach the floor
-        for _ in range(20):
-            # pi-lens-ignore: unchecked-throwing-call-python
-            veg_z_now = float(target_veg.pose.p[0].cpu().numpy()[2])
-            if veg_z_now <= release_z + 0.02:
-                break
-            res = _descend_tcp_step(env, planner, 0.03)
-            planner.planner.update_from_simulation()
-            if res == -1:
-                break
-        veg_z_now = float(target_veg.pose.p[0].cpu().numpy()[2])
-        if veg_z_now > release_z + 0.02:
-            remaining = veg_z_now - release_z - 0.01
-            print(f"[INFO] release descend fallback: torso drop {remaining:.3f} m")
-            lower_torso_smooth(
-                env,
-                planner,
-                target_drop=min(remaining, 0.16),
-                total_steps=60,
-                arm_action=arm_action,
-                gripper_action=planner.gripper_state,
-            )
-        planner.planner.update_from_simulation()
-        arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-        body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-        body_action[0] = body_action[1] = 0.0
-        gs = float(planner.gripper_state)  # -1 while holding
-        # pi-lens-ignore: unchecked-throwing-call-python
-        for frac in np.linspace(0.0, 1.0, 20):
-            a = np.hstack(
-                [arm_action, gs + (0.6 - gs) * frac, body_action, _base_cmd()]
-            )
-            env.step(a)
-        planner.gripper_state = 0.6
-        _detach_object(planner)
-        planner.planner.update_from_simulation()
-        # break any remaining finger contact: a WIDE vegetable (e.g. the
-        # sweet potato, ~5 cm) stays squeezed between the OPEN fingers at
-        # their max opening (~5 cm < the vegetable's width), so is_grasping
-        # never clears and the static check never passes (observed:
-        # pi-lens-ignore: unchecked-throwing-call-python
-        # dbg_grasped=True with the veg on the pot floor). Retreat the base
-        # (arm frozen, gripper open) until the fingers slide off the
-        # vegetable; the pot walls hold it inside.
-        if agent.is_grasping(target_veg):
-            print("[INFO] release: vegetable still touching the gripper; "
-                  "retreating the base to break contact")
-            from utils.planners_utils import _velocity_segment
-            base_now = agent.base_link.pose.p[0].cpu().numpy()
-            retreat = base_now.copy()
-            retreat[1] -= 0.40  # south, away from the counter
-            arm_a = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-            body_a = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-            body_a[0] = body_a[1] = 0.0
-            _velocity_segment(env, planner, retreat, arm_a, body_a,
-                              planner.gripper_state, speed=0.18, tol=0.06)
-            planner.planner.update_from_simulation()
-    else:
-        print(f"Transport failed: veggie {dxy:.2f} m from plate, aborting.")
+    # Put the real fingertips just above the table, not the TCP below it.
+    drop = finger_bottom() - (table_z + 0.005)
+    if drop <= 0.0 or torso_start - drop < torso_min:
         env.log_event(
-            "error", "Transport did not reach plate", dxy=round(float(dxy), 3)
+            "result", "Waypoints 2-9", success=False, failed_waypoint=7,
+            reason="safe grasp height is outside torso travel",
+            requested_drop_m=round(drop, 4),
         )
-        # same open-in-place release as the success path (see above).
-        arm_action = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-        body_action = agent.controller.controllers["body"].qpos[0].cpu().numpy().copy()
-        body_action[0] = body_action[1] = 0.0
-        gs = float(planner.gripper_state)
-        for frac in np.linspace(0.0, 1.0, 20):
-            a = np.hstack(
-                [arm_action, gs + (0.6 - gs) * frac, body_action, _base_cmd()]
-            )
-            env.step(a)
-        planner.gripper_state = 0.6
-        # pi-lens-ignore: unchecked-throwing-call-python
-        _detach_object(planner)
-        planner.planner.update_from_simulation()
+        return False
+    env.log_event(
+        "waypoint_start", "Waypoint 7: lower torso to grasp height",
+        target_index=env.unwrapped._picture_target,
+        target_name=target_veg.name,
+        requested_drop_m=round(drop, 4),
+        target_tcp_height_m=round(float(tcp_start[2]) - drop, 4),
+        fingertip_table_clearance_m=0.005,
+    )
+    env.log_motion(
+        "Waypoint 7: smooth torso descent", lower_torso_smooth,
+        env, planner, target_drop=drop, total_steps=60,
+    )
+    planner.idle_steps(t=10)
+    tcp = agent.tcp.pose.p[0].cpu().numpy()
+    vegetable = target_veg.pose.p[0].cpu().numpy()
+    actual_drop = torso_start - float(body.qpos[0, 2])
+    height_error = abs(float(tcp[2]) - (float(tcp_start[2]) - drop))
+    xy_error = float(np.linalg.norm(tcp[:2] - vegetable[:2]))
+    floor_clearance = finger_bottom() - table_z
+    lowered = (
+        actual_drop > 0.0 and height_error <= 0.01 and xy_error <= 0.01
+        and floor_clearance >= -0.001
+        and np.linalg.norm(agent.base_link.pose.p[0].cpu().numpy()[:2] - base_start[:2]) <= 0.01
+    )
+    env.log_event(
+        "waypoint_result", "Waypoint 7: torso lowered", success=bool(lowered),
+        actual_drop_m=round(actual_drop, 4), tcp_xy_error_m=round(xy_error, 4),
+        fingertip_table_clearance_m=round(floor_clearance, 4),
+    )
+    if not lowered:
+        env.log_event("result", "Waypoints 2-9", success=False, failed_waypoint=7)
+        return False
 
-    print("Retract arm (Bypassing planner to lift torso back up)")
-    env.log_event("phase", "Retract arm (bypassing planner to lift torso up)")
-    # NO arm motion after the release: the open gripper hovers a couple cm
-    # pi-lens-ignore: unchecked-throwing-call-python
-    # above the released vegetable, and ANY arm motion clips it - observed
-    # flings: torso lift sweeping the gripper across the plate (carrot flicked
-    # 25 cm), and a straight-up lift dragging the fingertips through the veg.
-    # The episode ends after the settle below, so the arm stays where it is;
-    # the frozen open gripper does not disturb the resting vegetable.
+    env.log_event("waypoint_start", "Waypoint 8: grasp target vegetable")
+    env.log_motion("Waypoint 8: close gripper", planner.close_gripper, t=20)
+    planner.idle_steps(t=10)
+    grasped = bool(agent.is_grasping(target_veg))
+    env.log_event("waypoint_result", "Waypoint 8: gripper contact", success=grasped)
+    if not grasped:
+        env.log_event(
+            "result", "Waypoints 2-10", success=False, failed_waypoint=8,
+            reason="target vegetable not gripped by both fingers",
+            target_index=env.unwrapped._picture_target,
+            target_name=target_veg.name,
+        )
+        return False
 
-    # settle: wait until the released vegetable STOPS MOVING (max ~300 steps;
-    # a round vegetable spins in place long after its position freezes, and
-    # an early evaluate fails the angular-velocity part of the static check).
-    # The settle action must keep the GRIPPER OPEN and the TORSO UP: an
-    # all-zero action drives the mimic gripper target to 0 (fully closed, the
-    # closing fingers clamp the released vegetable and the stored squeeze
-    # LAUNCHES it), AND the body controller is NOT delta (use_delta=False) -
-    # a zero body action is the ABSOLUTE target 0, so the torso drops from
-    # 0.34 to 0 and the arm collapses onto the plate (observed: torso 0.34 ->
-    # 0.17, arm folded, veg flicked 40 cm). Hold the torso at its current
-    # position and the gripper open.
-    settle_act = np.zeros(env.action_space.shape)
-    # hold the ARM at its current absolute targets too: the arm controller
-    # is ABSOLUTE (pd_joint_pos, use_delta=False), so zero arm slots would
-    # FOLD the arm and swing the open gripper through the released
-    # vegetable (observed: wedged veg dragged 58 cm off the pot)
-    settle_act[:7] = agent.controller.controllers["arm"].qpos[0].cpu().numpy()
-    settle_act[7] = planner.gripper_state  # gripper slot: hold it open
-    settle_act[8:11] = agent.controller.controllers["body"].qpos[0].cpu().numpy()
-    for _ in range(600):
-        vv = target_veg.linear_velocity[0].cpu().numpy()
-        av = target_veg.angular_velocity[0].cpu().numpy()
-        if float(np.linalg.norm(vv)) <= env.unwrapped.STATIC_V_MAX and float(
-            np.linalg.norm(av)
-        ) <= env.unwrapped.STATIC_AV_MAX:
-            break
-        env.step(settle_act)
-
-    print("Task completed. Closing env...")
-    ev = unwenv.evaluate()
-    success = bool(ev["success"].item())  # pyright: ignore[reportAttributeAccessIssue]
-    print("Success:", success,
-          {k: v for k, v in ev.items() if k.startswith("dbg")})
-    print("Success:", success)
-    # pi-lens-ignore: unchecked-throwing-call-python
-    env.log_event("result", "Task completed", success=success)
-    env.reset()
+    veg_before_lift = target_veg.pose.p[0].cpu().numpy().copy()
+    relative_before = veg_before_lift - agent.tcp.pose.p[0].cpu().numpy()
+    env.log_event(
+        "waypoint_start", "Waypoint 9: raise torso with vegetable",
+        lift_amount_m=round(actual_drop, 4),
+    )
+    # Negative drop uses the same smooth torso interpolation to raise it.
+    env.log_motion(
+        "Waypoint 9: smooth torso lift", lower_torso_smooth,
+        env, planner, target_drop=-actual_drop, total_steps=60,
+    )
+    planner.idle_steps(t=20)
+    vegetable = target_veg.pose.p[0].cpu().numpy()
+    tcp = agent.tcp.pose.p[0].cpu().numpy()
+    lifted = float(vegetable[2] - veg_before_lift[2])
+    relative_error = float(np.linalg.norm(vegetable - tcp - relative_before))
+    base_drift = float(np.linalg.norm(
+        agent.base_link.pose.p[0].cpu().numpy()[:2] - base_start[:2]
+    ))
+    grasped = bool(agent.is_grasping(target_veg))
+    torso_restore_error = abs(float(body.qpos[0, 2]) - torso_start)
+    failure_reasons = [
+        reason for passed, reason in (
+            (grasped, "target_contact_lost"),
+            (lifted >= 0.03, "vegetable_not_lifted"),
+            (relative_error <= 0.02, "vegetable_slipped"),
+            (base_drift <= 0.01, "base_moved_during_lift"),
+            (torso_restore_error <= 0.01, "torso_not_restored"),
+        ) if not passed
+    ]
+    success = not failure_reasons
+    env.log_event(
+        "grasp_validation" if success else "result",
+        "WP7-9 mandatory grasp gate", success=success,
+        failed_waypoint=None if success else 9,
+        failure_reasons=failure_reasons,
+        target_index=env.unwrapped._picture_target,
+        target_name=target_veg.name,
+        grasped=grasped, vegetable_lift_m=round(lifted, 4),
+        grasp_relative_error_m=round(relative_error, 4),
+        torso_restore_error_m=round(torso_restore_error, 4),
+        base_drift_m=round(base_drift, 4),
+    )
+    print(
+        f"Waypoints 7-9: success={success}, grasped={grasped}, "
+        f"vegetable_lift={lifted:.4f} m, relative_error={relative_error:.4f} m"
+    )
     return success
 
 
-if __name__ == "__main__":
-    args = parse_args()
-    SEED = args.seed
-    random.seed(SEED)
-    np.random.seed(SEED)
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-    # seed mplib's global RNG (std::srand, OMPL and FCL): without it the
-    # collision-aware IK / RRT outcomes vary run-to-run for the SAME seed -
-    # the same geometry succeeded or failed 0 vs 81 times depending on the
-    # unseeded draw sequence. With the seed the reach/grasp/transport are
-    # reproducible and the batch flakiness disappears.
-    import mplib.pymp as mplib_pymp
-    mplib_pymp.set_global_seed(SEED)
+def _retreat_with_vegetable(env, planner, target_veg):
+    agent = env.unwrapped.agent
+    if not bool(agent.is_grasping(target_veg)):
+        env.log_event(
+            "result", "Waypoints 2-10", success=False, failed_waypoint=10,
+            reason="target not held before retreat",
+        )
+        return False
+    start = agent.base_link.pose.p[0].cpu().numpy().copy()
+    heading = agent.base_link.pose.sp.to_transformation_matrix()[:3, 0].copy()
+    heading[2] = 0.0
+    heading /= np.linalg.norm(heading)
+    target = start - heading * 0.20
+    relative = (
+        target_veg.pose.p[0].cpu().numpy() - agent.tcp.pose.p[0].cpu().numpy()
+    ).copy()
 
+    def lost_grasp():
+        current = target_veg.pose.p[0].cpu().numpy() - agent.tcp.pose.p[0].cpu().numpy()
+        return not bool(agent.is_grasping(target_veg)) or np.linalg.norm(current - relative) > 0.02
+
+    env.log_event(
+        "waypoint_start", "Waypoint 10: retreat 0.20 m without turning",
+        target_position_m=np.round(target, 4).tolist(),
+        distance_m=0.20, yaw_command=0.0,
+    )
+    drive = env.log_motion(
+        "Waypoint 10: retreat while holding vegetable",
+        _drive_straight_to_point, env, planner, target,
+        max_speed=0.10, acceleration=0.20, reverse=True,
+        stop_when=lost_grasp, tolerance=0.003,
+    )
+    planner.idle_steps(t=20)
+    base = agent.base_link.pose.p[0].cpu().numpy()
+    target_error = float(np.linalg.norm(base[:2] - target[:2]))
+    retreated = float(np.dot(start[:2] - base[:2], heading[:2]))
+    held = not lost_grasp()
+    success = bool(
+        held and not drive["interrupted"] and not drive["stalled"]
+        and target_error <= 0.015 and drive["cross_track_m"] <= 0.01
+        and abs(drive["heading_drift_deg"]) <= 0.3
+    )
+    env.log_event(
+        "waypoint_result" if success else "result",
+        "Waypoint 10: retreat validated", success=success,
+        failed_waypoint=None if success else 10,
+        grasped=held, retreat_distance_m=round(retreated, 4),
+        target_error_m=round(target_error, 4),
+        heading_drift_deg=round(drive["heading_drift_deg"], 3),
+        cross_track_m=round(float(drive["cross_track_m"]), 4),
+        stopped_on_grasp_loss=drive["interrupted"],
+    )
     print(
-        f"[INFO] seed={SEED}, render_mode='{args.render_mode}', "
-        f"debug={args.debug}, info={args.info}, log_dir='{args.log_dir}'"
+        f"Waypoint 10: success={success}, retreat={retreated:.4f} m, "
+        f"target_error={target_error:.4f} m, held={held}"
+    )
+    return success
+
+
+def _pot_bowl_center_world(plate):
+    mesh = plate.get_first_collision_mesh(to_world_frame=True)
+    if mesh is None:
+        raise ValueError("pot collision mesh unavailable")
+    vertices = np.asarray(mesh.vertices)
+    middle_z = (vertices[:, 2].min() + vertices[:, 2].max()) / 2
+    # Fit in world XY; the handle must not bias the bowl centre at rotated poses.
+    rim = vertices[vertices[:, 2] > middle_z, :2]
+    fit = _fit_rim_circle(rim) if len(rim) >= 10 else None
+    if fit is None:
+        raise ValueError("pot bowl rim could not be identified")
+    return np.r_[fit[1], float(plate.pose.p[0, 2])]
+
+
+def _approach_pot(env, planner, target_veg):
+    agent = env.unwrapped.agent
+
+    def grasp_offset():
+        rotation = agent.tcp.pose.sp.to_transformation_matrix()[:3, :3]
+        delta = target_veg.pose.p[0].cpu().numpy() - agent.tcp.pose.p[0].cpu().numpy()
+        return rotation.T @ delta
+
+    if not bool(agent.is_grasping(target_veg)):
+        env.log_event(
+            "result", "Waypoints 2-12", success=False, failed_waypoint=11,
+            reason="target not held before pot approach",
+        )
+        return False
+    relative = grasp_offset().copy()
+
+    def lost_grasp():
+        return not bool(agent.is_grasping(target_veg)) or np.linalg.norm(grasp_offset() - relative) > 0.02
+
+    try:
+        pot_center = _pot_bowl_center_world(env.unwrapped.plate)
+    except ValueError as exc:
+        env.log_event(
+            "result", "Waypoints 2-12", success=False, failed_waypoint=11,
+            reason=str(exc),
+        )
+        return False
+    # Southeast dock keeps the west-facing hand clear of the left kitchen wall.
+    # Jitter only the radial standoff; preserve the safe approach direction.
+    approach_radius = POT_APPROACH_RADIUS_M + _waypoint_offset(
+        planner, "wp12_pot_radius_m"
+    )
+    approach_direction = np.array([
+        0.25,
+        -np.sqrt(POT_APPROACH_RADIUS_M**2 - 0.25**2),
+    ])
+    approach_direction /= np.linalg.norm(approach_direction)
+    approach_point = np.r_[pot_center[:2] + approach_direction * approach_radius, 0.0]
+    # Include the real payload in collision sweeps; attachment is planning-only.
+    _attach_object(planner, target_veg)
+    planner.planner.update_from_simulation()
+    base_before = agent.base_link.pose.p[0].cpu().numpy().copy()
+    direction = approach_point - base_before
+    direction[2] = 0.0
+    direction /= np.linalg.norm(direction)
+    env.log_event(
+        "waypoint_start", "Waypoint 11: turn toward pot approach point",
+        pot_bowl_center_m=np.round(pot_center, 4).tolist(),
+        target_position_m=np.round(approach_point, 4).tolist(),
+        requested_turn_deg=round(_heading_error_degrees(agent, approach_point), 3),
+    )
+    motion = env.log_motion(
+        "Waypoint 11: collision-aware turn with vegetable",
+        planner.rotate_base_z, direction,
+    )
+    planner.idle_steps(t=20)
+    turn_error = abs(_heading_error_degrees(agent, approach_point))
+    base_drift = float(np.linalg.norm(
+        agent.base_link.pose.p[0].cpu().numpy()[:2] - base_before[:2]
+    ))
+    turned = bool(
+        motion != -1 and turn_error <= 0.15 and base_drift <= 0.02
+        and not lost_grasp()
+    )
+    env.log_event(
+        "waypoint_result", "Waypoint 11: pot approach heading", success=turned,
+        turn_error_deg=round(turn_error, 3), base_drift_m=round(base_drift, 4),
+    )
+    if not turned:
+        env.log_event(
+            "result", "Waypoints 2-12", success=False, failed_waypoint=11,
+            turn_error_deg=round(turn_error, 3), grasped=not lost_grasp(),
+        )
+        return False
+
+    env.log_event(
+        "waypoint_start", "Waypoint 12: straight drive to pot approach point",
+        target_position_m=np.round(approach_point, 4).tolist(),
+        target_standoff_m=round(approach_radius, 4), yaw_command=0.0,
+    )
+    drive = env.log_motion(
+        "Waypoint 12: approach pot while holding vegetable",
+        _drive_straight_to_point, env, planner, approach_point,
+        max_speed=0.10, acceleration=0.20, tolerance=0.003,
+        stop_when=lost_grasp,
+    )
+    planner.idle_steps(t=20)
+    base = agent.base_link.pose.p[0].cpu().numpy()
+    target_error = float(np.linalg.norm(base[:2] - approach_point[:2]))
+    held = not lost_grasp()
+    success = bool(
+        held and not drive["interrupted"] and not drive["stalled"]
+        and target_error <= 0.015 and drive["cross_track_m"] <= 0.01
+        and abs(drive["heading_drift_deg"]) <= 0.3
+    )
+    env.log_event(
+        "waypoint_result" if success else "result",
+        "Waypoint 12: pot approach validated", success=success,
+        failed_waypoint=None if success else 12,
+        grasped=held, approach_point_error_m=round(target_error, 4),
+        pot_standoff_m=round(float(np.linalg.norm(base[:2] - pot_center[:2])), 4),
+        heading_drift_deg=round(drive["heading_drift_deg"], 3),
+        cross_track_m=round(float(drive["cross_track_m"]), 4),
+        stopped_on_grasp_loss=drive["interrupted"],
+    )
+    print(
+        f"Waypoints 11-12: success={success}, turn_error={turn_error:.3f} deg, "
+        f"approach_error={target_error:.4f} m, held={held}"
+    )
+    return success
+
+
+def _face_pot(env, planner, target_veg):
+    agent = env.unwrapped.agent
+    if not bool(agent.is_grasping(target_veg)):
+        env.log_event(
+            "result", "Waypoints 2-13", success=False, failed_waypoint=13,
+            reason="target not held before pot-facing turn",
+        )
+        return False
+    if WP13_TORSO_RAISE_M > 0.0:
+        body = agent.controller.controllers["body"]
+        torso_before = float(body.qpos[0, 2])
+        torso_index = int(body.active_joint_indices[2])
+        upper = float(agent.robot.get_qlimits()[0, torso_index, 1])
+        if torso_before + WP13_TORSO_RAISE_M > upper - 0.001:
+            env.log_event(
+                "result", "Waypoint 13: pre-turn lift outside torso limits",
+                success=False, failed_waypoint=13,
+            )
+            return False
+        env.log_event(
+            "waypoint_start", "Waypoint 13: raise torso before pot-facing turn",
+            requested_raise_m=WP13_TORSO_RAISE_M,
+        )
+        env.log_motion(
+            "Waypoint 13: pre-turn torso lift", lower_torso_smooth,
+            env, planner, target_drop=-WP13_TORSO_RAISE_M, total_steps=60,
+        )
+        planner.idle_steps(t=15)
+        env.log_event(
+            "diagnostic", "Waypoint 13: measured pre-turn lift",
+            requested_raise_m=WP13_TORSO_RAISE_M,
+            actual_raise_m=float(body.qpos[0, 2]) - torso_before,
+            grasped=bool(agent.is_grasping(target_veg)),
+        )
+        if not bool(agent.is_grasping(target_veg)):
+            env.log_event(
+                "result", "Waypoint 13: grasp lost during pre-turn lift",
+                success=False, failed_waypoint=13,
+            )
+            return False
+    base_before = agent.base_link.pose.p[0].cpu().numpy().copy()
+
+    def grasp_offset():
+        rotation = agent.tcp.pose.sp.to_transformation_matrix()[:3, :3]
+        delta = target_veg.pose.p[0].cpu().numpy() - agent.tcp.pose.p[0].cpu().numpy()
+        return rotation.T @ delta
+
+    relative = grasp_offset().copy()
+    try:
+        pot_center = _pot_bowl_center_world(env.unwrapped.plate)
+    except ValueError as exc:
+        env.log_event(
+            "result", "Waypoints 2-13", success=False, failed_waypoint=13,
+            reason=str(exc),
+        )
+        return False
+    direction = pot_center - base_before
+    direction[2] = 0.0
+    direction /= np.linalg.norm(direction)
+    env.log_event(
+        "waypoint_start", "Waypoint 13: face pot bowl centre",
+        pot_bowl_center_m=np.round(pot_center, 4).tolist(),
+        target_heading_deg=round(float(np.degrees(np.arctan2(direction[1], direction[0]))), 3),
+        requested_turn_deg=round(_heading_error_degrees(agent, pot_center), 3),
+    )
+    motion = env.log_motion(
+        "Waypoint 13: collision-aware turn toward pot",
+        planner.rotate_base_z, direction,
+    )
+    planner.idle_steps(t=20)
+    base = agent.base_link.pose.p[0].cpu().numpy()
+    error = abs(_heading_error_degrees(agent, pot_center))
+    drift = float(np.linalg.norm(base[:2] - base_before[:2]))
+    slip = float(np.linalg.norm(grasp_offset() - relative))
+    held = bool(agent.is_grasping(target_veg))
+    success = bool(
+        motion != -1 and error <= 1.0 and drift <= 0.02 and held and slip <= 0.02
+    )
+    env.log_event(
+        "waypoint_result" if success else "result",
+        "Waypoint 13: pot-facing validated", success=success,
+        failed_waypoint=None if success else 13,
+        pot_facing_error_deg=round(error, 3), base_drift_m=round(drift, 4),
+        grasped=held, grasp_relative_error_m=round(slip, 4),
+    )
+    print(
+        f"Waypoint 13: success={success}, pot_facing_error={error:.3f} deg, "
+        f"base_drift={drift:.4f} m, held={held}"
+    )
+    return success
+
+
+def _hand_over_pot(env, planner, target_veg):
+    agent = env.unwrapped.agent
+    if not bool(agent.is_grasping(target_veg)):
+        env.log_event(
+            "result", "Waypoints 2-14", success=False, failed_waypoint=14,
+            reason="target not held before pot hover",
+        )
+        return False
+    pot_center = _pot_bowl_center_world(env.unwrapped.plate)
+    pot_mesh = env.unwrapped.plate.get_first_collision_mesh(to_world_frame=True)
+    veg_mesh = target_veg.get_first_collision_mesh(to_world_frame=True)
+    if pot_mesh is None or veg_mesh is None:
+        env.log_event(
+            "result", "Waypoints 2-14", success=False, failed_waypoint=14,
+            reason="payload or pot collision mesh unavailable",
+        )
+        return False
+    rim_z = float(pot_mesh.bounds[1, 2])
+    base_before = agent.base_link.pose.p[0].cpu().numpy().copy()
+    torso_before = float(agent.controller.controllers["body"].qpos[0, 2])
+    tcp_before = agent.tcp.pose.p[0].cpu().numpy().copy()
+    veggie_before = target_veg.pose.p[0].cpu().numpy().copy()
+    relative = veggie_before - tcp_before
+
+    def lowest_point():
+        mesh = target_veg.get_first_collision_mesh(to_world_frame=True)
+        return min(
+            float(mesh.bounds[0, 2]),
+            *(float(obj.get_global_aabb_fast()[0][2])
+              for link in (agent.finger1_link, agent.finger2_link)
+              for obj in link._objs),
+        )
+
+    hover_noise_m = _waypoint_offset(planner, "wp14_hover_clearance_m")
+
+    def hover_pose(clearance_m):
+        tcp_now = agent.tcp.pose.p[0].cpu().numpy().copy()
+        vegetable_now = target_veg.pose.p[0].cpu().numpy().copy()
+        relative_now = vegetable_now - tcp_now
+        target_height = float(tcp_now[2]) + rim_z + clearance_m - lowest_point()
+        return sapien.Pose(
+            p=[
+                pot_center[0] - relative_now[0],
+                pot_center[1] - relative_now[1],
+                target_height,
+            ],
+            q=agent.tcp.pose.sp.q,
+        )
+
+    noisy_clearance = WP14_HOVER_CLEARANCE_M + hover_noise_m
+    noisy_hover = hover_pose(noisy_clearance)
+    # Refresh the planning-only attachment after any small slip during transport.
+    _detach_object(planner)
+    planner.planner.update_from_simulation()
+    _attach_object(planner, target_veg)
+    planner.planner.update_from_simulation()
+    env.log_event(
+        "waypoint_start", "Waypoint 14a: noisy carried transfer to hover waypoint",
+        pot_bowl_center_m=np.round(pot_center, 4).tolist(),
+        target_tcp_position_m=np.round(noisy_hover.p, 4).tolist(),
+        waypoint_noise_offset_m=round(hover_noise_m, 6),
+        required_rim_clearance_m=round(noisy_clearance, 4),
+        action_noise=EXECUTION_ACTION_NOISE,
+        noise_hold=EXECUTION_NOISE_HOLD,
+    )
+    old_tolerance = planner.ARM_SCREW_GOAL_TOLERANCE
+    planner.ARM_SCREW_GOAL_TOLERANCE = (0.005, old_tolerance[1])
+    try:
+        with _execution_noise_phase(planner, enabled=True):
+            noisy_motion = env.log_motion(
+                "Waypoint 14a: execution-noisy carried transfer",
+                planner.static_manipulation, noisy_hover,
+                disable_lift_joint=True, n_init_qpos=100,
+            )
+        # Replan from the measured post-noise state to the nominal hover with
+        # noise disabled. This both recovers the target and keeps placement precise.
+        if bool(agent.is_grasping(target_veg)):
+            _detach_object(planner)
+            planner.planner.update_from_simulation()
+            _attach_object(planner, target_veg)
+            planner.planner.update_from_simulation()
+            nominal_hover = hover_pose(WP14_HOVER_CLEARANCE_M)
+            env.log_event(
+                "waypoint_start",
+                "Waypoint 14b: replan from measured state to nominal hover",
+                target_tcp_position_m=np.round(nominal_hover.p, 4).tolist(),
+                required_rim_clearance_m=WP14_HOVER_CLEARANCE_M,
+                previous_motion_success=noisy_motion != -1,
+            )
+            with _execution_noise_phase(planner, enabled=False):
+                motion = env.log_motion(
+                    "Waypoint 14b: noise-free recovery to nominal hover",
+                    planner.static_manipulation, nominal_hover,
+                    disable_lift_joint=True, n_init_qpos=100,
+                )
+        else:
+            motion = -1
+    finally:
+        planner.ARM_SCREW_GOAL_TOLERANCE = old_tolerance
+    planner.idle_steps(t=20)
+    tcp = agent.tcp.pose.p[0].cpu().numpy()
+    vegetable = target_veg.pose.p[0].cpu().numpy()
+    xy_error = float(np.linalg.norm(vegetable[:2] - pot_center[:2]))
+    clearance = lowest_point() - rim_z
+    slip = float(np.linalg.norm(vegetable - tcp - relative))
+    drift = float(np.linalg.norm(
+        agent.base_link.pose.p[0].cpu().numpy()[:2] - base_before[:2]
+    ))
+    torso_drift = abs(float(agent.controller.controllers["body"].qpos[0, 2]) - torso_before)
+    held = bool(agent.is_grasping(target_veg))
+    success = bool(
+        motion != -1 and held and xy_error <= 0.01 and clearance >= 0.04
+        and slip <= 0.02 and drift <= 0.01 and torso_drift <= 0.005
+    )
+    env.log_event(
+        "waypoint_result" if success else "result",
+        "Waypoint 14: payload hover validated", success=success,
+        failed_waypoint=None if success else 14,
+        grasped=held, vegetable_pot_xy_error_m=round(xy_error, 4),
+        rim_clearance_m=round(clearance, 4), grasp_relative_error_m=round(slip, 4),
+        base_drift_m=round(drift, 4), torso_drift_m=round(torso_drift, 4),
+        noisy_motion_success=noisy_motion != -1,
+        recovery_motion_success=motion != -1,
+        waypoint_noise_offset_m=round(hover_noise_m, 6),
+    )
+    print(
+        f"Waypoint 14: success={success}, xy_error={xy_error:.4f} m, "
+        f"rim_clearance={clearance:.4f} m, held={held}"
+    )
+    return success
+
+
+def _hold_torso_absolute(env, planner, target_height, *, max_steps=80, tolerance=0.002):
+    """Finish the existing ramp; retain its absolute goal, never recapture its lag."""
+    agent = env.unwrapped.agent
+    body_ctrl = agent.controller.controllers["body"]
+    arm = agent.controller.controllers["arm"].qpos[0].cpu().numpy().copy()
+    body = body_ctrl.qpos[0].cpu().numpy().copy()
+    body[2] = target_height
+    action = np.hstack([arm, planner.gripper_state, body, _base_cmd()])
+    stable = 0
+    steps = 0
+    for tick in range(max_steps):
+        error = abs(float(body_ctrl.qpos[0, 2]) - target_height)
+        stable = stable + 1 if error <= tolerance else 0
+        if stable >= 5:
+            break
+        env.step(action.copy())
+        steps += 1
+    error = abs(float(body_ctrl.qpos[0, 2]) - target_height)
+    planner.planner.update_from_simulation()
+    env.log_event("diagnostic", "Fixed-goal torso settling", target_height_m=float(target_height),
+                  extra_steps=steps, error_m=error, converged=bool(error <= tolerance))
+    return {"steps": steps, "error_m": error, "converged": bool(error <= tolerance)}
+
+
+def _finish_placement(env, planner, target_veg):
+    scene = env.unwrapped
+    agent = scene.agent
+    body = agent.controller.controllers["body"]
+    if not bool(agent.is_grasping(target_veg)):
+        env.log_event(
+            "result", "Waypoints 2-17", success=False, failed_waypoint=15,
+            reason="target not held before pot descent",
+        )
+        return False
+    pot_center = _pot_bowl_center_world(scene.plate)
+    pot_mesh = scene.plate.get_first_collision_mesh(to_world_frame=True)
+    mesh = target_veg.get_first_collision_mesh(to_world_frame=True)
+    floor_z = float(pot_mesh.bounds[0, 2])
+    bottom_z = float(mesh.bounds[0, 2])
+    torso_start = float(body.qpos[0, 2])
+    torso_min = float(agent.robot.get_qlimits()[0, int(body.active_joint_indices[2]), 0])
+    base_start = agent.base_link.pose.p[0].cpu().numpy().copy()
+    requested_drop = max(0.0, bottom_z - (floor_z + 0.01))
+    available = max(0.0, torso_start - torso_min - 0.005)
+    drop = min(requested_drop, available)
+    if drop <= 0.0 or bottom_z - drop > floor_z + 0.03:
+        env.log_event(
+            "result", "Waypoints 2-17", success=False, failed_waypoint=15,
+            reason="insufficient torso travel for a low release",
+        )
+        return False
+    env.log_event(
+        "waypoint_start", "Waypoint 15: lower vegetable into pot",
+        torso_drop_m=round(drop, 4), pot_floor_z_m=round(floor_z, 4),
+    )
+    env.log_motion(
+        "Waypoint 15: smooth torso descent", lower_torso_smooth,
+        env, planner, target_drop=drop, total_steps=60,
+    )
+    planner.idle_steps(t=10)
+    vegetable = target_veg.pose.p[0].cpu().numpy()
+    bottom_z = float(target_veg.get_first_collision_mesh(to_world_frame=True).bounds[0, 2])
+    xy_error = float(np.linalg.norm(vegetable[:2] - pot_center[:2]))
+    held = bool(agent.is_grasping(target_veg))
+    lowered = held and xy_error <= 0.02 and bottom_z <= floor_z + 0.03
+    env.log_event(
+        "waypoint_result", "Waypoint 15: low release height", success=bool(lowered),
+        vegetable_pot_xy_error_m=round(xy_error, 4),
+        vegetable_bottom_above_floor_m=round(bottom_z - floor_z, 4),
+    )
+    if not lowered:
+        env.log_event("result", "Waypoints 2-17", success=False, failed_waypoint=15)
+        return False
+
+    env.log_event("waypoint_start", "Waypoint 16: release vegetable in pot")
+    env.log_motion("Waypoint 16: open gripper", planner.open_gripper, t=20, ramp=15)
+    _detach_object(planner)
+    planner.planner.update_from_simulation()
+    planner.idle_steps(t=20)
+    released = not bool(agent.is_grasping(target_veg))
+    env.log_event("waypoint_result", "Waypoint 16: gripper released", success=released)
+    if not released:
+        env.log_event("result", "Waypoints 2-17", success=False, failed_waypoint=16)
+        return False
+
+    raise_amount = torso_start - float(body.qpos[0, 2])
+    env.log_event(
+        "waypoint_start", "Waypoint 17: raise torso after release",
+        torso_raise_m=round(raise_amount, 4),
+    )
+    env.log_motion(
+        "Waypoint 17: smooth torso raise", lower_torso_smooth,
+        env, planner, target_drop=-raise_amount, total_steps=60,
+    )
+    _hold_torso_absolute(env, planner, torso_start)
+    planner.idle_steps(t=20)
+    stable = 0
+    evaluation = scene.evaluate()
+    for _ in range(300):
+        planner.idle_steps(t=1)
+        evaluation = scene.evaluate()
+        stable = stable + 1 if bool(evaluation["success"]) else 0
+        if stable >= 20:
+            break
+    torso_error = abs(float(body.qpos[0, 2]) - torso_start)
+    base_drift = float(np.linalg.norm(
+        agent.base_link.pose.p[0].cpu().numpy()[:2] - base_start[:2]
+    ))
+    task_success = bool(evaluation["success"])
+    success = bool(task_success and stable >= 20 and torso_error <= 0.01 and base_drift <= 0.01)
+    env.log_event(
+        "result", "Task complete: waypoints 2-17", success=success,
+        task_success=task_success, stable_success_steps=stable,
+        torso_restore_error_m=round(torso_error, 4), base_drift_m=round(base_drift, 4),
+        evaluation=evaluation,
+    )
+    print(
+        f"Task complete: success={success}, env_success={task_success}, "
+        f"stable_steps={stable}, torso_error={torso_error:.4f} m"
+    )
+    return success
+
+
+def planning(env, seed, debug=False):
+    """Always finalize episode diagnostics, including fail-fast/exception exits."""
+    result = False
+    error = None
+    try:
+        result = bool(_planning_episode(env, seed, debug=debug))
+        return result
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        # Several planner gates return early (e.g. a verified failed grasp), so
+        # `_planning_episode` cannot own the one canonical episode verdict.
+        env.log_event(
+            "result", "Veggie planner final result",
+            success=bool(result), seed=int(seed), error=error,
+        )
+        task = env.unwrapped
+        checkers = getattr(task, "_veggie_episode_checkers", None)
+        if checkers is not None:
+            try:
+                env.remove_step_observer(checkers.callback)
+                env.log_event(
+                    "safety_checkers", "Episode safety-checker results",
+                    **checkers.summary(),
+                )
+            finally:
+                del task._veggie_episode_checkers
+
+
+def _planning_episode(env, seed, debug=False):
+    _install_render_cameras(env)
+    env.reset(seed=seed, options={"reconfigure": True})
+    scene = env.unwrapped
+    agent = scene.agent
+    _pose_render_cameras(env)
+    # The scene reset already supplies the ready arm/torso pose.
+    target_veg = scene.veggies[scene._picture_target]
+    checkers = TrayEpisodeCheckers(scene, grasp_contact_objects=(target_veg,))
+    scene._veggie_episode_checkers = checkers
+    env.add_step_observer(checkers.callback)
+    planner = FetchMotionPlanningSapienSolver(
+        env, base_pose=agent.robot.pose, vis=False, debug=debug
+    )
+    planner.MAX_REFINE_STEPS = 100
+    planner.action_noise = EXECUTION_ACTION_NOISE
+    planner.noise_hold = EXECUTION_NOISE_HOLD
+    planner.set_execution_noise_seed(seed)
+    # This task opts into target noise only for the carried transfer at WP14.
+    planner.execution_noise_enabled = False
+    waypoint_offsets = _sample_waypoint_offsets(seed)
+    planner.waypoint_offsets = waypoint_offsets
+    env.log_event(
+        "execution_noise", "Seeded arm-target noise configured",
+        seed=int(seed), action_noise=planner.action_noise,
+        noise_hold=planner.noise_hold,
+        enabled_phases=["WP14 carried transfer; WP14b recovery is noise-free"],
+    )
+    env.log_event(
+        "waypoint_noise", "Seeded waypoint offsets configured",
+        seed=int(seed), relative_scale=WAYPOINT_NOISE,
+        offsets_m=waypoint_offsets,
     )
 
-    run_id = f"fridgeveggies_seed{SEED}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    run_dir = Path(args.log_dir) / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    for index, veggie in enumerate(scene.veggies):
+        env.track_object(veggie, f"veg_{index}")
+    env.track_object(agent.tcp, "robot_tcp")
+    env.track_object(agent.base_link, "robot_base")
+    env.track_object(scene.plate, "pot")
+    env.log_event("start", "Waypoints 2-12: grasp and approach pot")
 
+    planner.open_gripper()
+    planner.planner.update_from_simulation()
+
+    requested_standoff = (
+        VEGETABLE_APPROACH_STANDOFF_M
+        + waypoint_offsets["wp3_standoff_m"]
+    )
+    veg_center = target_veg.pose.p[0].cpu().numpy().copy()
+    # This scene's counter front faces -Y, not toward the robot's spawn.
+    approach_point = np.array([veg_center[0], veg_center[1] - requested_standoff, 0.0])
+    requested_turn = _heading_error_degrees(agent, approach_point)
+    env.log_event(
+        "waypoint_start",
+        "Waypoint 2: shortest-arc turn toward approach point",
+        requested_turn_deg=round(requested_turn, 2),
+        vegetable_position_m=np.round(veg_center, 4).tolist(),
+        target_position_m=np.round(approach_point, 4).tolist(),
+    )
+    turn_error = env.log_motion(
+        "Waypoint 2: turn toward approach point",
+        _turn_toward_point,
+        env,
+        planner,
+        approach_point,
+    )
+    if turn_error > 0.15:
+        planner.idle_steps(t=30)
+        env.log_event(
+            "result",
+            "Waypoints 2-4",
+            success=False,
+            failed_waypoint=2,
+            turn_error_deg=round(turn_error, 2),
+        )
+        return False
+
+    env.log_event(
+        "waypoint_start",
+        "Waypoint 3: straight to point 0.5 m in front of vegetable",
+        target_position_m=np.round(approach_point, 4).tolist(),
+        target_standoff_m=requested_standoff,
+        yaw_command=0.0,
+    )
+    drive = env.log_motion(
+        "Waypoint 3: straight drive to approach point",
+        _drive_straight_to_point,
+        env,
+        planner,
+        approach_point,
+    )
+    planner.idle_steps(t=10)
+
+    base = agent.base_link.pose.p[0].cpu().numpy()
+    veggie = target_veg.pose.p[0].cpu().numpy()
+    target_error = float(np.linalg.norm(base[:2] - approach_point[:2]))
+    standoff = float(np.linalg.norm(base[:2] - veggie[:2]))
+    standoff_error = abs(standoff - requested_standoff)
+    success = (
+        target_error <= 0.03
+        and standoff_error <= 0.05
+        and drive["cross_track_m"] <= 0.05
+        and abs(drive["heading_drift_deg"]) <= 3.0
+        and not drive["stalled"]
+    )
+    env.log_event(
+        "waypoint_result",
+        "Waypoint 3: approach point",
+        success=success,
+        turn_error_deg=round(turn_error, 2),
+        initial_target_error_m=round(drive["initial_target_error_m"], 3),
+        approach_point_error_m=round(target_error, 3),
+        remaining_to_point_m=round(drive["final_remaining_m"], 3),
+        straight_cross_track_m=round(drive["cross_track_m"], 3),
+        vegetable_standoff_m=round(standoff, 3),
+        standoff_error_m=round(standoff_error, 3),
+        straight_drive_steps=drive["steps"],
+        heading_drift_deg=round(drive["heading_drift_deg"], 2),
+        stalled=drive["stalled"],
+    )
+    print(
+        f"Waypoints 2-3: success={success}, turn_error={turn_error:.1f} deg, "
+        f"approach_point_error={target_error:.3f} m, standoff={standoff:.3f} m, "
+        f"cross_track={drive['cross_track_m']:.3f} m, "
+        f"heading_drift={drive['heading_drift_deg']:.2f} deg, "
+        f"drive_steps={drive['steps']}"
+    )
+    if not success:
+        env.log_event(
+            "result", "Waypoints 2-4", success=False, failed_waypoint=3
+        )
+        return False
+
+    base_before = agent.base_link.pose.p[0].cpu().numpy().copy()
+    veggie_before = target_veg.pose.p[0].cpu().numpy().copy()
+    # Face the counter normal (+Y), without correcting position by driving.
+    counter_normal = np.array([0.0, 1.0, 0.0])
+    env.log_event(
+        "waypoint_start",
+        "Waypoint 4: face vegetable perpendicular to counter",
+        requested_turn_deg=round(
+            _heading_error_degrees(agent, base_before + counter_normal), 2
+        ),
+        target_heading_deg=90.0,
+        base_position_m=np.round(base_before, 4).tolist(),
+    )
+    torso_before = float(agent.controller.controllers["body"].qpos[0, 2])
+    env.log_motion(
+        "Waypoint 4: lower torso for clearance",
+        lower_torso_smooth,
+        env,
+        planner,
+        target_drop=WP4_TORSO_DROP_M,
+        total_steps=60,
+    )
+    planner.idle_steps(t=10)
+    torso_drop = torso_before - float(agent.controller.controllers["body"].qpos[0, 2])
+    if abs(torso_drop - WP4_TORSO_DROP_M) > 0.01:
+        env.log_event(
+            "result",
+            "Waypoints 2-4",
+            success=False,
+            failed_waypoint=4,
+            reason="torso did not reach clearance height",
+            torso_drop_m=round(torso_drop, 4),
+        )
+        return False
+    rotation = env.log_motion(
+        "Waypoint 4: perpendicular turn in place",
+        planner.rotate_base_z,
+        counter_normal,
+    )
+    planner.idle_steps(t=20)
+    base = agent.base_link.pose.p[0].cpu().numpy()
+    veggie = target_veg.pose.p[0].cpu().numpy()
+    perpendicular_error = abs(
+        _heading_error_degrees(agent, base + np.array([0.0, 1.0, 0.0]))
+    )
+    facing_error = abs(_heading_error_degrees(agent, veggie))
+    base_drift = float(np.linalg.norm(base[:2] - base_before[:2]))
+    veggie_drift = float(np.linalg.norm(veggie - veggie_before))
+    standoff = float(np.linalg.norm(base[:2] - veggie[:2]))
+    success = (
+        rotation != -1
+        and perpendicular_error <= 1.0
+        and facing_error <= 2.0
+        and base_drift <= 0.02
+        and veggie_drift <= 0.01
+        and abs(standoff - requested_standoff) <= 0.03
+    )
+    env.log_event(
+        "waypoint_result",
+        "Waypoint 4: perpendicular turn",
+        success=success,
+        torso_drop_m=round(torso_drop, 4),
+        perpendicular_error_deg=round(perpendicular_error, 3),
+        vegetable_facing_error_deg=round(facing_error, 3),
+        base_drift_m=round(base_drift, 4),
+        vegetable_drift_m=round(veggie_drift, 4),
+        vegetable_standoff_m=round(standoff, 3),
+    )
+    print(
+        f"Waypoint 4: success={success}, "
+        f"perpendicular_error={perpendicular_error:.3f} deg, "
+        f"facing_error={facing_error:.3f} deg, base_drift={base_drift:.4f} m, "
+        f"standoff={standoff:.3f} m"
+    )
+    if not success:
+        env.log_event(
+            "result", "Waypoints 2-5", success=False, failed_waypoint=4
+        )
+        return False
+
+    base_before = agent.base_link.pose.p[0].cpu().numpy().copy()
+    torso_before = float(agent.controller.controllers["body"].qpos[0, 2])
+    veggie_before = target_veg.pose.p[0].cpu().numpy().copy()
+    mesh = target_veg.get_first_collision_mesh(to_world_frame=True)
+    if mesh is None:
+        env.log_event(
+            "result", "Waypoints 2-5", success=False, failed_waypoint=5,
+            reason="target collision mesh unavailable",
+        )
+        return False
+    vegetable_top = float(mesh.bounds[1, 2])
+    hover = agent.build_grasp_pose(
+        np.array([0.0, 0.0, -1.0]),
+        np.array([1.0, 0.0, 0.0]),
+        np.array([veggie_before[0], veggie_before[1], vegetable_top + 0.10]),
+    )
+    env.log_event(
+        "waypoint_start",
+        "Waypoint 5: top-down hand above target vegetable",
+        target_index=scene._picture_target,
+        target_name=target_veg.name,
+        target_tcp_position_m=np.round(hover.p, 4).tolist(),
+        tcp_clearance_above_vegetable_m=round(float(hover.p[2]) - vegetable_top, 4),
+    )
+    motion = env.log_motion(
+        "Waypoint 5: fixed-base and fixed-torso hover",
+        planner.static_manipulation,
+        hover,
+        disable_lift_joint=True,
+        n_init_qpos=100,
+    )
+    planner.idle_steps(t=20)
+    tcp = agent.tcp.pose.p[0].cpu().numpy()
+    actual_q = agent.tcp.pose.q[0].cpu().numpy()
+    position_error = float(np.linalg.norm(tcp - hover.p))
+    xy_error = float(np.linalg.norm(tcp[:2] - target_veg.pose.p[0].cpu().numpy()[:2]))
+    orientation_error = float(np.degrees(
+        2 * np.arccos(np.clip(abs(float(np.dot(actual_q, hover.q))), 0.0, 1.0))
+    ))
+    base_drift = float(np.linalg.norm(
+        agent.base_link.pose.p[0].cpu().numpy()[:2] - base_before[:2]
+    ))
+    torso_drift = abs(float(agent.controller.controllers["body"].qpos[0, 2]) - torso_before)
+    veggie_drift = float(np.linalg.norm(
+        target_veg.pose.p[0].cpu().numpy() - veggie_before
+    ))
+    success = (
+        motion != -1
+        and position_error <= 0.02
+        and xy_error <= 0.01
+        and float(tcp[2]) > vegetable_top
+        and orientation_error <= 3.0
+        and base_drift <= 0.01
+        and torso_drift <= 0.005
+        and veggie_drift <= 0.01
+    )
+    env.log_event(
+        "waypoint_result",
+        "Waypoint 5: top-down hover",
+        success=success,
+        tcp_position_error_m=round(position_error, 4),
+        tcp_xy_error_m=round(xy_error, 4),
+        tcp_orientation_error_deg=round(orientation_error, 3),
+        tcp_approach_axis=np.round(
+            agent.tcp.pose.sp.to_transformation_matrix()[:3, 2], 4
+        ).tolist(),
+        tcp_clearance_above_vegetable_m=round(float(tcp[2]) - vegetable_top, 4),
+        base_drift_m=round(base_drift, 4),
+        torso_drift_m=round(torso_drift, 4),
+        vegetable_drift_m=round(veggie_drift, 4),
+    )
+    print(
+        f"Waypoint 5: success={success}, tcp_error={position_error:.4f} m, "
+        f"xy_error={xy_error:.4f} m, orientation_error={orientation_error:.3f} deg"
+    )
+    if not success:
+        env.log_event("result", "Waypoints 2-6", success=False, failed_waypoint=5)
+        return False
+
+    base_before = agent.base_link.pose.p[0].cpu().numpy().copy()
+    torso_before = float(agent.controller.controllers["body"].qpos[0, 2])
+    veggie_before = target_veg.pose.p[0].cpu().numpy().copy()
+    tcp_before = agent.tcp.pose.p[0].cpu().numpy().copy()
+    mesh = target_veg.get_first_collision_mesh(to_world_frame=True)
+    try:
+        if mesh is None:
+            raise ValueError("target collision mesh unavailable")
+        closing = _narrow_closing_axis(
+            mesh, agent.tcp.pose.sp.to_transformation_matrix()[:3, 1]
+        )
+    except ValueError as exc:
+        env.log_event(
+            "result", "Waypoints 2-6", success=False, failed_waypoint=6,
+            reason=str(exc),
+        )
+        return False
+    grasp_orientation = agent.build_grasp_pose(
+        np.array([0.0, 0.0, -1.0]), closing, tcp_before
+    )
+    env.log_event(
+        "waypoint_start",
+        "Waypoint 6: align fingers across vegetable narrow axis",
+        target_index=scene._picture_target,
+        target_name=target_veg.name,
+        closing_axis_world=np.round(closing, 4).tolist(),
+        tcp_position_m=np.round(tcp_before, 4).tolist(),
+    )
+    old_tolerance = planner.ARM_SCREW_GOAL_TOLERANCE
+    planner.ARM_SCREW_GOAL_TOLERANCE = (old_tolerance[0], 0.025)
+    try:
+        motion = env.log_motion(
+            "Waypoint 6: fixed-position grasp-axis rotation",
+            planner.static_manipulation,
+            grasp_orientation,
+            disable_lift_joint=True,
+            n_init_qpos=100,
+        )
+    finally:
+        planner.ARM_SCREW_GOAL_TOLERANCE = old_tolerance
+    planner.idle_steps(t=20)
+    frame = agent.tcp.pose.sp.to_transformation_matrix()
+    closing_error = float(np.degrees(np.arccos(np.clip(
+        abs(float(np.dot(frame[:3, 1], closing))), 0.0, 1.0
+    ))))
+    downward_error = float(np.degrees(np.arccos(np.clip(-frame[2, 2], -1.0, 1.0))))
+    position_drift = float(np.linalg.norm(
+        agent.tcp.pose.p[0].cpu().numpy() - tcp_before
+    ))
+    base_drift = float(np.linalg.norm(
+        agent.base_link.pose.p[0].cpu().numpy()[:2] - base_before[:2]
+    ))
+    torso_drift = abs(float(agent.controller.controllers["body"].qpos[0, 2]) - torso_before)
+    veggie_drift = float(np.linalg.norm(
+        target_veg.pose.p[0].cpu().numpy() - veggie_before
+    ))
+    success = (
+        motion != -1
+        and closing_error <= 3.0
+        and downward_error <= 3.0
+        and position_drift <= 0.01
+        and base_drift <= 0.01
+        and torso_drift <= 0.005
+        and veggie_drift <= 0.01
+    )
+    env.log_event(
+        "waypoint_result", "Waypoint 6: grasp axis aligned", success=success,
+        closing_axis_error_deg=round(closing_error, 3),
+        downward_error_deg=round(downward_error, 3),
+        tcp_position_drift_m=round(position_drift, 4),
+        base_drift_m=round(base_drift, 4),
+        torso_drift_m=round(torso_drift, 4),
+        vegetable_drift_m=round(veggie_drift, 4),
+    )
+    print(
+        f"Waypoint 6: success={success}, closing_error={closing_error:.3f} deg, "
+        f"downward_error={downward_error:.3f} deg, tcp_drift={position_drift:.4f} m"
+    )
+    if not success:
+        env.log_event("result", "Waypoints 2-9", success=False, failed_waypoint=6)
+        return False
+    if not _grasp_and_lift(env, planner, target_veg):
+        return False
+    if not _retreat_with_vegetable(env, planner, target_veg):
+        return False
+    if not _approach_pot(env, planner, target_veg):
+        return False
+    if not _face_pot(env, planner, target_veg):
+        return False
+    if not _hand_over_pot(env, planner, target_veg):
+        return False
+    return _finish_placement(env, planner, target_veg)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Veggie planner waypoints 2 through 17")
+    parser.add_argument("--seed", type=int, default=3)
+    parser.add_argument("--log-dir", type=Path, default=Path("logs"))
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--assisted-grasp", action="store_true",
+                        help="Enable CPU-only contact-gated PhysX grasp assistance")
+    args = parser.parse_args()
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    import mplib.pymp as mplib_pymp
+
+    mplib_pymp.set_global_seed(args.seed)
+
+    run_dir = args.log_dir / (
+        f"veggies_wp02-17_seed{args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
     env = gym.make(
         "MyRoboCasa_FridgeVeggies-v1",
+        assisted_grasp=args.assisted_grasp,
         num_envs=1,
-        render_mode=None if args.no_video else args.render_mode,
-        obs_mode="state" if args.no_video else "rgb",
+        render_mode="rgb_array",
+        obs_mode="rgb",
         robot_uids="ds_fetch",
         control_mode="pd_joint_pos",
-        sim_config=dict(scene_config=dict(cpu_workers=1, enable_enhanced_determinism=True)),
+        sim_config=dict(
+            scene_config=dict(cpu_workers=1, enable_enhanced_determinism=True)
+        ),
     )
-    # Video-only recording: frames stream straight into ffmpeg, so RAM stays at
-    # a single frame instead of RecordEpisode's whole-episode frame buffer
-    # (~12 GB at the 2048x2048 render resolution).
-    if not args.no_video:
-        env = StreamingVideoRecorder(env, output_dir=str(run_dir), video_fps=30)
+    env = StreamingVideoRecorder(env, output_dir=str(run_dir), video_fps=30)
     env = PlannerLogger(
         env,
         log_dir=str(run_dir),
-        name=f"fridgeveggies_seed{SEED}",
-        log_freq=args.log_freq,
+        name=f"veggies_wp02-17_seed{args.seed}",
+        log_freq=1,
         run_dir=str(run_dir),
     )
-    env.action_space.seed(SEED)
-    with capture_stdout(env.dir / "console.log"):
-        planning(env, SEED, debug=args.debug, info=args.info)
-    env.close()
-    if not args.no_video:
-        print(f"[INFO] Video recording saved in '{run_dir}/'")
+    try:
+        env.action_space.seed(args.seed)
+        with capture_stdout(env.dir / "console.log"):
+            success = planning(env, args.seed, debug=args.debug)
+    finally:
+        env.close()
+    print(f"Waypoints 2-17 logs/video: {run_dir.resolve()}")
+    return 0 if success else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

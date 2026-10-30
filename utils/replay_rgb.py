@@ -1,14 +1,14 @@
 """Replay state-only ManiSkill trajectories with RGB rendering (post-pass).
 
 Reads a state-mode RecordEpisode trajectory (flattened obs, env_states) and
-reproduces it on another robot (e.g. upstream `fetch`) by setting env_states
-step by step; renders RGB sensor observations every `--stride`-th step and
+reproduces it on the project `ds_fetch` robot by setting env_states step by
+step; renders RGB sensor observations every `--stride`-th step and
 writes a NEW trajectory.h5 with dict-style obs (agent qpos/qvel + sensor rgb).
 The planner and the source env are never touched.
 
 Usage:
     uv run python -m utils.replay_rgb <source_run_dir> --output-dir <dir> \
-        --robot fetch --stride 10
+        --robot ds_fetch --stride 10
 """
 
 import argparse
@@ -25,11 +25,69 @@ from mani_skill.trajectory import utils as trajectory_utils
 from mani_skill.utils import common
 
 
+def episode_outcome_metadata(rewards, success, terminated, truncated):
+    """Summarize full-rate episode outcomes before RGB stride subsampling."""
+    result = {}
+    rewards = np.asarray(rewards, dtype=np.float64).reshape(-1)
+    if rewards.size:
+        result["reward_sum"] = float(rewards.sum())
+        result["reward_mean"] = float(rewards.mean())
+    for name, values in (
+        ("success", success),
+        ("terminated", terminated),
+        ("truncated", truncated),
+    ):
+        values = np.asarray(values).reshape(-1)
+        if values.size:
+            result[name] = bool(values[-1])
+            if name == "success":
+                result["success_once"] = bool(values.any())
+    return result
+
+
+def camera_config_metadata(config):
+    """Return the active sensor's JSON-safe CameraConfig fields."""
+    def array(value):
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().numpy()
+        return np.asarray(value)
+
+    pose = config.pose
+    shader = config.shader_config
+    mount_name = (
+        None
+        if config.mount is None
+        else str(getattr(config.mount, "name", config.mount))
+    )
+    return {
+        "uid": config.uid,
+        "width": int(config.width),
+        "height": int(config.height),
+        "fov": None if config.fov is None else float(config.fov),
+        "intrinsic": (
+            None if config.intrinsic is None else array(config.intrinsic).tolist()
+        ),
+        "near": float(config.near),
+        "far": float(config.far),
+        "pose": {
+            "position": array(pose.p).reshape(-1).tolist(),
+            "quaternion_wxyz": array(pose.q).reshape(-1).tolist(),
+        },
+        "entity_uid": config.entity_uid,
+        "mount_name": mount_name,
+        "shader_config": {
+            "shader_pack": shader.shader_pack,
+            "texture_names": shader.texture_names,
+            "shader_pack_config": shader.shader_pack_config,
+        },
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_run_dir", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--robot", default="fetch")
+    parser.add_argument("--robot", default="ds_fetch")
     parser.add_argument("--stride", type=int, default=10)
     parser.add_argument("--episode", type=int, default=0,
                         help="trajectory index inside the source h5")
@@ -38,8 +96,14 @@ def main():
     src_h5_path = args.source_run_dir / "trajectory.h5"
     src_json = json.loads((args.source_run_dir / "trajectory.json").read_text())
     env_info = src_json["env_info"]
-    episode = src_json["episodes"][args.episode]
-    seed = episode.get("episode_seed")
+    episode = dict(src_json["episodes"][args.episode])
+    reset_seed = episode.get("reset_kwargs", {}).get("seed")
+    if isinstance(reset_seed, list) and len(reset_seed) == 1:
+        reset_seed = reset_seed[0]
+    seed = reset_seed if reset_seed is not None else episode.get("episode_seed")
+    if seed is not None:
+        episode["episode_seed"] = int(seed)
+        episode["source_seed"] = int(seed)
     control_mode = episode.get("control_mode", env_info["env_kwargs"]["control_mode"])
     env_kwargs = dict(env_info["env_kwargs"])
     env_kwargs.update(
@@ -52,6 +116,17 @@ def main():
     env = gym.make(env_info["env_id"], **env_kwargs)
     base_env = env.unwrapped
     obs, _ = env.reset(seed=seed, options={"reconfigure": True})
+    sensor_names = list(obs["sensor_data"].keys())
+    sensor_configs = base_env._sensor_configs
+    missing_configs = set(sensor_names) - sensor_configs.keys()
+    if missing_configs:
+        env.close()
+        raise ValueError(
+            f"missing camera configs for sensors: {sorted(missing_configs)}"
+        )
+    camera_configs = {
+        name: camera_config_metadata(sensor_configs[name]) for name in sensor_names
+    }
 
     with h5py.File(src_h5_path, "r") as src:
         traj = src[f"traj_{args.episode}"]
@@ -75,6 +150,16 @@ def main():
         truncated = arrays["truncated"]
         src_flat_obs = traj["obs"][:] if traj["obs"].ndim == 2 else None
     T = len(actions)
+    episode_metadata = dict(
+        episode,
+        stride=args.stride,
+        replay_robot=args.robot,
+        obs="rgb",
+        elapsed_steps=(T - 1) // args.stride + 1,
+    )
+    episode_metadata.update(
+        episode_outcome_metadata(rewards, success, terminated, truncated)
+    )
 
     out_h5 = args.output_dir / "trajectory.h5"
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -93,7 +178,6 @@ def main():
         # not necessarily stride-aligned; carry the terminal values over
         for name in ("success", "terminated", "truncated"):
             g[name][-1] = bool(arrays[name][-1])
-        sensor_names = [k for k in obs["sensor_data"].keys()]
         cam_groups = {}
         for cam in sensor_names:
             grp = g.create_group(f"obs/sensor_data/{cam}")
@@ -102,6 +186,7 @@ def main():
                 shape=(0, *obs["sensor_data"][cam]["rgb"].shape[-3:]),
                 maxshape=(None, *obs["sensor_data"][cam]["rgb"].shape[-3:]),
                 dtype=np.uint8,
+                chunks=(1, *obs["sensor_data"][cam]["rgb"].shape[-3:]),
                 compression="gzip",
                 compression_opts=5,
             )
@@ -134,8 +219,8 @@ def main():
     out_h5_path_tmp.replace(out_h5)
 
     meta = dict(src_json)
-    meta["episodes"] = [dict(episode, stride=args.stride, replay_robot=args.robot,
-                             obs="rgb", elapsed_steps=(T - 1) // args.stride + 1)]
+    meta["episodes"] = [episode_metadata]
+    meta["camera_configs"] = camera_configs
     meta["source_desc"] = (f"state-only demo replayed on {args.robot}; "
                            f"rgb rendered from env_states every {args.stride} steps")
     (args.output_dir / "trajectory.json").write_text(

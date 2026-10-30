@@ -5,10 +5,10 @@ import pytest
 from utils.collection import profile
 
 #: profile -> (assisted_grasp_hand_collides, instruction_version or None): the proxy for
-#: CabinetSearch only; instruction_version 1 where the dataset predates the colour names, 3 for
-#: SeasonDish's shaking task (profile 27, owner 2026-10-27).
+#: CabinetSearch5 only (its four-compartment sibling is gone, owner 2026-10-26); instruction_version
+#: 1 where the dataset predates the colour names, 3 for SeasonDish's shaking task (profile 28).
 EXPECTED = {"same_drawer": (False, None), "season_dish": (False, 3), "depth_recall": (False, 1),
-            "cabinet_search": (True, None), "cabinet_search5": (True, None)}
+            "cabinet_search5": (True, None)}
 
 #: The texts the published datasets carry (meta/tasks of seasondish-ag-1000ep and
 #: depthrecall-ag-1000ep), copied here so a change to either scene breaks this test.
