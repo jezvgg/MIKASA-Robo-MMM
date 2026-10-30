@@ -75,10 +75,13 @@ Never `pip install nvidia-curobo` (an unrelated package on PyPI).
 
 ## Use
 
+`scripts/collection_episode.py` is the command line that reaches this (the planners have
+no `__main__` of their own); `--ik-backend` follows the same variable the planner reads.
+
 ```
-MIKASA_IK_STARTS=fixed python planners/depth_recall_v1_planner.py --seed 1000
+PYTHONPATH=. MIKASA_IK_STARTS=fixed python scripts/collection_episode.py depth_recall 1000
 MIKASA_CUROBO_PY=/path/to/curobo-venv/bin/python \
-  python planners/depth_recall_v1_planner.py --seed 1000 --ik-backend curobo
+  PYTHONPATH=. python scripts/collection_episode.py depth_recall 1000 --ik-backend curobo
 ```
 
 For many episodes start one shared server and point every planner process at it; the
@@ -88,7 +91,7 @@ start-up is then paid once (16 s on the H100) instead of per episode:
 /path/to/curobo-venv/bin/python robots/fetch/curobo_server.py \
   --urdf robots/fetch/fetch.urdf --socket ~/.cache/mikasa-curobo/shared.sock &
 MIKASA_IK_BACKEND=curobo MIKASA_CUROBO_SOCKET=~/.cache/mikasa-curobo/shared.sock \
-  python planners/depth_recall_v1_planner.py --seed 1000
+  PYTHONPATH=. python scripts/collection_episode.py depth_recall 1000
 ```
 
 The server answers one request at a time and stays up when a client leaves.
@@ -164,7 +167,7 @@ branch; solve the motion from the current joints). Kinematics only by default, o
 with self-collision; the scene is the caller's to check. The server pads every call to
 1024 goals.
 
-`scripts/curobo_reach_map.py` uses it for an offline reach map from one stand (grid
+An offline reach map from one stand, measured once (2026-10-16) with `scan` (grid
 x 0.2-1.2 m ahead, y ±0.7 m, 2.5 cm steps; 9348 goals per pass), torso free, with
 self-collision:
 
@@ -192,7 +195,7 @@ Every hit is re-checked with numpy FK of the URDF itself (`robots/fetch/urdf_fk.
 tested against mplib's pinocchio model): the gripper pose within 5 mm / 0.05 rad of the
 goal and every joint inside its URDF limits, or the hit is dropped
 (`STATS["verify_checked"]`, `STATS["verify_dropped"]`). Measured on the Depth Recall pad
-scans (`scripts/dr_pad_reach.py`, four passes): **52 388 hits checked, 0 dropped** — the
+scans (four passes, 2026-10-16): **52 388 hits checked, 0 dropped** — the
 cuRobo model and the URDF agree; the check stays on so a model or URDF change that
 breaks that is caught rather than trusted.
 

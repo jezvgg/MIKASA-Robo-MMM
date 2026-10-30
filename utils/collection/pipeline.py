@@ -206,9 +206,30 @@ def classify_collection_result(result) -> str:
     return classify_result(result)
 
 
-def collect_one(root: Path, run: dict, seed: int) -> dict:
+def planner_execution_kwargs(profile, seed):
+    """The planner call's execution-noise kwargs, empty unless the profile pins noise."""
+    cfg = profile["planner"]
+    if "action_noise" not in cfg:
+        return {}
+    return dict(action_noise=cfg["action_noise"], noise_hold=cfg["noise_hold"],
+                execution_noise_seed=seed + cfg["execution_noise_seed_offset"])
+
+
+def run_oracle(env, profile, seed) -> str:
+    """One planner episode on `env`, under the action-only guard; returns the verdict."""
     from utils.mikasa.seeding import seed_everything
     from utils.test_planner import load_planner
+
+    cfg = profile["planner"]
+    seed_everything(seed)
+    with action_only_oracle(env):
+        return classify_collection_result(load_planner(cfg["module"])(
+            env, seed, waypoint_noise_seed=seed + cfg["noise_seed_offset"],
+            waypoint_noise_m=cfg["waypoint_noise_m"], **planner_execution_kwargs(profile, seed)))
+
+
+def collect_one(root: Path, run: dict, seed: int) -> dict:
+    from utils.mikasa.seeding import seed_everything
 
     seed_everything(seed)
     path = episode_path(root, "oracle", seed)
@@ -219,17 +240,8 @@ def collect_one(root: Path, run: dict, seed: int) -> dict:
     try:
         seed_everything(seed)
         configure_events(env, path.parent)
-        planner_cfg = run["signature"]["profile"]["planner"]
-        execution_kwargs = {}
-        if "action_noise" in planner_cfg:
-            execution_kwargs = dict(
-                action_noise=planner_cfg["action_noise"], noise_hold=planner_cfg["noise_hold"],
-                execution_noise_seed=seed + planner_cfg["execution_noise_seed_offset"])
         try:
-            with action_only_oracle(env):
-                verdict = classify_collection_result(load_planner(planner_cfg["module"])(
-                    env, seed, waypoint_noise_seed=seed + planner_cfg["noise_seed_offset"],
-                    waypoint_noise_m=planner_cfg["waypoint_noise_m"], **execution_kwargs))
+            verdict = run_oracle(env, run["signature"]["profile"], seed)
         except NonReplayableMotion as exc:
             traceback.print_exc()
             verdict, reason = "non_replayable", str(exc)

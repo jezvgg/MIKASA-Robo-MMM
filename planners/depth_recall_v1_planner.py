@@ -156,9 +156,9 @@ def carry_out(base_y: float, prop_y: float, face_y: float, half: float) -> float
 
     The old rule backed off until the prop stood over the pads' line, which leaves the
     base 0.96 m behind a pad for a prop from the deepest slot. Measured 2026-10-16 with
-    cuRobo's scan of the planner's own poses (`scripts/dr_pad_reach.py`, every grasp lift,
-    the row's +-4 cm jitter, self-collision, hits re-checked in float64): from there the
-    place reaches 44 cm west of the row; from the dock line 62 cm.
+    cuRobo's scan of the planner's own poses (every grasp lift, the row's +-4 cm jitter,
+    self-collision, hits re-checked in float64): from there the place reaches 44 cm west
+    of the row; from the dock line 62 cm.
     """
     return max(base_y - retr.READY_DOCK_Y, prop_y + half - (face_y - CARRY_CLEAR))
 

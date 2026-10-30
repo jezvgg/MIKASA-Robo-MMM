@@ -211,6 +211,23 @@ def profile_env_kwargs(profile, **extra):
     return kwargs
 
 
+def experiment_env(profile, *, obs_mode="state", **extra):
+    """An env from a profile for a single run, without the pinned-runtime checks.
+
+    `make_env` goes through `load_profile`, which refuses any implicit `MIKASA_*`
+    override; a single-episode experiment is exactly where those are set on purpose
+    (`--ik-backend`, `--ik-chain`). The planner's motion parameters are set here too:
+    the tasks read them at reset (`season_dish.compact_initial_and_travel`), so an env
+    without them is not the profile's env.
+    """
+    import gymnasium as gym
+    import my_scenes  # noqa: F401
+
+    env = gym.make(profile["env_id"], **profile_env_kwargs(profile, obs_mode=obs_mode, **extra))
+    env.unwrapped.motion_parameters = dict(profile["planner"].get("motion_parameters", {}))
+    return env
+
+
 def make_env(run, *, rgb=False, render_backend=None):
     import gymnasium as gym
     import my_scenes  # noqa: F401

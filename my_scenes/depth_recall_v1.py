@@ -252,13 +252,12 @@ class DepthRecallV1Config:
     West of the row, evenly spaced by 18 cm (the owner, 2026-10-16: wider than the
     original 12 cm). West, because east of the row the open right door hangs over the
     counter's last 25 cm. 18 cm, because that is what the arm reaches from the ONE dock:
-    cuRobo's scan of the planner's own poses (`scripts/dr_pad_reach.py`, every grasp
-    lift, the row's +-4 cm jitter, self-collision, hits re-checked in float64) at the
-    pads' y (`place_across`) reaches 64 cm west for the restore grasp and, with the
-    extraction carrying the prop back to the dock line
-    (`depth_recall_v1_planner.carry_out`), 60 cm for the place; 54 cm keeps 6 cm of that
-    in hand. The old carry (back only until the prop is over the pads' line) placed no
-    further than 44 cm. With pads 18 cm apart a prop is on one pad or none
+    cuRobo's scan of the planner's own poses (every grasp lift, the row's +-4 cm jitter,
+    self-collision, hits re-checked in float64) at the pads' y (`place_across`) reaches
+    64 cm west for the restore grasp and, with the extraction carrying the prop back to
+    the dock line (`depth_recall_v1_planner.carry_out`), 60 cm for the place; 54 cm keeps
+    6 cm of that in hand. The old carry (back only until the prop is over the pads' line)
+    placed no further than 44 cm. With pads 18 cm apart a prop is on one pad or none
     (`slot_radius`)."""
     place_across: float = -0.56
     """World y of the pads: the open-sky counter band, 3.5 cm nearer the robot than the
