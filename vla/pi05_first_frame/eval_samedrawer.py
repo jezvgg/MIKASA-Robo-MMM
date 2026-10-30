@@ -41,7 +41,7 @@ sys.path.insert(0, str(REPO))
 # (mikasa-runs/collection-2026-09-28/same_drawer-validation-001/run.json).
 EXPECTED_CODE_SHA256 = "a39d1c4297901b185be6d5c590212f240fdfaed8fe2080ea5eecbf0c0c36417b"
 EXPECTED_ENGINE_SHA256 = "74ecf1d0b2eab020567939c0cec3c170623af4c0c46b9dcfab8ad7c6602dace2"
-DEFAULT_HORIZON_STEPS = 800  # 1600 control steps at 20 Hz = the task's max_episode_steps
+DEFAULT_HORIZON_STEPS = 1050  # 2100 control steps at 20 Hz = the task's max_episode_steps (1600 until 2026-10-30)
 VIDEO_CAMERAS = ("left_base_camera_link", "right_base_camera_link", "fetch_hand")
 
 

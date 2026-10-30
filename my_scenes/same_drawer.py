@@ -70,8 +70,11 @@ INSTRUCTIONS = (
 
 @dataclass
 class SameDrawerConfig:
-    horizon: int = int(os.environ.get("MIKASA_SAME_DRAWER_HORIZON", "1600"))
-    """80 seconds at 20 Hz. Development seeds 1000-1005 on master DSFetch
+    horizon: int = int(os.environ.get("MIKASA_SAME_DRAWER_HORIZON", "2100"))
+    """105 seconds at 20 Hz since 2026-10-30 (owner), was 1600: 1.5 x the longest oracle episode
+    of samedrawer-ag-1000ep (1380 steps; median 1108), so that an evaluated policy slower than the
+    oracle is not cut off. The oracle ends at success long before either limit, so the recorded
+    episodes are the same. Before: development seeds 1000-1005 on master DSFetch
     exhausted the former 1200-step estimate during the return/final reach.
     The final reach, grasp, pull and hold need about 200 more steps; 1600 leaves
     modest execution slack without changing the physical success conditions."""
