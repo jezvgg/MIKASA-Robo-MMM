@@ -21,7 +21,7 @@ returns the last gym 5-tuple so the sweep books it `missed`.
 
 The door helpers (`close_the_door`, `door_rad_now`) take a `DoorSpec`
 (K113): every world number and every `task.cfg` read they used to make goes through
-it, so MikasaCabinetSearch-v0 drives three leaves with the same measured code. With
+it, so the cabinet search drives three leaves with the same measured code. With
 `door=None` the spec is built from this task's config — the Closed oracle's path,
 byte-identical to K105–K108.
 """
@@ -207,6 +207,16 @@ hand that has just let go of the bar. The ladder's point (r 0.35, z 1.55) was dr
 base that has driven round to the hinge side and refused on IK from the opening pose
 (`joint limit at index [3]`)."""
 PUSH_FROM_HERE = os.environ.get("MIKASA_PUSH_FROM_HERE", "1") == "1"
+FIST_ROLL_FREE = os.environ.get("MIKASA_FIST_ROLL_FREE", "1") == "1"
+"""The closing fist's fingers stay vertical (a fist with them across the vertical bar hooked the
+leaf open on the retreat: 4 of 4 four-compartment seeds), but either way up — +z or -z, the same
+fist turned over — whichever is nearer the hand's present y-axis, so the wrist turns at most a
+quarter, never the half turn the owner saw."""
+FIST_WRIST_FIRST = os.environ.get("MIKASA_FIST_WRIST_FIRST", "1") == "1"
+"""Before the closing fist's pre-contact, turn the wrist roll alone (one joint, in place) until the
+fingers stand vertical, the nearer way up: the owner's «можно было просто повернуть сам гриппер». The
+pre-contact move then has (almost) no turn about the hand's axis left to spread over the forearm and
+upper-arm rolls."""
 """Try the fist push from where the base stands BEFORE the ladder of closing docks.
 
 The owner's fallback for the closing (2026-09-05, after the 1105/1250 recordings): if
@@ -460,7 +470,7 @@ class DoorSpec:
 
     Everything `open_the_door` / `close_the_door` / `door_rad_now` used to read
     from `task.cfg` or from this module's constants, in one frozen record, so the
-    same measured stages serve a second and a third leaf (MikasaCabinetSearch-v0's
+    same measured stages serve a second and a third leaf (the cabinet search's
     compartments) without a second copy. World frame, kitchen 102, closed leaf.
 
     Attributes:
@@ -1192,6 +1202,70 @@ def finish_by_the_handle(env, planner, task, *, door: DoorSpec, anchor=None, res
     return res, bool(now <= float(task.cfg.theta_closed))
 
 
+def _wrist_turn_target(env, planner, task):
+    """The wrist roll value that stands the gripper's closing axis (TCP y) vertical, +z or -z,
+    whichever is nearer, the sign of the joint's effect read off the arm's own kinematic model:
+    a dict(joint, from, to, phi, grow, y) with `y` the TCP y-axis it gives, or None (nothing to
+    turn, or no value inside the episode's roll window)."""
+    from planners import cabinet_door_bimbo as _bimbo
+
+    T = _np(task.agent.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4)
+    z, y = T[:3, 2], T[:3, 1]
+    c = np.array([0.0, 0.0, 1.0]) - float(z[2]) * z
+    if float(np.linalg.norm(c)) < 0.3:
+        return None                                 # the hand points (nearly) up or down
+    c = c / float(np.linalg.norm(c))
+    if float(y @ c) < 0.0:
+        c = -c
+    phi = float(np.arctan2(float(np.cross(y, c) @ z), float(y @ c)))
+    if abs(phi) < 0.15:
+        return None
+    jm = task.agent.robot.active_joints_map
+    j = int(jm["wrist_roll_joint"].active_index[0])
+    q = _bimbo._qpos(task)
+    servo = _bimbo.HandServo(task, planner)
+    # Both ways up are a vertical fist (phi to +c, or phi -+ pi to -c); of the joint values that
+    # realise either, take the one that grows the episode's roll window (D2) least, then the nearer.
+    roll_i = list(getattr(planner, "_roll_indices", []))
+    k = roll_i.index(j) if j in roll_i else None
+    lo = float(planner._roll_low[k]) if k is not None else -np.inf
+    hi = float(planner._roll_high[k]) if k is not None else np.inf
+    options = []
+    for target_c in (c, -c):
+        for d in (phi, phi - np.pi, phi + np.pi, -phi):
+            q1 = q.copy()
+            q1[j] += d
+            y1 = servo.pose(q1)[:3, 1]
+            if float(y1 @ target_c) < 0.97:
+                continue
+            v = float(q1[j])
+            grow = (max(hi, v) - min(lo, v)) - (hi - lo) if k is not None else 0.0
+            if k is not None and max(hi, v) - min(lo, v) > np.pi - 0.02:
+                continue
+            options.append((round(grow, 3), abs(d), v, d, tuple(float(x) for x in y1)))
+    if not options:
+        say(env, "turn the wrist for the fist: no turn inside the roll window")
+        return None
+    options.sort()
+    grow, _, value, d, y1 = options[0]
+    return dict(joint=j, frm=float(q[j]), to=value, phi=d, grow=grow, y=np.array(y1))
+
+
+def _turn_wrist_for_fist(env, planner, task):
+    """Turn the wrist roll alone to `_wrist_turn_target`. Returns the 5-tuple or -1 (nothing to
+    do, or no line)."""
+    t = _wrist_turn_target(env, planner, task)
+    if t is None:
+        return -1
+    say(env, "turn the wrist for the fist", phi_deg=round(float(np.degrees(t["phi"])), 1),
+        roll_window_growth=round(float(t["grow"]), 3))
+    r = common.plan_joints(env, planner, task, {"wrist_roll_joint": t["to"]},
+                           label="turn the wrist for the fist", who=WHO, line_only=True, tries=1)
+    if r != -1:
+        planner.planner.update_from_simulation()
+    return r
+
+
 def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=None,
                    arrive_tol: float | None = None, from_here: bool | None = None,
                    allow_stow: bool = True, v_handle: float = 0.05,
@@ -1284,6 +1358,16 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
         """Fist and pre-contact from the rung just taken; `-1` = this rung does not
         afford the push. Nothing executes when the plan refuses, so the arm is left
         exactly as the drive left it and the next rung starts clean."""
+        if fist and FIST_WRIST_FIRST and not push.get("wrist_turned"):
+            # The owner's rule, applied first: one joint, in place, until the fingers
+            # stand vertical the nearer way up. The pre-contact then has no turn about
+            # the hand's axis left to spread over the forearm and upper-arm rolls.
+            push["wrist_turned"] = True
+            j = int(A.robot.active_joints_map["wrist_roll_joint"].active_index[0])
+            before = float(_np(A.robot.get_qpos()).reshape(-1)[j])
+            r = _turn_wrist_for_fist(env, planner, task)
+            if r != -1:
+                push["wrist_from"] = before
         if not push.get("fisted"):
             if fist:
                 r = planner.close_gripper(t=12)  # the fist is the tool, not a failed grasp
@@ -1331,7 +1415,15 @@ def close_the_door(env, planner, task, *, door: DoorSpec | None = None, anchor=N
                 _b = _np(task.agent.base_link.pose.sp.p).reshape(-1)[:2]
                 d = np.array([centre_xy[0] - _b[0], centre_xy[1] - _b[1], 0.0])
                 approach = d / max(float(np.linalg.norm(d)), 1e-6)
-            goal = A.build_grasp_pose(approach, np.array([0.0, 0.0, 1.0]), centre)
+            closing = np.array([0.0, 0.0, 1.0])
+            if fist and FIST_ROLL_FREE:
+                # The fingers stay vertical, but either way up — +z or -z, the same fist
+                # turned over — whichever is nearer the hand's present y-axis, so the
+                # wrist turns at most a quarter, never the half turn the owner saw.
+                y_now = _np(A.tcp.pose.sp.to_transformation_matrix()).reshape(4, 4)[:3, 1]
+                if float(y_now[2]) < 0.0:
+                    closing = np.array([0.0, 0.0, -1.0])
+            goal = A.build_grasp_pose(approach, closing, centre)
             pre = goal * sapien.Pose([0, 0, -0.15])
             if push.get("from_here"):
                 # The stroke runs pre-contact -> goal along the FIST'S axis, and from

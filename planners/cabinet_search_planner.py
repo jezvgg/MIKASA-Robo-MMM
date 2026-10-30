@@ -1,4 +1,4 @@
-"""Scripted oracle for MikasaCabinetSearch-v0: find the cube behind one of N
+"""Scripted oracle for the cabinet search (`MikasaCabinetSearch5-v0`): find the cube behind one of N
 wall-cabinet doors — close behind you, home between openings, never twice.
 
 The route (design blank I, plan step 4), one ROUND per compartment:
@@ -64,7 +64,7 @@ over seeds 0-199 — the coin-aliasing test's known-bad control).
 
 Run (container; mplib):
   tools/docker/planner.sh run --timeout 5400 python -m utils.test_planner \\
-      -s MikasaCabinetSearch-v0 -p cabinet_search_planner -n 10 --start-seed 0 \\
+      -s MikasaCabinetSearch5-v0 -p cabinet_search_planner -n 10 --start-seed 0 \\
       --scene-idx 0 --obs-mode state --sim-backend cpu --log-dir logs/search-sweep \\
       --info-keys revealed,reopened,two_open,skipped_home,foreign_moved,n_decisions,second_decision_made,second_decision_ok,retry_count
 """
@@ -403,6 +403,26 @@ DOOR_MODES = ("bimbo",)
 #: BIMBO door mode would otherwise turn the long way round (`_touch_turn_is_short`).
 TOUCH_BACKOFF_M = float(os.environ.get("MIKASA_CS_TOUCH_BACKOFF_M", "0.15"))
 
+#: Fold to the drive posture right after the closing push, and let the release dwell run
+#: during that fold instead of standing still for it (`close_and_verify`). The verify then
+#: idles only the steps the fold did not already spend; `go_home`'s fold is a no-op after.
+FOLD_BEFORE_VERIFY = os.environ.get("MIKASA_FOLD_BEFORE_VERIFY", "1") == "1"
+
+#: Metres short of the touch dock the arm is readied and levelled before the base rolls in
+#: (`nudge_the_cube`). The swing to the level hand reaches into the compartment, and the
+#: cube stays in the planning world so the hand collides with it (profile 17). 0 restores
+#: the old line at the dock, the cube out of the world.
+NUDGE_LEVEL_ROOM_M = float(os.environ.get("MIKASA_NUDGE_LEVEL_ROOM_M", "0.10"))
+
+#: The compartment the fist opens — `FIST_STEM` in `planners/cabinet_door_fist.py`
+#: (train/vla). The fist ladder itself is not part of this branch; only the dock rule for
+#: that leaf is, so the constant lives here.
+FIST_STEM = "cab_1_main_group"
+
+#: Metres from the base the fist-opened leaf's own handle is touched from
+#: (`TOUCH_REACH_M` in `planners/cabinet_door_fist.py`, env `MIKASA_FD_TOUCH_REACH_M`).
+TOUCH_REACH_M = float(os.environ.get("MIKASA_FD_TOUCH_REACH_M", "0.80"))
+
 
 def _opening_turn(planner, dock, view) -> float | None:
     """The opening turn `drive_base` would make toward `dock`, rad, signed; None if every
@@ -696,16 +716,36 @@ def close_and_verify(env, planner, task, door: DoorSpec, res, record=None):
     `cabinet_door_bimbo.CLOSE_BY_BAR`), a push from here that finds no plan (it steps nothing)
     hands over to `cabinet_door_bimbo.close_by_the_bar` — the opening reversed on the bar the
     hand has just let go of — before the corrections; `record` is the round's opening record."""
-    def verify(result):
-        # The environment independently checks all leaves and the hand distance.
-        for _ in range(int(task.cfg.close_dwell_steps)):
-            result = planner.idle_steps(t=1)
+    def closed_now() -> bool:
         idx = int(_np(task.last_opened).reshape(-1)[0])
-        closed = idx >= 0 and not bool(_np(task.is_open)[0, idx])
+        return idx >= 0 and not bool(_np(task.is_open)[0, idx])
+
+    def verify(result):
+        # The environment independently checks all leaves and the hand distance: `is_open`
+        # clears only after `close_dwell_steps` consecutive still ticks with the TCP more than
+        # `hand_far_m` (0.25 m) from the bar. A close that ends at the HANDLE leaves the hand on
+        # the bar, so the latch cannot clear there — and pulling the hand off a closed leaf tears
+        # it back open (both a base retract and an arm pull dragged it to 1.06 rad; the pads sit
+        # behind the panel edge). The dwell is therefore allowed to complete on `go_home`'s fold,
+        # which carries the hand away with the arm already out of the compartment: the leaf staying
+        # shut for the dwell is the close, and the latch follows as soon as the hand is clear.
+        shut = door_rad_now(task, door) <= _crp.CLOSE_MARGIN_RAD
+        for _ in range(int(task.cfg.close_dwell_steps)):
+            if (shut or FOLD_BEFORE_VERIFY) and closed_now():
+                break
+            result = planner.idle_steps(t=1)
+            if common.stopped_by_horizon(planner):
+                return result, False
+        closed = closed_now()
         if closed:
             say(env, "physical compartment closed after release",
                 door_rad=door_rad_now(task, door), dwell_steps=task.cfg.close_dwell_steps)
-        return result, closed
+            return result, True
+        if shut and door_rad_now(task, door) <= _crp.CLOSE_MARGIN_RAD:
+            say(env, "the leaf is shut; the latch clears when the hand folds away",
+                door_rad=round(float(door_rad_now(task, door)), 3))
+            return result, True
+        return result, False
 
     _crp.LAST_PUSH.clear()
     previous = getattr(planner, "forward_navigation", False)
@@ -720,15 +760,41 @@ def close_and_verify(env, planner, task, door: DoorSpec, res, record=None):
         planner.forward_navigation = previous
     if r != -1:
         res = r
+    if common.stopped_by_horizon(planner):
+        return res, False
+    if (FOLD_BEFORE_VERIFY and r != -1 and _crp.LAST_PUSH.get("pushed") is not None
+            and float(getattr(planner, "gripper_state", -1)) > 0):
+        # The hand is open and off the leaf: fold to the drive posture now, and let the release
+        # dwell run during the fold instead of standing still for it (go_home's fold is then a no-op).
+        planner.planner.update_from_simulation()
+        rf = plan_joints(env, planner, task, drive_posture_targets(task),
+                         label="fold to the drive posture", tries=1, line_only=True)
+        if rf != -1:
+            res = rf
+            if common.stopped_by_horizon(planner):
+                return res, False
     res, closed = verify(res)
     if closed:
         return res, True
     for attempt in range(2):
+        if door_rad_now(task, door) <= _crp.CLOSE_MARGIN_RAD:
+            # Shut by angle and only waiting for the latch: pulling the handle again
+            # would hook the bar of a closed leaf and swing it right back open.
+            res, closed = verify(res)
+            if closed:
+                return res, True
+            say(env, "the leaf is shut; the latch did not clear", attempt=attempt + 1,
+                door_rad=round(float(door_rad_now(task, door)), 3))
+            continue
         say(env, "physical closing correction", attempt=attempt + 1,
             door_rad=door_rad_now(task, door), target_rad=0.0)
         res, _ = finish_by_the_handle(env, planner, task, door=door, res=res,
                                      physical_close=True)
+        if common.stopped_by_horizon(planner):
+            return res, False
         res, closed = verify(res)
+        if closed:
+            return res, True
     return res, False
 
 
@@ -782,6 +848,9 @@ def nudge_the_cube(env, planner, task, res, cab=None):
         True
     """
     target_p = _np(task.revealed_target()).reshape(-1, 3)[0].astype(np.float64)
+    if not np.all(np.isfinite(target_p)):
+        say(env, "MISSED: nudge asked before the compartment was revealed")
+        return res
     half = float(task.cfg.cube_half)
     say(env, "nudge the cube", target=[round(float(v), 3) for v in target_p])
     # From the handle dock (the bar's x, y=-1.30) the pre-touch pose has no IK and the
@@ -797,6 +866,8 @@ def nudge_the_cube(env, planner, task, res, cab=None):
     if centres is not None and cab is not None:
         dock_x = float(_np(centres).reshape(-1, int(task.layout.n_compartments))[0][cab])
     dock = np.array([dock_x, LOOK_DOCK_Y, 0.0])
+    fist_cab = (cab is not None and str(task.cfg.compartments[cab].stem) == FIST_STEM
+                and task.cfg.compartments[cab].close_policy != "wall_park")
     # Two postures for the drive, in order: as the arm stands after the look (its tuck
     # cleared 2100-2109 and the own leaf), then the drive posture (which cleared the six
     # 200-seed losses of the tuck — a neighbour's door swept, the microwave — but meets
@@ -804,6 +875,21 @@ def nudge_the_cube(env, planner, task, res, cab=None):
     # IK there and one attempt took pinocchio down (log3 assertion) on 2102-2104.
     docked = False
     view = np.array([0.0, 1.0, 0.0])
+    if fist_cab:
+        # cab_1 opened by the fist: its leaf hangs at 1.31 rad over the front of the box, so
+        # the family's dock (the centre's x, facing +y) stands on it, and a dock east of it
+        # could not turn to +y without the arm sweeping the leaf (seeds 7991102/03/09/11).
+        # Dock on the line from where the fist left the base toward the cube, facing it.
+        stand = _np(task.agent.base_link.pose.sp.p).reshape(-1)[:2].astype(np.float64)
+        d = target_p[:2] - stand
+        d = d / max(float(np.linalg.norm(d)), 1e-6)
+        dock = np.array([*(target_p[:2] - TOUCH_REACH_M * d), 0.0])
+        view = np.array([d[0], d[1], 0.0])
+        say(env, "touch dock for the fist-opened leaf", dock=[round(float(v), 3) for v in dock[:2]],
+            heading_deg=round(math.degrees(math.atan2(d[1], d[0])), 1))
+    # The arm is readied NUDGE_LEVEL_ROOM_M short of the dock, and the base rolls in after
+    # the level hand (profile 19): the swing to the level hand reaches into the compartment.
+    prep = dock - view * NUDGE_LEVEL_ROOM_M
     # BIMBO door mode only: the servoed swing leaves the base turned a few degrees and the
     # arm in another configuration than the arc pull, and from there the short turn to the
     # touch dock collides, so `drive_base` turned the LONG way round, ~306 deg, on 9 of 10
@@ -811,36 +897,54 @@ def nudge_the_cube(env, planner, task, res, cab=None):
     # the leaf, and only then accept a long turn, logged.
     if door_mode(task) == "bimbo":
         planner.planner.update_from_simulation()
-        short, turn = _touch_turn_is_short(planner, dock, view)
+        short, turn = _touch_turn_is_short(planner, prep, view)
         if not short:
             say(env, "touch-dock turn would go the long way; folding first",
                 turn_deg=None if turn is None else round(math.degrees(turn), 1))
             r = drive_posture(env, planner, task, label="duck for the touch drive")
             if r != -1:
                 res = r
+                if common.stopped_by_horizon(planner):
+                    return res
             planner.planner.update_from_simulation()
-            short, turn = _touch_turn_is_short(planner, dock, view)
+            short, turn = _touch_turn_is_short(planner, prep, view)
         if not short and TOUCH_BACKOFF_M > 0:
             say(env, "touch-dock turn still long; backing off the leaf", m=TOUCH_BACKOFF_M,
                 turn_deg=None if turn is None else round(math.degrees(turn), 1))
             r = planner.drive_straight(-TOUCH_BACKOFF_M, v=0.10)
             if r != -1:
                 res = r
+                if common.stopped_by_horizon(planner):
+                    return res
             planner.planner.update_from_simulation()
-            short, turn = _touch_turn_is_short(planner, dock, view)
+            short, turn = _touch_turn_is_short(planner, prep, view)
         say(env, "touch-dock turn", short=short,
             turn_deg=None if turn is None else round(math.degrees(turn), 1))
     for posture in ("as-is", "drive"):
-        say(env, "drive to the touch dock", dock=[round(float(v), 3) for v in dock[:2]], posture=posture)
-        r = planner.drive_base(target_pos=dock, target_view_vec=view, freeze_arm=True)
+        if posture == "drive":
+            r = drive_posture(env, planner, task, label="duck for the touch drive")
+            if r != -1:
+                res = r
+                if common.stopped_by_horizon(planner):
+                    return res
+        say(env, "drive to the touch dock", dock=[round(float(v), 3) for v in prep[:2]], posture=posture)
+        r = planner.drive_base(target_pos=prep, target_view_vec=view, freeze_arm=True)
         if r != -1:
             res = r
+            if common.stopped_by_horizon(planner):
+                return res
             docked = True
             break
+        say(env, "the touch-dock drive refused", posture=posture)
     planner.planner.update_from_simulation()
+    if not docked:
+        say(env, "MISSED: no drive to the touch dock; the cube was not nudged")
+        return res
     r = planner.close_gripper(t=8)
     if r != -1:
         res = r
+        if common.stopped_by_horizon(planner):
+            return res
     planner.planner.update_from_simulation()
     approach, closing = np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0])
     # Check the full simultaneous arm/torso line before execution. If blocked,
@@ -850,41 +954,101 @@ def nudge_the_cube(env, planner, task, res, cab=None):
         combined = dict(NUDGE_READY_POSTURE, torso_lift_joint=NUDGE_TORSO)
         r = plan_joints(env, planner, task, combined,
                         label="ready arm and raise torso together for the touch",
-                        )
+                        tries=1, line_only=True)
         if r != -1:
             res = r
             raised = True
+            if common.stopped_by_horizon(planner):
+                return res
             say(env, "touch preparation", mode="combined_stationary_base")
         else:
             say(env, "touch preparation", mode="sequential_fallback",
                 reason="combined arm and torso path refused")
             r = plan_joints(env, planner, task, dict(NUDGE_READY_POSTURE), label="ready posture for the touch")
+            if r == -1:
+                # The line to the ready posture sweeps the cabinet's bottom edge when the
+                # look left the forearm under it (2110 in pd_joint_delta_pos: `forearm_roll
+                # <-> cab object` at knot 3/12). Room is the cure: back off NUDGE_ROOM_M
+                # with the arm as it stands, take the posture there, come back to the dock.
+                say(env, "the ready posture refused at the dock; backing off for room", m=NUDGE_ROOM_M)
+                r = planner.drive_straight(-NUDGE_ROOM_M, v=0.10)
+                if r != -1 and common.stopped_by_horizon(planner):
+                    return r
+                planner.planner.update_from_simulation()
+                r = plan_joints(env, planner, task, dict(NUDGE_READY_POSTURE),
+                                label="ready posture for the touch (with room)")
+                if r != -1 and common.stopped_by_horizon(planner):
+                    return r
+                planner.planner.update_from_simulation()
+                r2 = planner.drive_base(target_pos=prep, target_view_vec=np.array([0.0, 1.0, 0.0]),
+                                        freeze_arm=True)
+                if r2 != -1:
+                    r = r2
+                    if common.stopped_by_horizon(planner):
+                        return r
             if r != -1:
                 res = r
+            else:
+                say(env, "the ready posture refused; the raise from where the arm stands")
             planner.planner.update_from_simulation()
             r = plan_joints(env, planner, task, {"torso_lift_joint": NUDGE_TORSO},
                             label="raise the torso for the touch")
             if r != -1:
                 res = r
+                if common.stopped_by_horizon(planner):
+                    return res
                 raised = True
+            else:
+                say(env, "the torso raise refused; reaching from where it stands")
             planner.planner.update_from_simulation()
         # The level hand (the elbow-down family) as a joint line; a blocked line is
-        # left to the screw from the ready posture, never an RRT draw (K111). The cube
-        # is out of the planning world for it: the swing's fingertips stay 8 cm short
-        # of its near face by the numbers, but the planner booked `finger <-> cube` at
-        # knot 7/21 on 2144 (cube 6 cm off the dock's x) and refused the whole line —
-        # and a brush of the cube here is the touch itself, not a loss.
-        with common.touchable(planner, "cube"):
+        # left to the screw from the ready posture, never an RRT draw (K111). At `prep`,
+        # NUDGE_LEVEL_ROOM_M short of the dock, the cube stays in the planning world: the
+        # swing reaches into the compartment, and the hand collides with the can since
+        # profile 17. With no room (0) the old line at the dock, the cube out of the
+        # world: the planner booked `finger <-> cube` at knot 7/21 on 2144 and refused
+        # the whole line.
+        if NUDGE_LEVEL_ROOM_M > 0:
             r = plan_joints(env, planner, task, dict(NUDGE_LEVEL_POSTURE),
-                            label="level the hand for the touch", )
+                            label="level the hand for the touch", line_only=True)
+        else:
+            with common.touchable(planner, "cube"):
+                r = plan_joints(env, planner, task, dict(NUDGE_LEVEL_POSTURE),
+                                label="level the hand for the touch", line_only=True)
         if r != -1:
             res = r
+            if common.stopped_by_horizon(planner):
+                return res
+        else:
+            say(env, "the level posture refused; the screw from the ready posture")
+        planner.planner.update_from_simulation()
+    if NUDGE_LEVEL_ROOM_M > 0:
+        say(env, "roll in to the touch dock", dock=[round(float(v), 3) for v in dock[:2]])
+        r = planner.drive_base(target_pos=dock, target_view_vec=view, freeze_arm=True)
+        if r != -1:
+            res = r
+            if common.stopped_by_horizon(planner):
+                return res
+        else:
+            say(env, "the roll-in to the touch dock refused; reaching from here")
         planner.planner.update_from_simulation()
     amplitude = float(getattr(task, "motion_parameters", {}).get("grasp_noise_m", 0.0))
     noise = getattr(planner, "cabinet_waypoint_noise", None)
     touch_offset = np.zeros(3)
+    if amplitude > 0 and noise is not None:
+        # BIBLE 5: sideways and vertical offset of the touch; the push depth is kept so the
+        # required displacement is unchanged.
+        touch_offset[[0, 2]] = noise.uniform(-amplitude, amplitude, size=2)
+        say(env, "waypoint noise", waypoint="can touch", offset_m=touch_offset.tolist())
     for attempt in range(NUDGE_TRIES):
         target_p = _np(task.revealed_target()).reshape(-1, 3)[0].astype(np.float64)
+        if not np.all(np.isfinite(target_p)):
+            # The compartment stopped counting as revealed (the arm pushed the leaf back
+            # under theta_reveal on 2193): a NaN pose here took pinocchio down (log3
+            # assertion) on the second attempt. Stop, cleanly.
+            say(env, "MISSED: the compartment is no longer revealed; the cube was not nudged",
+                attempt=attempt)
+            return res
         z = target_p[2] + NUDGE_Z_OFFSET
         pre_c = np.array([target_p[0], target_p[1] - half - NUDGE_PRE_M, z]) + touch_offset
         push_c = np.array([target_p[0], target_p[1] + NUDGE_PAST_M, z]) + touch_offset
@@ -898,24 +1062,41 @@ def nudge_the_cube(env, planner, task, res, cab=None):
                                 max_knots=NUDGE_REACH_MAX_KNOTS, knot_draws=2, knot_refuse=True)
             if r != -1:
                 break
+            say(env, "pre-touch refused", attempt=attempt, torso_frozen=frozen)
+            planner.planner.update_from_simulation()
+        if r != -1 and common.stopped_by_horizon(planner):
+            return r
         if r == -1:
             continue
+        res = r
         # The event the collection gate reads (audit "can still before the push", 2026-10-18):
         # everything before this step must leave the can where it spawned. Logging only.
         say(env, "push start", attempt=attempt)
         with common.touchable(planner, "cube"):
             r = common.arm_move(env, planner, push, who=WHO, stage=f"push (try {attempt})",
                                 disable_lift_joint=raised, tries=2)
-        if r == -1:
-            continue
+        if r != -1 and common.stopped_by_horizon(planner):
+            return r
+        if r != -1:
+            res = r
         planner.planner.update_from_simulation()
-        info = r[-1]
+        info = res[-1]
         moved = float(_np(info.get("moved_m", 0.0)).reshape(-1)[0]) if isinstance(info, dict) else 0.0
         say(env, "pushed", attempt=attempt, moved_m=round(moved, 3), nudged=_b(info, "nudged"))
         if _b(info, "success"):
-            return r
+            return res
         # A failed push may retract before another attempt.
-    return common.fail(env, WHO, "cube nudge refused or not completed", attempts=NUDGE_TRIES)
+        r = common.arm_move(env, planner, pre, who=WHO, stage="retract",
+                            disable_lift_joint=raised, tries=2)
+        if r != -1:
+            res = r
+            if common.stopped_by_horizon(planner):
+                return res
+        planner.planner.update_from_simulation()
+        if _b(res[-1], "success") or _b(res[-1], "nudged"):
+            return res
+    say(env, "MISSED: the cube was not nudged")
+    return res
 
 
 def solve(env, seed=None, debug=False, vis=False, blind=False,
@@ -926,7 +1107,7 @@ def solve(env, seed=None, debug=False, vis=False, blind=False,
     on a bar; the gym 5-tuple otherwise (MISSED lines say what went wrong).
 
     Args:
-        env: the (possibly wrapped) MikasaCabinetSearch-v0 env.
+        env: the (possibly wrapped) MikasaCabinetSearch5-v0 env.
         seed: episode seed; the solution owns the reset.
         debug, vis: passed to the solver factory.
         blind: the design blank's control arm — every pick is a coin

@@ -622,7 +622,7 @@ def test_evaluate_does_not_modify_real_hinges_or_mask_observations():
     import gymnasium as gym
     import my_scenes
     from utils.collection.profile import load_profile
-    profile=load_profile('cabinet_search')
+    profile=load_profile('cabinet_search5')
     env=gym.make(profile['env_id'],obs_mode='state',**profile['env_kwargs'])
     try:
         env.reset(seed=7800000);task=env.unwrapped
@@ -658,13 +658,18 @@ def test_nudge_arm_move_refusal_returns_failure_without_unpacking(monkeypatch, f
         cfg=SimpleNamespace(cube_half=.04),
         motion_parameters={'grasp_noise_m': 0.0},
         revealed_target=lambda: np.array([[1.0, -0.8, .9]]),
-        agent=SimpleNamespace(build_grasp_pose=lambda *args: object()),
+        agent=SimpleNamespace(build_grasp_pose=lambda *args: object(),
+                              keyframes={'rest': SimpleNamespace(qpos=np.zeros(15))}),
         _spawn_centre_x=None,
     )
+    # The dock drive must land, or the ported nudge bails at "MISSED: no drive to the
+    # touch dock; the cube was not nudged" before any arm_move is planned: this test is
+    # about the arm_move refusal, so the base part is granted.
     planner = SimpleNamespace(
         planner=SimpleNamespace(update_from_simulation=lambda: None),
-        drive_base=lambda **kwargs: -1,
-        close_gripper=lambda **kwargs: -1,
+        drive_base=lambda **kwargs: step,
+        drive_straight=lambda *args, **kwargs: -1,
+        close_gripper=lambda **kwargs: step,
         cabinet_waypoint_noise=None,
     )
 
@@ -672,6 +677,7 @@ def test_nudge_arm_move_refusal_returns_failure_without_unpacking(monkeypatch, f
     monkeypatch.setattr(cabinet, 'NUDGE_TORSO', .1)
     monkeypatch.setattr(cabinet, 'say', lambda *args, **kwargs: None)
     monkeypatch.setattr(cabinet, 'plan_joints', lambda *args, **kwargs: -1)
+    monkeypatch.setattr(cabinet, 'drive_posture_targets', lambda _task: {})
     monkeypatch.setattr(common, 'touchable', lambda *args, **kwargs: contextlib.nullcontext())
     monkeypatch.setattr(common, 'say', lambda *args, **kwargs: None)
 
@@ -683,5 +689,11 @@ def test_nudge_arm_move_refusal_returns_failure_without_unpacking(monkeypatch, f
 
     monkeypatch.setattr(common, 'arm_move', arm_move)
     result = cabinet.nudge_the_cube(SimpleNamespace(), planner, task, -1)
-    assert result == -1
-    assert len(calls) == cabinet.NUDGE_TRIES * (1 if failed_stage == 'pre-touch' else 2)
+    # Every refused arm_move is a bare -1 the ported nudge reads as a value, never as a
+    # step tuple: the loop runs NUDGE_TRIES push attempts either way and hands back a step,
+    # so nothing unpacks a refusal.
+    assert isinstance(result, tuple) and len(result) == 5
+    # A refused pre-touch gives up on the nudge (no push is planned at all); a refused push
+    # is retried, so the push stage runs NUDGE_TRIES times.
+    pushes = len([c for c in calls if c.startswith('push')])
+    assert pushes == (0 if failed_stage == 'pre-touch' else cabinet.NUDGE_TRIES)
