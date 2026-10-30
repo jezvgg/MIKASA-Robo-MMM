@@ -167,12 +167,14 @@ def verify_env(env, profile):
 def profile_instructions(profile):
     """The texts the profile's env can give: its `instruction_version` of the task's
     INSTRUCTION_VERSIONS when it names one (the text a dataset was recorded with), else
-    the task's current INSTRUCTIONS; plus CabinetSearch's nudge phrasings."""
+    the task's current INSTRUCTIONS; CabinetSearch's nudge texts by the same version."""
     _, module, _ = TASKS[profile_name(profile["env_id"])]
     task = importlib.import_module(module)
     version = profile["env_kwargs"].get("instruction_version")
     texts = task.INSTRUCTIONS if version is None else task.INSTRUCTION_VERSIONS[version]
-    return set(texts) | set(getattr(task, "INSTRUCTIONS_NUDGE", ()))
+    nudge = (getattr(task, "INSTRUCTIONS_NUDGE", ()) if version is None
+             else getattr(task, "INSTRUCTION_VERSIONS_NUDGE", {}).get(version, ()))
+    return set(texts) | set(nudge)
 
 
 def validate_instructions(profile, tokenizer):

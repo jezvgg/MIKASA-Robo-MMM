@@ -88,8 +88,18 @@ def _on_the_rug(text: str) -> str:
 
 #: Since profile 18 (owner 2026-10-23) home is a round rug, not the yellow disk, and every
 #: instruction says so; `CabinetSearchConfig.home_marker="disk"` restores the floor-mark texts.
-INSTRUCTIONS = tuple(_on_the_rug(t) for t in INSTRUCTIONS_FLOOR_MARK)
-INSTRUCTIONS_NUDGE = tuple(_on_the_rug(t) for t in INSTRUCTIONS_NUDGE_FLOOR_MARK)
+PHRASINGS = tuple(_on_the_rug(t) for t in INSTRUCTIONS_FLOOR_MARK)
+PHRASINGS_NUDGE = tuple(_on_the_rug(t) for t in INSTRUCTIONS_NUDGE_FLOOR_MARK)
+#: One instruction per task since 2026-10-30 (owner), as LIBERO, RoboCasa and MIKASA-Robo-VLA
+#: give theirs: the first phrasing. Each episode still draws its phrasing (`instruction_idx`),
+#: so a seed's scene is the one cabinetsearch(5)-ag-1000ep recorded.
+INSTRUCTIONS = PHRASINGS[:1]
+INSTRUCTIONS_NUDGE = PHRASINGS_NUDGE[:1]
+#: `instruction_version` -> the texts: 1 the episode's drawn phrasing, as the datasets were
+#: recorded (it rebuilds their sources/); 2 the one instruction, which every profile pins and
+#: cabinetsearch5-ag-1000ep carries on HF since 2026-10-30.
+INSTRUCTION_VERSIONS = {1: PHRASINGS, 2: INSTRUCTIONS}
+INSTRUCTION_VERSIONS_NUDGE = {1: PHRASINGS_NUDGE, 2: INSTRUCTIONS_NUDGE}
 HOME_RUG_OBJ = Path(__file__).resolve().parent / "assets" / "home_rug" / "home_rug.obj"
 
 #: The W13-measured graspable depth band on the cabinet shelf (y, world). The
@@ -1304,10 +1314,15 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
 
     cube: Actor
 
-    def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0, **kwargs):
+    def __init__(self, *args, robot_uids="ds_fetch", scene_idx: int | None = 0,
+                 instruction_version: int = 2, **kwargs):
         # Kitchen 102 pinned by default: every number in the config was
-        # measured there (W12-W20).
+        # measured there (W12-W20). ``instruction_version`` 1 is the drawn phrasing the
+        # datasets were recorded with, 2 the one instruction (`INSTRUCTION_VERSIONS`).
         self.cfg.validate()
+        if instruction_version not in INSTRUCTION_VERSIONS:
+            raise ValueError(f"instruction_version must be one of {sorted(INSTRUCTION_VERSIONS)}")
+        self.instruction_version = int(instruction_version)
         self.scene_idx = scene_idx
         self.layout = compartment_layout(self.cfg.compartments)
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
@@ -1710,7 +1725,9 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
                 cabs.append(rng.randint(n_comp))
                 cube_j.append(rng.uniform(-1.0, 1.0, size=2))
                 start_j.append(rng.uniform(-1.0, 1.0, size=3))
-                instr.append(rng.randint(len(INSTRUCTIONS)))
+                # Three phrasings whatever the version: the draw keeps the RNG stream, so
+                # the rug jitter after it and every seed's scene stay as recorded.
+                instr.append(rng.randint(len(PHRASINGS)))
                 home_j.append(rng.uniform(-1.0, 1.0, size=2))
             cab_t = torch.as_tensor(np.asarray(cabs), dtype=torch.long)
             cj = torch.as_tensor(np.stack(cube_j), dtype=torch.float32)
@@ -1917,11 +1934,14 @@ class CabinetSearchTask(AssistedGraspTask, BaseEnv):
         return obs
 
     def get_language_instruction(self, **kwargs):
+        """The episode's drawn phrasing under ``instruction_version`` 1 (as recorded), else
+        the first phrasing for every episode: the one instruction."""
         if self.cfg.home_marker == "rug":
-            texts = INSTRUCTIONS_NUDGE if self.cfg.terminal == "nudge" else INSTRUCTIONS
+            texts = PHRASINGS_NUDGE if self.cfg.terminal == "nudge" else PHRASINGS
         else:
             texts = INSTRUCTIONS_NUDGE_FLOOR_MARK if self.cfg.terminal == "nudge" else INSTRUCTIONS_FLOOR_MARK
-        return [texts[int(i)] for i in self.instruction_idx.tolist()]
+        drawn = self.instruction_version == 1
+        return [texts[int(i) if drawn else 0] for i in self.instruction_idx.tolist()]
 
     # ----------------------------------------------------------------- state --
 

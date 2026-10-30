@@ -68,14 +68,10 @@ PAD_COLOR_NAMES = ("red", "green", "blue", "yellow")
 PAD_MAP = ("ketchup on the red pad, black pepper shaker on the green pad, "
            "white salt shaker on the blue pad, mustard on the yellow pad")
 
+#: One instruction (owner 2026-10-30); the env always gave the first of three phrasings.
 INSTRUCTIONS = (
     "Take the props out of the cabinet onto the counter pads (" + PAD_MAP + "), "
     "keep the one from the back, and put the others back where they stood.",
-    "Clear the row of props onto the counter pads (" + PAD_MAP + "), keep the "
-    "one that stood at the back, and return every other prop to the shelf spot it "
-    "came from.",
-    "Empty the shelf row onto the counter (" + PAD_MAP + "), hold on to the prop "
-    "from the deepest spot, and put the rest back exactly where each of them was.",
 )
 
 #: The map as `depthrecall-ag-1000ep` was recorded (profile 6, before the shakers' colours
