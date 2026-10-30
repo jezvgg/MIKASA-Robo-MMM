@@ -1,6 +1,8 @@
 """Check SeasonDish reset diversity, cue visibility and the policy boundary.
 
-Answer swaps are diagnostic counterfactuals, never recorded demonstrations.
+Answer swaps (the condiment and the number on the card) are diagnostic counterfactuals,
+never recorded demonstrations. The cue lasts `cfg.cue_steps` control steps (50 since
+profile 28, 100 before).
 """
 from __future__ import annotations
 
@@ -39,6 +41,8 @@ def qualify(run_path, output, start_seed=300, count=32):
     assert_signature(run)
     env = make_env(run, rgb=True)
     base = env.unwrapped
+    cue = int(base.cfg.cue_steps)
+    counts = list(base.cfg.shake_counts)
     snapshots, cases = [], []
     try:
         for seed in range(start_seed, start_seed + count):
@@ -70,32 +74,42 @@ def qualify(run_path, output, start_seed=300, count=32):
             arm = as_numpy(base.agent.controller.controllers["arm"].qpos)[0].copy()
             for step in range(8):
                 env.step(np.r_[arm, 1., body, 0., 0.])
+            # Every combination of the condiment and two numbers (the episode's and the next):
+            # each must show while the cue is up, and none may differ once it is hidden.
+            digit = int(base._digit_index.item())
+            combos = [(answer, d) for answer in (False, True) for d in (digit, (digit + 1) % len(counts))]
             visible, hidden = [], []
-            for answer in (False, True):
+            for answer, d in combos:
                 base.target_is_shaker[:] = answer
+                base._digit_index[:] = d
+                base.num_shakes[:] = counts[d]
                 initial_other = snapshot["bottle" if answer else "shaker"][:3]
                 base._distractor_home[:] = torch.tensor(initial_other, device=base.device)
-                base._elapsed_steps[:] = 99
+                base._elapsed_steps[:] = cue - 1
                 visible.append(capture(base))
-                base._elapsed_steps[:] = 100
+                base._elapsed_steps[:] = cue
                 hidden.append(capture(base))
-            answer_changes = image_changes(visible[0], visible[1])
+            answer_changes = image_changes(visible[0], visible[2])      # salt vs pepper, same number
+            number_changes = image_changes(visible[0], visible[1])      # two numbers, same condiment
             per_answer = []
-            for answer, present, absent in zip((False, True), visible, hidden):
+            for (answer, d), present, absent in zip(combos, visible, hidden):
                 changes = image_changes(present, absent)
                 for name in CAMERAS:
                     key = f"observation.images.{name}"
                     if seed == start_seed:
-                        Image.fromarray(present[key]).save(output / f"seed{seed}_answer{int(answer)}_cue_{name}.png")
-                        Image.fromarray(absent[key]).save(output / f"seed{seed}_answer{int(answer)}_hidden_{name}.png")
-                per_answer.append(dict(target_is_shaker=answer, changed_pixels=changes,
+                        tag = f"seed{seed}_answer{int(answer)}_number{counts[d]}"
+                        Image.fromarray(present[key]).save(output / f"{tag}_cue_{name}.png")
+                        Image.fromarray(absent[key]).save(output / f"{tag}_hidden_{name}.png")
+                per_answer.append(dict(target_is_shaker=answer, number=counts[d], changed_pixels=changes,
                     visible=min(changes[c] for c in CAMERAS if c != "fetch_hand") >= 20))
-            equal = all(np.array_equal(hidden[0][k], hidden[1][k]) for k in hidden[0])
+            equal = all(np.array_equal(hidden[0][k], other[k]) for other in hidden[1:] for k in hidden[0])
             cases.append(dict(seed=seed, cue_cases=per_answer,
                 answer_image_changes=answer_changes,
                 answers_distinguishable=min(answer_changes[c] for c in CAMERAS if c != "fetch_hand") >= 20,
+                number_image_changes=number_changes,
+                numbers_distinguishable=min(number_changes[c] for c in CAMERAS if c != "fetch_hand") >= 20,
                 hidden_answer_inputs_identical=equal,
-                hidden_image_changes=image_changes(hidden[0], hidden[1]),
+                hidden_image_changes=image_changes(hidden[0], hidden[-1]),
                 head_qpos=as_numpy(base.agent.controller.controllers["body"].qpos)[0,:2].tolist()))
         # Repeat a seed after dirty answers/counters, including the episode buffers.
         seed_everything(start_seed)
@@ -110,14 +124,16 @@ def qualify(run_path, output, start_seed=300, count=32):
         timing = []
         arm = as_numpy(base.agent.controller.controllers["arm"].qpos)[0].copy()
         body = as_numpy(base.agent.controller.controllers["body"].qpos)[0].copy()
-        for step in range(101):
+        for step in range(cue + 1):
             info = base.get_info()
-            if step in (0, 99, 100):
+            if step in (0, cue - 1, cue):
                 actual = bool(as_numpy(info["cue_visible"]).item())
                 shown = [bool((a.pose.p[0, 2] < 10).item()) for a in base.fridge_pictures.actors]
-                timing.append(dict(step=step, cue_visible=actual, shown=shown,
-                    passed=actual == (step < 100) and sum(shown) == int(step < 100)))
-            if step < 100:
+                digits = [bool((a.pose.p[0, 2] < 10).item()) for a in base.fridge_digits.actors]
+                timing.append(dict(step=step, cue_visible=actual, shown=shown, digits_shown=digits,
+                    passed=actual == (step < cue) and sum(shown) == int(step < cue)
+                           and sum(digits) == int(step < cue)))
+            if step < cue:
                 env.step(np.r_[arm, 1., body, 0., 0.])
         report = dict(source_sha256=run["signature"]["code_sha256"], seeds=snapshots,
             cases=cases, repeat_equal=repeat_equal,
@@ -127,9 +143,11 @@ def qualify(run_path, output, start_seed=300, count=32):
             target_counts={str(b):sum(s["target_is_shaker"] == b for s in snapshots) for b in (False,True)},
             timing=timing, timing_passed=all(t["passed"] for t in timing),
             visibility_passed=(all(c["visible"] for case in cases for c in case["cue_cases"])
-                               and all(c["answers_distinguishable"] for c in cases)),
+                               and all(c["answers_distinguishable"] and c["numbers_distinguishable"] for c in cases)),
             hidden_passed=all(c["hidden_answer_inputs_identical"] for c in cases),
-            visibility_criterion="At least 20 picture-versus-hidden and salt-versus-pepper changed pixels in each native head camera at step 99; no answer difference at step 100",
+            visibility_criterion=(f"At least 20 cue-versus-hidden, salt-versus-pepper and number-versus-number changed "
+                                  f"pixels in each native head camera at step {cue - 1}; no answer or number "
+                                  f"difference at step {cue}"),
             note="CPU physics, scene 0; finite reset/counterfactual check, not a statistical-independence claim.")
         passed = (repeat_equal and report["visibility_passed"] and report["hidden_passed"] and report["timing_passed"]
                   and report["unique_robot_starts"] == count
