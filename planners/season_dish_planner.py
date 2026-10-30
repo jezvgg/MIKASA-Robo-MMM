@@ -158,9 +158,39 @@ def hover_goals(p, current, tcp, *, n_init=32, preferred=None, mode='dual'):
     return chosen, records
 
 
+def shaking(task):
+    """Is this the shaking task (an upside-down pour and 30 deg shakes)?"""
+    return hasattr(task.cfg, 'shake_out_deg')
+
+
+def rest_shifts(fk, task, desired, obj_inverse):
+    """For a hover with the condiment at `desired`, the horizontal shifts that would put the shaking
+    pour's rest (one per turn direction) where the hover is: the roll axis runs beside the condiment,
+    so turning it nearly upside down carries it sideways, and a hover that leaves it off the bowl
+    (`miss_xy`) can be moved by the opposite amount."""
+    grip = desired @ obj_inverse
+    wrist = grip @ np.linalg.inv(fk.joints['gripper_link'][3])
+    axis, pivot = wrist[:3, 0], wrist[:3, 3]
+    up = desired[:3, :3] @ np.asarray(task.cfg.pour_axis_body, dtype=float)
+    shifts = []
+    for delta in wrist_pour.rest_angles(axis, up, task.cfg.shake_return_deg - wrist_pour.SHAKE_LEAN_MARGIN_DEG)[:2]:
+        moved = pivot + wrist_pour.rotation(axis, delta) @ (desired[:3, 3] - pivot) - desired[:3, 3]
+        shifts.append(tuple(np.round(-moved[:2], 4)))
+    return shifts
+
+
+#: The shaking pour's extra hovers (2026-10-28: raise SR without changing the robot or its speed),
+#: tried only on the way to a bowl dock and only after every shipped hover failed, so an episode that
+#: hovers today hovers the same way. More spins put the arm, and so the wrist roll the pour starts
+#: from, elsewhere in checklist D2's roll window; shifted hovers bring the pour's rest over the bowl.
+EXTRA_SPINS = ((0., 0., 60.), (0., 0., -60.), (0., 0., 90.), (0., 0., -90.), (-.05, 0., 30.), (-.05, 0., -30.))
+SHIFTED_MIN_M = .02
+
+
 @measured
-def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferred=None):
-    """Preview only: neither unsuccessful candidates nor lookahead execute steps."""
+def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferred=None, more=False):
+    """Preview only: neither unsuccessful candidates nor lookahead execute steps. `more` adds the
+    shaking pour's extra hovers after the shipped ones."""
     p = planner.planner
     failures=[];planner._hover_failures=failures
     fk = kinematics(planner, task)
@@ -184,15 +214,26 @@ def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferr
     tcp_now = hand @ local_tcp
     approach_now = tcp_now[:3,2]
     yaw_anchor = math.atan2(away[1],away[0]) - math.atan2(approach_now[1],approach_now[0])
-    options=[(0.,0.,0.),(.06,0.,0.),(0.,.06,0.),(-.05,0.,0.),
-             (0.,0.,30.),(0.,0.,-30.),(.06,0.,30.),(.06,0.,-30.)]
+    shipped=((0.,0.,0.),(.06,0.,0.),(0.,.06,0.),(-.05,0.,0.),
+             (0.,0.,30.),(0.,0.,-30.),(.06,0.,30.),(.06,0.,-30.))
+    options=[v + (None,) for v in shipped]
+    if more and shaking(task):
+        options += [v + (None,) for v in EXTRA_SPINS]
+        for extra, back, spin in shipped:
+            desired = obj.copy()
+            desired[:3, :3] = rotation([0., 0., 1.], yaw_anchor + math.radians(spin)) @ obj[:3, :3]
+            options += [(extra, back, spin, shift) for shift in rest_shifts(fk, task, desired, obj_inverse)
+                        if np.hypot(*shift) >= SHIFTED_MIN_M]
     if preferred is not None:
-        chosen=tuple(preferred[k] for k in ('hover_extra','hover_back','hover_spin'))
+        chosen=tuple(preferred[k] for k in ('hover_extra','hover_back','hover_spin')) + (
+            None if preferred.get('hover_shift') is None else tuple(preferred['hover_shift']),)
         options=[chosen]+[v for v in options if v!=chosen]
     with elbow_only(planner, task):
-        for extra, back, spin in options:
+        for extra, back, spin, shift in options:
             desired = obj.copy()
             desired[:3, 3] = bowl - back * away + np.array([0., 0., .20 + extra])
+            if shift is not None:
+                desired[:2, 3] += shift
             desired[:3, :3] = rotation([0., 0., 1.], yaw_anchor + math.radians(spin)) @ obj[:3, :3]
             tcp = sapien.Pose(desired @ obj_inverse @ local_tcp)
             mode = getattr(task, 'motion_parameters', {}).get('hover_ik_start', 'dual')
@@ -212,7 +253,9 @@ def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferr
                 arc = preview_pour(planner, task, reached, hand_object)
                 if arc is not None and p.accepts(np.vstack([path['position'], arc['position'],
                                                            arc['preview_reserve_qpos'][moves]]), move_group=True):
-                    return dict(approach=path, pour=arc, hover_extra=extra, hover_back=back, hover_spin=spin, hover_yaw_anchor=math.degrees(yaw_anchor), hover_ik_records=ik_records, hover_goal=goal.tolist())
+                    return dict(approach=path, pour=arc, hover_extra=extra, hover_back=back, hover_spin=spin,
+                                hover_shift=None if shift is None else list(shift),
+                                hover_yaw_anchor=math.degrees(yaw_anchor), hover_ik_records=ik_records, hover_goal=goal.tolist())
                 failures.append(dict(stage='wrist_pour',reason='pour:' + ','.join(sorted(set(planner._pour_reasons))) or 'pour_line_refused',
                                      extra=extra,back=back,spin=spin))
     return None
@@ -258,7 +301,7 @@ def plan_bowl_drive(planner, task, current, hand_object, dock, face):
             failures.append(dict(offset_x_m=offset, stage='base_sweep',
                                  collision=getattr(planner, '_last_path_collision', None)))
             continue
-        hover = plan_loaded_hover(planner, task, arrival, hand_object)
+        hover = plan_loaded_hover(planner, task, arrival, hand_object, more=True)
         if hover is not None:
             return dict(dock=candidate, offset_x_m=offset, hover=hover)
         failures.append(dict(offset_x_m=offset, stage='hover', hover=hover_summary(planner)))
@@ -1816,7 +1859,8 @@ def _solve(
                 if direct is None:
                     return fail(env, "no loaded hover after bowl drive")
             say(env, "hover over bowl", route_prechecked=True, extra=direct['hover_extra'],
-                back=direct['hover_back'], spin_deg=direct['hover_spin'])
+                back=direct['hover_back'], spin_deg=direct['hover_spin'],
+                shift_m=direct.get('hover_shift'))
             with transfer_phase(planner, "carry condiment over bowl"):
                 res = planner.follow_forward_path_w_refinement(direct['approach'], refine=True)
         if common.stopped_by_horizon(planner):

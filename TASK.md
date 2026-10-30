@@ -129,7 +129,7 @@
 | SameDrawer 21 | 81 | 3 | 16 | 0 | 80 / 4 / 16 / 0 |
 | DepthRecall 6 | 98 | 2 | 0 | 0 | 98 / 2 / 0 / 0 |
 | SeasonDish 26 (repo v2) | 83 | 1 | 16 | 0 | 83 / 0 / 17 / 0 |
-| SeasonDish 28 (карточка+встряхивания) | 85 | 0 | 15 | 0 | нет (задача перенята из train/vla) |
+| SeasonDish 28 (карточка+встряхивания) | 91 | 0 | 9 | 0 | 91 / 0 / 9 / 0 на `origin/train/vla` (`c6a429d`), те же сиды |
 | CabinetSearch5 7 | 83 | 17 | 0 | 0 | нет (сцены не было в ветке) |
 
 Вывод: регрессий нет — множества успешных сидов совпадают с baseline, у
@@ -140,15 +140,17 @@ SameDrawer один сид добавлен (8250082). Оставшиеся `no_
 
 - TakeItBack и Veggie не проверялись (нет collection-профиля ни в одной ветке).
 
-Отказы SeasonDish 28 (15 `no_plan`): 12 — `no checked loaded route with a
-complete bowl pour` (не нашлось док-маршрута, который заканчивается полным
-shake-наливом), 3 — отказ на захвате (`contact False`, `upright continuation
-False`). Ни один не вызван отказом `preview_pour`: в логах `plan_shakes` либо
-находил ноги, либо маршрут отвергался раньше.
+Отказы SeasonDish 28 (9 `no_plan`): 5 — `no checked loaded route with a
+complete bowl pour` (сиды 21, 60, 76, 94, 99), 3 — `bounded horizontal
+grasp/lift/continuation refused` (41, 42, 71), 1 — сид 86 (эпизод кончился без
+сообщения об отказе на 790-м шаге). Тот же набор отказов у `origin/train/vla`:
+при переносе мы временно потеряли 6 сидов (11, 37, 44, 78, 79, 98) вместе с
+fallback'ом hover'а `more=True` (`EXTRA_SPINS` и `rest_shifts`), он восстановлен.
+Ни один отказ не вызван `preview_pour`.
 
 ## Проверки
 
-- `265 passed, 4 skipped` — focused-набор `utils/collection/test_*.py`;
+- `266 passed, 4 skipped` — focused-набор `utils/collection/test_*.py`;
 - `git diff --check` чистый;
 - эпизод вручную: `scripts/collection_episode.py season_dish 435` ->
   `verdict=success steps=791` (`shake_count=2`, `pour_hold=12`);

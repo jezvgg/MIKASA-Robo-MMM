@@ -261,3 +261,18 @@ def test_the_counter_survives_a_state_round_trip(env):
     task.set_state_dict(state)
     assert int(task.shake_count.item()) == 2 and bool(task.shake_armed.item()) and bool(task.shake_swung.item())
     assert int(task.num_shakes.item()) == int(state["num_shakes"].item())
+
+
+def test_a_shifted_hover_puts_the_rest_where_the_hover_was():
+    """Roll axis along x through the wrist; the condiment 5 cm beside it along y. Turning it nearly
+    upside down carries it ~10 cm to the other side, so the hover moves 10 cm the other way."""
+    pytest.importorskip("mplib")
+    from planners.season_dish_planner import rest_shifts
+    fk = SimpleNamespace(joints={'gripper_link': (None, 'gripper_axis', 'fixed', np.eye(4), None)})
+    task = SimpleNamespace(cfg=CFG)
+    desired = np.eye(4); desired[:3, 3] = [0., .05, 0.]
+    shifts = rest_shifts(fk, task, desired, np.linalg.inv(desired))      # the wrist frame at the origin
+    rest = math.radians(180. - (10. - SHAKE_LEAN_MARGIN_DEG))
+    assert len(shifts) == 2
+    for shift in shifts:
+        assert shift == pytest.approx((0., .05 * (1 - math.cos(rest))), abs=1e-4)
