@@ -12,7 +12,7 @@ DATASET_REPO_ID = "MIKASA-Robo-MMM/MIKASA-Robo-MMM"
 # The HF root repo contains six independent task datasets. This inventory defines
 # dataset scope, not executable profile availability; profile.py:TASKS is narrower.
 DATASET_TASK_PLANNERS = {
-    "takeitback": "planners.myrobocasa_takeitback_planner",
+    "takeitback": "planners.myrobocasa_takeit_planner",
     "veggie": "planners.myrobocasa_fridge_veggies_planner",
     "samedrawer": "planners.same_drawer_planner",
     "seasondish": "planners.season_dish_planner",

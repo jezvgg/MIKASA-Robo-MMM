@@ -3,7 +3,7 @@ scripts/collection_episode.py --trajectory-out, with the checklist's own functio
 (utils/collection/checklist.py: motion_metrics, pause_check) on the 10 Hz export view (stride 2)
 and D7's switch parity on the 20 Hz original.
 
-    PYTHONPATH=. python tools/assisted_grasp_check/motion_items.py utils/collection/cabinet_search_profile.json traj/*.npz
+    PYTHONPATH=. python tools/assisted_grasp_check/motion_items.py utils/collection/cabinet_search5_profile.json traj/*.npz
 """
 import json
 import sys

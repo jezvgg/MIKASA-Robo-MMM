@@ -32,14 +32,18 @@ uv run python -m planners.myrobocasa_takeitback_planner --help
 | `MikasaCabinetSearch5-v0` | `cabinet_search_planner` | `pd_joint_pos` |
 | `MikasaSameDrawer-v0` | `same_drawer_planner` | `pd_joint_pos` |
 | `MikasaDepthRecall-v1` | `depth_recall_v1_planner` | `pd_joint_pos` |
+| `MyRoboCasa_TakeIt-v1` | `myrobocasa_takeit_planner` | `pd_joint_pos` |
+| `MyRoboCasa_FridgePicture-v1` | `myrobocasa_fridge_veggies_planner` | `pd_joint_pos` |
 
-Standalone запуск одного сида:
+Запуск одного сида. У задач закреплённого набора профиля нет собственного CLI —
+их гоняет `scripts/collection_episode.py`:
 
 ```bash
-uv run python -m planners.<planner_module> --seed 3 --no-video
+PYTHONPATH=. MS_ASSET_DIR=$PWD/.venv-sim/maniskill-assets \
+  .venv-sim/bin/python scripts/collection_episode.py season_dish 435
 ```
 
-Например:
+Legacy-сцены (`MyRoboCasa*`) сохранили собственные `__main__`:
 
 ```bash
 uv run python -m planners.myrobocasa_takeitback_tray_planner \
