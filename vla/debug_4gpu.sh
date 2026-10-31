@@ -15,8 +15,8 @@
 #         checkpoints, the weights at the end and the authors' eval_subtask_rollout.py from them on
 #         episode $HIGH_EVAL of every task.
 #   mvla  MemoryVLA: RLDS of episodes 0..$MVLA_EPISODES-1 of every task, then vla/memoryvla/train.sh
-#         with the first per-device batch of $MVLA_BS that runs $MVLA_STEPS steps (its memory bank
-#         fills over the first 256 frames of an episode, so a batch must outlast that); with
+#         with the first per-device batch of $MVLA_BS that runs $MVLA_STEPS steps (whole groups of
+#         16 frames per device, train.sh's group loader); with
 #         checkpoints, one at the end and check_action_error.py on held-out $MVLA_HELD_OUT.
 # CHECKPOINTS=0 (default): nothing is saved: every run is set to save past its end and is stopped
 # once it has logged its steps. CHECKPOINTS=1 saves and evaluates; it needs ~7 GB (low), ~9 GB
@@ -36,7 +36,7 @@ SFT_ROOT=${SFT_ROOT:-$HOME/datasets/memer_sft}
 HIGH_DATASETS=${HIGH_DATASETS:-memer_samedrawer,memer_seasondish,memer_cabinetsearch,memer_depthrecall}
 LOW_STEPS=${LOW_STEPS:-500}; LOW_SAVE=${LOW_SAVE:-200}; LOW_FRAMES=${LOW_FRAMES:-50}
 HIGH_STEPS=${HIGH_STEPS:-60}; HIGH_EVAL=${HIGH_EVAL:-999}
-MVLA_EPISODES=${MVLA_EPISODES:-3}; MVLA_STEPS=${MVLA_STEPS:-300}; MVLA_BS=${MVLA_BS:-32 16 8 4 2}
+MVLA_EPISODES=${MVLA_EPISODES:-3}; MVLA_STEPS=${MVLA_STEPS:-300}; MVLA_BS=${MVLA_BS:-32 16}   # whole groups of 16 (train.sh's group loader)
 MVLA_HELD_OUT=${MVLA_HELD_OUT:-990,991}
 ENDLESS=10000000   # steps and save interval of a run that is stopped from outside
 LAYOUT=$REPO/vla/memer/configs/fetch_stacked_rgb_camera_layout.json

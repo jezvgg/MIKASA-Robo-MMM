@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # MemoryVLA on $GPUS GPUs (default 4): the authors' train.py with the arguments of their
 # script/train/mikasa/train_mikasa.sh (OpenVLA-7B prismatic init, full fine-tune with FSDP full
-# shard, DiT-L, 4 diffusion repeats, 4-step window, LR 2e-5, image aug) and our
-# changes, all in vla/TRAINING_DEVIATIONS.md: the six Fetch datasets (patches/0001, mixture
-# $MIX), --action_dim 13 --load_bi_wrist True, the long-episode memory of their train_real.sh
-# (--dataloader_type stream --mem_length 256), per-task min/max normalization bounds
-# (set_norm_bounds.py), per-device batch $BS (theirs 32) with no accumulation: global = BS x GPUS,
-# shuffle buffer $SHUFFLE episodes per rank (the stream dataloader buffers whole episodes, ~50 MB
-# each of ours; their 64k from the group dataloader would be ~3 TB per rank).
+# shard, DiT-L, 4 diffusion repeats, LR 2e-5, image aug) and our changes, all in
+# vla/TRAINING_DEVIATIONS.md: the six Fetch datasets (patches/0001, mixture
+# $MIX), --action_dim 13 --load_bi_wrist True, a chunk of $CHUNK actions (16, as RoboMME and the
+# paper, 8 of them executed at evaluation; their MIKASA script 4), per-task min/max normalization
+# bounds (set_norm_bounds.py), per-device batch $BS (theirs 32) with no accumulation: global = BS x
+# GPUS. Loader $LOADER: group, as their MIKASA script and RoboMME (16 random frames of an episode
+# per group, memory 16; the per-device batch must hold whole groups); LOADER=stream gives their
+# train_real.sh's stream (consecutive frames, memory 256). The shuffle buffer $SHUFFLE counts
+# groups of 16 frames with group (theirs 64,000; ~0.9 MB each of ours, ~57 GB per rank, est.) and
+# whole episodes with stream (~50 MB each; 500, since 64,000 episodes would be ~3 TB per rank).
 # Stages (a finished stage is skipped on a re-run):
 #   stats  a first launch computes every dataset's dataset_statistics_<hash>.json next to its RLDS
 #          and is stopped as soon as all exist; set_norm_bounds.py then rewrites their q01/q99;
@@ -17,17 +20,26 @@
 # vla/mem_guard.py stops a launch whose container memory passes 80% of its limit (past it the pod
 # is killed; log <run id>.guard.log).
 # usage: train.sh <RLDS root holding fetch_*> <run root> <run id> <max steps> [save interval]
-# env: GPUS (4), BS (32), MIX (fetch_six), LR (2e-5), SHUFFLE (500), MASTER_PORT (29531),
+#   max steps: 160000, as RoboMME's script; the LR is constant, so nothing else follows it.
+#   Every checkpoint is kept (32 GB each): delete evaluated ones as the run goes.
+# env: GPUS (4), BS (32), CHUNK (16), LOADER (group | stream), SHUFFLE (64000 group, 500 stream),
+#      MIX (fetch_six), LR (2e-5), MASTER_PORT (29531),
 #      BASE_BOUNDS (minmax | pm1, see set_norm_bounds.py), OPENVLA_CKPT
 set -uo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 DATA=$1; RUNS=$2; RUN_ID=$3; STEPS=$4; SAVE=${5:-$STEPS}
-GPUS=${GPUS:-4}; BS=${BS:-32}; MIX=${MIX:-fetch_six}; LR=${LR:-2e-5}; SHUFFLE=${SHUFFLE:-500}
+GPUS=${GPUS:-4}; BS=${BS:-32}; CHUNK=${CHUNK:-16}; MIX=${MIX:-fetch_six}; LR=${LR:-2e-5}; LOADER=${LOADER:-group}
 BASE_BOUNDS=${BASE_BOUNDS:-minmax}; PORT=${MASTER_PORT:-29531}
 CKPT=${OPENVLA_CKPT:-$HOME/models/openvla-7b-prismatic/checkpoints/step-295000-epoch-40-loss=0.2200.pt}
 PY=$HOME/envs/memvla/bin/python; TORCHRUN=$HOME/envs/memvla/bin/torchrun
 mkdir -p "$RUNS/logs"
 say() { printf '[%s] memoryvla %s\n' "$(date '+%F %T')" "$*"; }
+case $LOADER in
+  group)  MEM=16; SHUFFLE=${SHUFFLE:-64000}
+          [ $((BS % 16)) -eq 0 ] || { say "group loader: per-device batch $BS must be a multiple of 16"; exit 1; } ;;
+  stream) MEM=256; SHUFFLE=${SHUFFLE:-500} ;;
+  *)      say "LOADER must be group or stream, not $LOADER"; exit 1 ;;
+esac
 # Each launch runs in its own session (setsid); stopping this script stops the current one.
 pid=""
 trap '[ -n "$pid" ] && { kill -TERM -- "-$pid" 2>/dev/null; sleep 20; kill -KILL -- "-$pid" 2>/dev/null; }; exit 143' TERM INT
@@ -48,8 +60,8 @@ launch() {  # launch RUN_ID MAX_STEPS SAVE_INTERVAL: the authors' command; runs 
     --vla.expected_world_size "$GPUS" --vla.per_device_batch_size "$BS" --vla.global_batch_size $((GPUS * BS)) \
     --vla.learning_rate "$LR" --vla.max_steps "$2" --vla.shuffle_buffer_size "$SHUFFLE" \
     --data_root_dir "$DATA" --run_root_dir "$RUNS" --run_id "$1" --image_aug True --save_interval "$3" \
-    --repeated_diffusion_steps 4 --future_action_window_size 3 --action_model_type DiT-L \
-    --dataloader_type stream --mem_length 256 --is_resume False --hf_token HF_TOKEN --trackers '["jsonl"]' \
+    --repeated_diffusion_steps 4 --future_action_window_size $((CHUNK - 1)) --action_model_type DiT-L \
+    --dataloader_type "$LOADER" --mem_length "$MEM" --is_resume False --hf_token HF_TOKEN --trackers '["jsonl"]' \
     --action_dim 13 --load_bi_wrist True
 }
 stats_files() { for d in $DATASETS; do find "$DATA/$d" -name 'dataset_statistics_*.json' 2>/dev/null; done; }
@@ -60,7 +72,7 @@ if [ ! -f "$DATA/.bounds_$MIX" ]; then
   # edited while training computes and loads a fresh one, so start from none.
   for d in $DATASETS; do find "$DATA/$d" -name 'dataset_statistics_*.json' -delete 2>/dev/null; done
   say "stats: first launch until $(wc -w <<< "$DATASETS") statistics files exist (log $RUNS/logs/$RUN_ID.stats.log)"
-  setsid bash -c "$(declare -f launch); REPO='$REPO' GPUS='$GPUS' BS='$BS' MIX='$MIX' LR='$LR' SHUFFLE=16 \
+  setsid bash -c "$(declare -f launch); REPO='$REPO' GPUS='$GPUS' BS='$BS' CHUNK='$CHUNK' LOADER='$LOADER' MEM='$MEM' MIX='$MIX' LR='$LR' SHUFFLE=16 \
     DATA='$DATA' RUNS='$RUNS/.stats' PORT='$PORT' CKPT='$CKPT' TORCHRUN='$TORCHRUN' launch stats 1000000 1000000" \
     > "$RUNS/logs/$RUN_ID.stats.log" 2>&1 &
   pid=$!
@@ -78,8 +90,8 @@ for f in $(stats_files); do
 done
 
 RUN=$RUNS/$RUN_ID--image_aug
-say "train: $RUN_ID, $GPUS GPUs x batch $BS, $STEPS steps, checkpoints every $SAVE (log $RUNS/logs/$RUN_ID.log)"
-setsid bash -c "$(declare -f launch); REPO='$REPO' GPUS='$GPUS' BS='$BS' MIX='$MIX' LR='$LR' SHUFFLE='$SHUFFLE' \
+say "train: $RUN_ID, $GPUS GPUs x batch $BS, chunk $CHUNK, $LOADER loader (memory $MEM, shuffle $SHUFFLE), $STEPS steps, checkpoints every $SAVE (log $RUNS/logs/$RUN_ID.log)"
+setsid bash -c "$(declare -f launch); REPO='$REPO' GPUS='$GPUS' BS='$BS' CHUNK='$CHUNK' LOADER='$LOADER' MEM='$MEM' MIX='$MIX' LR='$LR' SHUFFLE='$SHUFFLE' \
   DATA='$DATA' RUNS='$RUNS' PORT='$PORT' CKPT='$CKPT' TORCHRUN='$TORCHRUN' launch '$RUN_ID' '$STEPS' '$SAVE'" \
   > "$RUNS/logs/$RUN_ID.log" 2>&1 &
 pid=$!
