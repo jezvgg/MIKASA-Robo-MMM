@@ -93,6 +93,33 @@ uv run python -m utils.test_planner \
 
 Сохраняйте именно `HITS/100`, а не только процент: текущий harness не восстанавливает сцену между эпизодами, поэтому сравнивать нужно одинаковые `N`, seed range и scene. `--blind` запускает memory-free arm только у планировщиков, у которых есть параметр `blind`.
 
+## Политики
+
+Каждая политика запускается одним модулем и печатает форму действий на одном
+кадре — этого достаточно, чтобы проверить, что веса, конфиг и преппроцессор
+собраны:
+
+```bash
+python -m utils.policies.pi05_runtime        # pi0.5-DROID, openpi + веса pi05_base
+python -m utils.policies.memer_runtime       # MemER high level, Qwen3-VL-4B
+python -m utils.policies.hamlet_runtime      # HAMLET на GR00T-N1.6-3B
+JAX_PLATFORMS=cpu python -m utils.policies.memory_runtime \
+  --memory perceptual-framesamp-modul.yaml   # RoboMME: FrameSamp / TokenDrop
+```
+
+Каждой нужен свой интерпретатор: `pi05_runtime` — окружение с `openpi` и
+`lerobot`, `memer_runtime` — окружение `memer` с extra `eval`, `hamlet_runtime`
+— окружение HAMLET на его пинах (`transformers==4.51.3`, `torch==2.7.1`),
+`memory_runtime` — окружение RoboMME (`jax`/`flax`). Vendor-код берётся из
+сабмодулей `third_party/{openpi,memer,hamlet,robomme}`; пути переопределяются
+переменными `OPENPI_SRC`, `MEMER_ROOT`, `HAMLET_ROOT`, `ROBOMME_ROOT`.
+
+Весов HAMLET и memory-голов в репозитории нет: их чекпоинты не публиковались,
+поэтому эти два рантайма проверяют граф и конечность выхода, а не качество
+политики. `memory_runtime` требует именно конфиг из
+`mme_vla_suite.training.config` и `HistAugObservation`, иначе forward падает на
+несовпадении типа наблюдения.
+
 ## Запись траекторий
 
 `--traj-dir` записывает state-only trajectory: actions, `env_states`, flags и observations в режиме `state`. RGB сюда не добавляется.
