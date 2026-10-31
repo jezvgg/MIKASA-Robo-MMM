@@ -89,27 +89,115 @@ def held_transform(task, target):
             * target.pose[0].sp).to_transformation_matrix().astype(float)
 
 
-@measured
-def preview_pour(planner, task, q, hand_object):
-    """Cheap preview: the wrist-only shake that `wrist_pour.pour_and_shake` would plan from `q`, or
-    None. No motion executes; the 'in' leg is the arc, the swing's end is the reserve the hover
-    check needs to keep the whole roll inside the counter's span band."""
+def pour_targets(planner, task, q, hand_object):
+    """Cheap endpoint geometry and joint-budget checks; no path or IK calls.
+
+    Yields (goal, reserve): the one-tip pour's 165 deg goal and its reserve, or for the
+    shaking task the near-upside-down goal and, as the rows of `reserve`, it and the shake
+    swing, so the roll window and the joint limits are checked for the whole pour before
+    the robot commits to the transfer."""
+    p = planner.planner
     fk = kinematics(planner, task)
     wrist = fk.matrix(q, 'wrist_roll_link')
     obj = fk.matrix(q) @ hand_object
-    plan = wrist_pour.plan_shakes(planner, task, q, fk.indices['wrist_roll_joint'], wrist[:3, 0],
-                                  wrist[:3, 3], obj, task.bowl.pose[0].sp.p.astype(float))
-    planner._pour_reasons = [] if plan is not None else ['no_feasible_wrist_shake']
-    if plan is None:
-        return None
-    rest, legs, out = plan
-    path = dict(legs['in'])
-    if not path_clear(planner, q, path['position']):
-        planner._pour_reasons = ['shake_arc_not_clear']
-        return None
-    path['preview_reserve_qpos'] = out
-    path['preview_rest_qpos'] = rest
-    return path
+    axis, pivot = wrist[:3, 0], wrist[:3, 3]
+    bowl = task.bowl.pose[0].sp.p
+    index = fk.indices['wrist_roll_joint']
+    # Preview needs room for the measured model-to-physics deviation. These reserves
+    # tighten candidate selection; execution and checker stay at 165/155.
+    parameters = getattr(task, 'motion_parameters', {})
+    clearance_reserve = float(parameters.get('pour_preview_clearance_reserve_m', 0.))
+    wrist_reserve = float(parameters.get('pour_preview_wrist_reserve_rad', 0.))
+    reasons = getattr(planner, '_pour_reasons', None)
+
+    def note(key, delta):
+        if reasons is not None:
+            reasons.append(f"{key}{'+' if delta > 0 else '-'}")
+
+    object_axis = obj[:3, :3] @ np.asarray(task.cfg.pour_axis_body)
+    if shaking(task):
+        for delta in wrist_pour.rest_angles(axis, object_axis,
+                                            task.cfg.shake_return_deg
+                                            - wrist_pour.SHAKE_LEAN_MARGIN_DEG):
+            if not wrist_pour.shake_geometry_ok(axis, object_axis, delta, task.cfg):
+                note('shake_lean', delta)
+                continue
+            swing = wrist_pour.swing_angle(delta, wrist_pour.SHAKE_AMPLITUDE_DEG)
+            ends = [pivot + rotation(axis, d) @ (obj[:3, 3] - pivot) for d in (delta, swing)]
+            if any(np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius for end in ends):
+                note('miss_xy', delta)
+                continue
+            if not all(task.cfg.pour_min_clearance + clearance_reserve
+                       <= end[2] - bowl[2]
+                       <= task.cfg.pour_max_clearance - clearance_reserve for end in ends):
+                note('miss_height', delta)
+                continue
+            goal = q.copy()
+            goal[index] += delta
+            out = q.copy()
+            out[index] += swing
+            reserve = np.vstack([goal + 0., out])
+            reserve[0, index] += np.sign(delta) * wrist_reserve
+            if not p.accepts(np.vstack([q, goal, reserve])):
+                note('roll_window', delta)
+                continue
+            yield goal, reserve
+        return
+    for delta in wrist_pour.tilt_angles(axis, object_axis, 165.):
+        end = pivot + rotation(axis, delta) @ (obj[:3, 3] - pivot)
+        if np.linalg.norm(end[:2] - bowl[:2]) > task.cfg.pour_xy_radius:
+            note('miss_xy', delta)
+            continue
+        if not task.cfg.pour_min_clearance + clearance_reserve <= end[2] - bowl[2] \
+                <= task.cfg.pour_max_clearance - clearance_reserve:
+            note('miss_height', delta)
+            continue
+        goal = q.copy()
+        goal[index] += delta
+        reserve = goal.copy()
+        reserve[index] += np.sign(delta) * wrist_reserve
+        if not p.accepts(np.vstack([q, goal, reserve])):
+            note('roll_window', delta)
+            continue
+        yield goal, reserve
+
+
+def _swings_clear(planner, task, rest, swings):
+    """The shake swings from the near-upside-down rest plan as clear wrist-only lines."""
+    p = planner.planner
+    for swing in swings:
+        try:
+            path = p.plan_qpos_line(swing, rest, time_step=task.control_timestep,
+                                    ref_yaw=float(rest[2]), qpos_step=.02)
+        except RuntimeError:
+            return False
+        if path.get('status') != 'Success' or not path_clear(planner, rest, path['position']):
+            return False
+    return True
+
+
+@measured
+def preview_pour(planner, task, q, hand_object):
+    """Cheap preview of the pour from `q`: the endpoint geometry and joint budget first
+    (`pour_targets`), then one wrist-only line to that goal and, for the shaking task, a
+    clearance check on each swing. No shake geometry is planned here -- that is
+    `wrist_pour.pour_and_shake`'s job at execution time -- so the hover search is not
+    gated on a full shake plan it may never need."""
+    p = planner.planner
+    for goal, reserve in pour_targets(planner, task, q, hand_object):
+        try:
+            path = p.plan_qpos_line(goal, q, time_step=task.control_timestep,
+                                    ref_yaw=float(q[2]), qpos_step=.02)
+        except RuntimeError:
+            continue
+        if path.get('status') != 'Success' or not path_clear(planner, q, path['position']):
+            continue
+        if shaking(task) and not _swings_clear(planner, task, goal,
+                                               np.atleast_2d(reserve)[1:]):
+            continue
+        path['preview_reserve_qpos'] = reserve
+        return path
+    return None
 
 
 def hover_goals(p, current, tcp, *, n_init=32, preferred=None, mode='dual'):
@@ -252,7 +340,7 @@ def plan_loaded_hover(planner, task, current, hand_object, *, n_init=32, preferr
                 planner._pour_reasons = []
                 arc = preview_pour(planner, task, reached, hand_object)
                 if arc is not None and p.accepts(np.vstack([path['position'], arc['position'],
-                                                           arc['preview_reserve_qpos'][moves]]), move_group=True):
+                                                           np.atleast_2d(arc['preview_reserve_qpos'])[:, moves]]), move_group=True):
                     return dict(approach=path, pour=arc, hover_extra=extra, hover_back=back, hover_spin=spin,
                                 hover_shift=None if shift is None else list(shift),
                                 hover_yaw_anchor=math.degrees(yaw_anchor), hover_ik_records=ik_records, hover_goal=goal.tolist())
@@ -1855,9 +1943,10 @@ def _solve(
                     return res
                 current = task.agent.robot.get_qpos()[0].cpu().numpy().astype(float)
                 with season.keepout(planner, [distractor], pad=GRASP_KEEPOUT_PAD):
-                    direct = plan_loaded_hover(planner, task, current, held_transform(task, target), preferred=route['hover'])
+                    direct = plan_loaded_hover(planner, task, current, held_transform(task, target),
+                                               preferred=route['hover'], more=True)
                 if direct is None:
-                    return fail(env, "no loaded hover after bowl drive")
+                    return fail(env, "no loaded hover after bowl drive", hover=hover_summary(planner))
             say(env, "hover over bowl", route_prechecked=True, extra=direct['hover_extra'],
                 back=direct['hover_back'], spin_deg=direct['hover_spin'],
                 shift_m=direct.get('hover_shift'))
