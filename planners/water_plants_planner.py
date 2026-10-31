@@ -1353,7 +1353,7 @@ def drive_to(env, planner, task, dock_xyyaw, label: str, *, carry: bool = True,
         carry = False
     for rung in (1, 2, 3):
         if carry and rung in (1, 2):
-            yaws = common.CARRY_YAWS_DEG if rung == 1 else CARRY_RETRY_YAWS
+            yaws = water_oracle.CARRY_YAWS_DEG if rung == 1 else CARRY_RETRY_YAWS
             # Tuck depth is the shipped 0.25 m on every rung. A shallower first tuck
             # (0.40 m) was the obvious economy — the tuck is the arm's largest single
             # cost, 119 deg each and twice per plant — and the base's rotation sweep

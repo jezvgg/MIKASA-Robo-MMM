@@ -30,6 +30,7 @@ uv run python -m planners.myrobocasa_takeitback_planner --help
 | `MikasaWaterPlants-v0` | `water_plants_planner` | `pd_joint_pos` |
 | `MikasaCabinetRetrieval-v0` | `cabinet_retrieval_planner` | `pd_joint_pos` |
 | `MikasaCabinetSearch5-v0` | `cabinet_search_planner` | `pd_joint_pos` |
+| `MikasaSameDrawer-v0` | `same_drawer_planner` | `pd_joint_pos` |
 | `MikasaDepthRecall-v1` | `depth_recall_v1_planner` | `pd_joint_pos` |
 
 Standalone запуск одного сида:

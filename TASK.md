@@ -151,11 +151,14 @@
 чтобы не воскресить код, удалённый на этой ветке.
 
 Взято из `origin/train/vla` (`f46cedd`, `ed9c668`): `vla/memer`,
-`vla/memoryvla`, `vla/BASELINES_PARAMS.md`, `vla/TRAINING_DEVIATIONS.md`,
+`vla/memoryvla`, `vla/TRAINING_DEVIATIONS.md`,
 `vla/mem_guard.py`, `vla/mem_log.py`, `vla/debug_4gpu.sh`, новые
 `vla/pi05_first_frame/src/mikasa_pi05/{configs,dataset,provenance,transforms}.py`,
 `third_party/` (только gitlink'и: `memer` `fb6dbd0`, `Qwen3-VL` `9658872`,
-`MemoryVLA` `082ce25` branch `mikasa-robo`, `openpi` `215abfb`),
+`MemoryVLA` `082ce25` branch `mikasa-robo`, `openpi` `215abfb`, `robomme`
+`ecf086c`, `hamlet` `63b4055`; файлов чужих репозиториев в дереве нет),
+`utils/policies/{pi05,memer,hamlet,memory}_runtime.py` — по одному кадру на
+политику,
 `my_scenes/my_robocasa_takeit.py`, `MyRoboCasaSceneTakeItBack`/
 `MyRoboCasaFridgeVeggies` на общем миксине `AssistedGraspTask`,
 `planners/oracle/head_tracking.py` с `aim_one_eye`, `utils/target_visibility.py`,

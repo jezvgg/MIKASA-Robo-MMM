@@ -113,6 +113,39 @@ def vec_stats(moms, dim):
     }
 
 
+def vector_quantiles(
+    data_dir: Path, columns: "list[str]", total_frames: int | None = None
+) -> dict:
+    """Per-dimension 1%/99% quantiles of the vector columns across every parquet chunk.
+
+    The streaming exporter keeps only the first two moments per episode, which is not
+    enough for a LeRobot v3 normalisation; this pass re-reads the written parquets so
+    the combined dataset carries the same `q01`/`q99` the collection exporter records.
+    """
+    if not columns:
+        return {}
+    files = sorted(Path(data_dir).rglob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"no parquet files under {data_dir}")
+    chunks = {column: [] for column in columns}
+    frames = 0
+    for path in files:
+        table = pd.read_parquet(path, columns=list(columns))
+        frames += len(table)
+        for column in columns:
+            chunks[column].append(
+                np.stack([np.asarray(v, dtype=np.float64) for v in table[column]])
+            )
+    if total_frames is not None and frames != total_frames:
+        logger.warning("quantile pass saw %s frames, expected %s", frames, total_frames)
+    quantiles = {}
+    for column in columns:
+        stacked = np.concatenate(chunks[column], axis=0)
+        low, high = np.quantile(stacked, [0.01, 0.99], axis=0)
+        quantiles[column] = {"q01": low.tolist(), "q99": high.tolist()}
+    return quantiles
+
+
 def main(args: Args):
     input_path = Path(args.traj_path)
     if not input_path.exists():

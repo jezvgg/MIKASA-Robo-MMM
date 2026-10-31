@@ -13,7 +13,7 @@ from mani_skill.agents.robots import Fetch
 from my_scenes.my_robocasa_takeitback_tray import MyRoboCasaSceneTakeItBackTray
 from mani_skill.utils.wrappers import RecordEpisode
 from robots.fetch.extand import FetchMotionPlanningSapienSolver
-from planners.oracle.oracle_takeitback import _grasp_pose, _tcp_at, _tcp_to
+from planners.takeitback_common import _grasp_pose, _tcp_at, _tcp_to
 from utils.logging_utils import PlannerLogger, capture_stdout
 from utils.planners_utils import (
     _rotate_base_to,
@@ -30,25 +30,11 @@ from utils.planners_utils import (
 GRASP_STANDOFF = 1.00
 
 
-def _repair_trajectory_metadata(run_dir):
-    """Make RoboCasa reconfigure seeds replayable by ManiSkill's checker."""
+def _repair_trajectory_metadata(run_dir, sim_backend, episode_seed):
+    """Repair actual reset seeds and persist the resolved physics backend."""
     path = Path(run_dir) / "trajectory.json"
-    if not path.exists():
-        return
-    data = json.loads(path.read_text(encoding="utf-8"))
-    changed = False
-    for episode in data.get("episodes", []):
-        seed = episode.get("reset_kwargs", {}).get("seed")
-        if isinstance(seed, list) and len(seed) == 1:
-            seed = seed[0]
-        if seed is not None and episode.get("episode_seed") != seed:
-            episode["episode_seed"] = int(seed)
-            changed = True
-    if changed:
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+    if path.exists():
+        patch_trajectory_metadata(path, sim_backend, episode_seed=episode_seed)
 
 
 def parse_args():
@@ -765,7 +751,8 @@ if __name__ == "__main__":
     env.action_space.seed(SEED)
     with capture_stdout(env.dir / "console.log"):
         planning(env, SEED, debug=args.debug, info=args.info)
+    sim_backend = resolve_sim_backend(env)
     env.close()
-    _repair_trajectory_metadata(run_dir)
+    _repair_trajectory_metadata(run_dir, sim_backend, SEED)
     if not args.no_video:
         print(f"[INFO] Video recording saved in '{run_dir}/'")

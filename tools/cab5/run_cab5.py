@@ -20,7 +20,6 @@ def main():
     ap.add_argument("--first", type=int, default=None, help="open this compartment first (0 = cab_1)")
     ap.add_argument("--video-dir", default=None)
     ap.add_argument("--trajectory-out", default=None)
-    ap.add_argument("--n4", action="store_true", help="the four-compartment task (control)")
     ap.add_argument("--variant", choices=("n4-untangled", "n5-tangled-off"), default=None,
                     help="regression probes: n4-untangled = the four compartments with cab_1's door made "
                          "tangible (untangle_stems as in N=5)")
@@ -38,7 +37,7 @@ def main():
     from utils.mikasa.seeding import seed_everything
     from utils.test_planner import load_planner
 
-    profile = json.loads((PROFILES / "cabinet_search_profile.json").read_text())
+    profile = json.loads((PROFILES / "cabinet_search5_profile.json").read_text())
     kwargs = profile_env_kwargs(profile, obs_mode="state")
     if args.video_dir:
         kwargs["render_mode"] = "rgb_array"
@@ -59,7 +58,7 @@ def main():
         csp.search_plan = first_then_seed
     seed = args.seed
     seed_everything(seed)
-    env_id = "MikasaCabinetSearch-v0" if args.n4 else "MikasaCabinetSearch5-v0"
+    env_id = "MikasaCabinetSearch5-v0"  # the four-compartment registration is gone (see TASK.md)
     if args.variant == "n4-untangled":
         import dataclasses
         from mani_skill.utils.registration import register_env

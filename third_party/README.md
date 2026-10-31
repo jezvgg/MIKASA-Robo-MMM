@@ -9,6 +9,8 @@ by the setup scripts; the submodules stay at their pins.
 | `memer` (memer-policy/memer) | `fb6dbd0` | MemER high level: `scripts/generate_sft_data.py` (LeRobot v3 + `meta/subtasks.parquet` → Qwen SFT data; `vla/memer/patches/memer-0001` keeps early keyframes), offline rollout eval, `MemERDeploymentPolicy` |
 | `Qwen3-VL` (QwenLM/Qwen3-VL) | `9658872` | `qwen-vl-finetune`, the trainer `memer/TRAINING_QWEN3VL.md` names: Qwen3-VL-4B-Instruct, vision and merger frozen, LLM tuned, 1500 steps, effective batch 128, LR 6e-5 cosine, warmup 0.05 |
 | `MemoryVLA` (shihao1895/MemoryVLA, branch `mikasa-robo`) | `082ce25` | The authors' MIKASA-Robo recipe, `script/train/mikasa/train_mikasa*.sh`: OpenVLA-7B prismatic init, DiT-L, LR 2e-5, 20k steps, global batch 256, RLDS data |
+| `robomme` (RoboMME/robomme_policy_learning) | `ecf086c` | The paper's `mme_vla_suite` backbone: `utils/policies/robomme.py` imports it at `third_party/robomme`, and `utils/policies/memory_runtime.py` reads its `perceptual-framesamp`/`perceptual-tokendrop` configs |
+| `hamlet` (myungkyuKoo/HAMLET-Isaac-GR00T) | `63b4055` | `utils/policies/hamlet_runtime.py`: GR00T-N1.6-3B plus HAMLET's memory head (`moment_tokens`, memory transformer) |
 | `openpi` (Physical-Intelligence/openpi) | `215abfb` | MemER low level (pi0.5 with the current subtask as the prompt), plus `vla/pi05_first_frame/openpi.patch` |
 
 Clone with `git submodule update --init`. MemoryVLA's Llama-2 comes from a local copy of

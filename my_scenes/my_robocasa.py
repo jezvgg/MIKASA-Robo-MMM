@@ -94,7 +94,7 @@ class MyRoboCasaScene(BaseRoboCasaScene):
 
         return dict(success=success)
 
-    def compute_dense_reward(self):
+    def compute_dense_reward(self, obs: object, action: torch.Tensor, info: dict):
         """
         Награда состоит из расстояния до кружки, из того, взял ли он кружку, из расстояния от кружки до чашки.
         """
@@ -107,23 +107,25 @@ class MyRoboCasaScene(BaseRoboCasaScene):
         reaching_reward = 1 - torch.tanh(6 * tcp_to_obj_dist)
         reward = reaching_reward
 
-        is_grasped = self.agent.is_grasping(self.cup)
-        reward += is_grasped
+        is_grasped = self.agent.is_grasping(self.cup).float()
+        reward = reward + is_grasped
 
-        upper_bound = self.bowl.pose.p + bowl_size[2] / 2 + cup_size[2] / 2
-        reward += upper_bound
+        # The cup counts as placed when it is over the bowl's footprint and no higher
+        # than its rim; both masks are per-env scalars so the rewards below stay (N,).
+        rim_z = self.bowl.pose.p[:, 2] + bowl_size[2] / 2 + cup_size[2] / 2
+        above_rim = (self.cup.pose.p[:, 2] <= rim_z).float()
 
-        bowl_radius = get_actor_size(self.bowl)[0] / 2
-        xy_distance = torch.linalg.norm(self.bowl.pose.p - self.cup.pose.p, dim=1)
+        bowl_radius = bowl_size[0] / 2
+        xy_distance = torch.linalg.norm(self.bowl.pose.p[:, :2] - self.cup.pose.p[:, :2], dim=1)
+        over_bowl = (xy_distance < bowl_radius).float()
         place_reward = 1 - torch.tanh(6 * xy_distance)
-        reward += place_reward * is_grasped * (upper_bound | xy_distance < bowl_radius)
+        reward = reward + place_reward * is_grasped * above_rim
 
-        z_distance = self.bowl.pose.p[0][2] - self.cup.pose.p[0][2]
+        z_distance = (self.cup.pose.p[:, 2] - rim_z).abs()
         place_into_reward = 1 - torch.tanh(6 * z_distance)
-        reward += place_into_reward * is_grasped * xy_distance < bowl_radius
+        reward = reward + place_into_reward * is_grasped * over_bowl
 
-        z_tres = self.bowl.pose.p[0][2] <= self.cup.pose.p[0][2]
-        reward += z_tres & xy_distance < bowl_radius
+        reward = reward + over_bowl * above_rim
 
         return reward
 

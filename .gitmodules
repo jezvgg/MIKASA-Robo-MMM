@@ -14,3 +14,11 @@
 	path = third_party/openpi
 	url = https://github.com/Physical-Intelligence/openpi.git
 	branch = main
+[submodule "third_party/robomme"]
+	path = third_party/robomme
+	url = https://github.com/RoboMME/robomme_policy_learning.git
+	branch = main
+[submodule "third_party/hamlet"]
+	path = third_party/hamlet
+	url = https://github.com/myungkyuKoo/HAMLET-Isaac-GR00T.git
+	branch = main
