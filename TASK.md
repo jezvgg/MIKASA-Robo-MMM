@@ -230,6 +230,41 @@ torch 2.14.0, numpy 1.26.4, h5py 3.16.0, mplib 0.2.1. `load_profile()`
 `depth_recall 7` — `verdict=success steps=2742`. Соседний клон
 `../ManiSkill` больше не нужен: ни один файл репозитория на него не ссылается.
 
+## Исходный код воспроизводит сиды; наша ветка — нет
+
+Проверено прогонами на исходных деревьях, а не рассуждением.
+
+**TakeItBack и Veggie.** В опубликованных `collection_provenance.json` записан
+sha256 каждого файла кода. Единственный коммит истории, где совпадают
+проверенные хэши, — `4119aa4` («Preserve assisted Fetch scene and planner
+baseline»); на нём же `planners/myrobocasa_takeit_planner.py` уже содержит
+`body_hold`, то есть линия сбора расходится с нами не по API. Прогон 200
+валидационных сидов на дереве `4119aa4` (`utils.test_planner -n 1
+--assisted-grasp --control-mode pd_joint_pos --sim-backend physx_cpu
+--obs-mode state --log-dir …`, 28 воркеров): **TakeItBack 99/100** (не прошёл
+100046), **Veggie 100/100**.
+
+**Четыре задачи из профилей.** На `origin/train/vla` (`c6a429d`) проходят все
+восемь проверенных «плохих» сидов: SameDrawer 8250025 (23.7 с), 8250096 (20.1 с),
+CabinetSearch5 7847060 (42.5 с), SeasonDish 6280002 (53.8 с), 6280020 (46.8 с),
+6280092 (32.5 с), 6280095 (49.1 с), 6280118 (57.9 с).
+
+**Что это значит.** Те же 200 legacy-сидов на нашей ветке — TakeItBack 93/100,
+Veggie 79/88; с четырьмя файлами из `4119aa4` (`robots/fetch/extand.py`,
+`robots/fetch/base_yaw.py`, `robots/fetch/utils.py`,
+`utils/mikasa/assisted_grasp.py`) — TakeItBack 96/100, Veggie 100/100. Значит
+расхождение создано нашим слиянием, а не данными, и исходными файлами оно
+снимается. Принять их целиком нельзя: наши `utils/collection/test_task_scenes.py`
+и IK-бэкенд в `robots/fetch/utils.py` описывают более новое поведение, и три
+теста падают на старом `assisted_grasp`.
+
+Как воспроизвести на исходном коде:
+
+```bash
+git worktree add ../seeds-legacy 4119aa4             # TakeItBack + Veggie
+git worktree add ../seeds-mikasa origin/train/vla     # четыре задачи из профилей
+```
+
 ## Результаты на валидационных сидах (oracle-фаза, 100 сидов)
 
 Сиды 0–99, `MIKASA_IK_BACKEND=mplib`, восемь параллельных процессов.
