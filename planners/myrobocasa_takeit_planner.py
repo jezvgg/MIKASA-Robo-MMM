@@ -826,8 +826,6 @@ def _planning_episode(
     planner.action_noise = EXECUTION_ACTION_NOISE
     planner.noise_hold = EXECUTION_NOISE_HOLD
     planner.set_execution_noise_seed(seed)
-    # The recorded episodes park the head on every body-drive hold.
-    planner.head_zero_on_hold = True
 
     # Keep cup as a real obstacle throughout planning; only grasp stages may
     # later opt into contact explicitly.

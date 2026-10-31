@@ -13,7 +13,7 @@ import torch
 
 import my_scenes  # noqa: F401 — register the benchmark environment
 from robots.fetch.actions import base_cmd as _base_cmd
-from robots.fetch.extand import FetchMotionPlanningSapienSolver
+from robots.fetch.extand_legacy import FetchMotionPlanningSapienSolver
 from utils.logging_utils import PlannerLogger, StreamingVideoRecorder, capture_stdout
 from utils.planners_utils import lower_torso_smooth
 from utils.tray_episode_checkers import TrayEpisodeCheckers
@@ -1075,8 +1075,6 @@ def _planning_episode(env, seed, debug=False):
         env, base_pose=agent.robot.pose, vis=False, debug=debug
     )
     planner.MAX_REFINE_STEPS = 100
-    # The recorded episodes park the head on every body-drive hold.
-    planner.head_zero_on_hold = True
     planner.action_noise = EXECUTION_ACTION_NOISE
     planner.noise_hold = EXECUTION_NOISE_HOLD
     planner.set_execution_noise_seed(seed)
