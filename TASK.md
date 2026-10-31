@@ -421,13 +421,25 @@ python3 scripts/tree_loc.py --assets robots      # с бинарными асс�
 
 Сиды TakeItBack и Veggie воспроизводятся на модулях, записанных в датасет:
 `robots/fetch/extand_legacy.py`, `robots/fetch/utils_legacy.py`,
-`utils/mikasa/assisted_grasp_legacy.py` (побайтные копии `4119aa4`, коммит
-`7b04151`), а `planners/myrobocasa_takeit_planner.py` и
+`utils/mikasa/assisted_grasp_legacy.py` (коммит `7b04151`), а
+`planners/myrobocasa_takeit_planner.py` и
 `planners/myrobocasa_fridge_veggies_planner.py` восстановлены из `4119aa4`
 целиком, с заменой только двух строк импорта (`extand` → `extand_legacy`,
 `utils` → `utils_legacy`). Сцены `my_scenes/my_robocasa_takeitback.py` и
 `my_scenes/my_robocasa_fridge_veggies.py` — тоже побайтно из `4119aa4`
 (`16ec7d07`, `d204c9f3`).
+
+Только `extand` заморожен **наследником, а не копией** (`0b705a9`): от
+`4119aa4` отличаются ровно пять кусков — `move_to_pose_with_RRTConnect` (маска
+подъёмного сустава), `_compose` и `_from_abs` (обнуление суб-`1e-6` базовых
+скоростей), `_hold_targets` (парковка головы) и `_plan_base_yaw` (проверка
+лимитов `root_z_rotation_joint`), 231 строка вместо 3 039. Остальные
+расхождения — новые необязательные аргументы с дефолтами, сохраняющими
+старое поведение (`drive_straight(hold_pose=..., v_floor=..., v_end=...)`,
+`follow_forward_path_w_refinement(body_hold=...)`, атрибуты шума в `__init__`),
+поэтому они наследуются. Эквивалентность проверена не на глаз: трасса действий
+обоих вариантов совпадает побайтно — TakeItBack 100000 (888 шагов,
+`ceecbf801d9719fb`) и Veggie 0 (1 851 шаг, `2fbfb9675258d8f3`).
 
 Три прогона 100 сидов TakeItBack пулом на 28 воркеров: наша ветка 98, 97, 97;
 исходное дерево `4119aa4` — 99, 97, 98. Серией (по одному процессу) все три
