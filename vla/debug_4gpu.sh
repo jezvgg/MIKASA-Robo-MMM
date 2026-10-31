@@ -4,8 +4,10 @@
 # that each learns; this checks the four-GPU runs: launch, memory, step time, loss, and with
 # CHECKPOINTS=1 the checkpoint and an evaluation from it). Stages, in $STAGES order; a finished
 # stage is skipped on a re-run:
-#   low   MemER low level (openpi): config memer_lowlevel_debug_4xh100 (the full run's batch 128 on
-#         4 FSDP devices, its LR schedule and EMA, episodes 0-979 of every task), $LOW_STEPS steps;
+#   low   MemER low level (openpi): the norm stats as the full run computes them (train_low.sh,
+#         stages check and stats, all episodes; skipped when current), then config
+#         memer_lowlevel_debug_4xh100 (the full run's batch 128 on 4 FSDP devices and peak LR, a
+#         100-step warmup, no EMA, episodes 0-979 of every task), $LOW_STEPS steps;
 #         with checkpoints, a params-only one at the end and tests/check_memer_action_error.py on
 #         the held-out episodes 980-999 against "hold still".
 #   high  MemER high level (Qwen3-VL-4B): vla/memer/train_high.sh (per-device 4 x their
@@ -93,6 +95,10 @@ low() {
   local ck=$PI05_WORK/checkpoints/$cfg/$exp
   export PYTHONPATH=$REPO/vla/pi05_first_frame/src MEMER_DATA_ROOT=$DATA
   [ -f "$W/.low_done" ] && return 0
+  # The debug config shares the full run's stats directory; compute them from all episodes, as
+  # the full run does, so a debug run never leaves 980-episode stats for it to pick up.
+  STAGES="check stats" "$REPO/vla/memer/train_low.sh" debug4-stats > "$LOGS/low_stats.log" 2>&1 \
+    || { say "low: norm stats FAILED (log $LOGS/low_stats.log)"; tail -n 20 "$LOGS/low_stats.log" >> "$REPORT"; return 1; }
   steps=$LOW_STEPS; [ "$CHECKPOINTS" = 0 ] && steps=$ENDLESS
   say "low: $cfg on 4 GPUs, $LOW_STEPS steps (log $LOGS/low_train.log)"
   run_until low_train "$LOW_STEPS" "grep -oE 'Step [0-9]+:' '$LOGS/low_train.log' | tail -1 | grep -oE '[0-9]+'" -- \
