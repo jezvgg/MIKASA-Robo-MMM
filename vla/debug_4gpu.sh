@@ -4,8 +4,10 @@
 # that each learns; this checks the four-GPU runs: launch, memory, step time, loss, and with
 # CHECKPOINTS=1 the checkpoint and an evaluation from it). Stages, in $STAGES order; a finished
 # stage is skipped on a re-run:
-#   low   MemER low level (openpi): config memer_lowlevel_debug_4xh100 (the full run's batch 128 on
-#         4 FSDP devices, its LR schedule and EMA, episodes 0-979 of every task), $LOW_STEPS steps;
+#   low   MemER low level (openpi): the norm stats as the full run computes them (train_low.sh,
+#         stages check and stats, all episodes; skipped when current), then config
+#         memer_lowlevel_debug_4xh100 (the full run's batch 128 on 4 FSDP devices and peak LR, a
+#         100-step warmup, no EMA, episodes 0-979 of every task), $LOW_STEPS steps;
 #         with checkpoints, a params-only one at the end and tests/check_memer_action_error.py on
 #         the held-out episodes 980-999 against "hold still".
 #   high  MemER high level (Qwen3-VL-4B): vla/memer/train_high.sh (per-device 4 x their
@@ -13,8 +15,8 @@
 #         checkpoints, the weights at the end and the authors' eval_subtask_rollout.py from them on
 #         episode $HIGH_EVAL of every task.
 #   mvla  MemoryVLA: RLDS of episodes 0..$MVLA_EPISODES-1 of every task, then vla/memoryvla/train.sh
-#         with the first per-device batch of $MVLA_BS that runs $MVLA_STEPS steps (its memory bank
-#         fills over the first 256 frames of an episode, so a batch must outlast that); with
+#         with the first per-device batch of $MVLA_BS that runs $MVLA_STEPS steps (whole groups of
+#         16 frames per device, train.sh's group loader); with
 #         checkpoints, one at the end and check_action_error.py on held-out $MVLA_HELD_OUT.
 # CHECKPOINTS=0 (default): nothing is saved: every run is set to save past its end and is stopped
 # once it has logged its steps. CHECKPOINTS=1 saves and evaluates; it needs ~7 GB (low), ~9 GB
@@ -34,7 +36,7 @@ SFT_ROOT=${SFT_ROOT:-$HOME/datasets/memer_sft}
 HIGH_DATASETS=${HIGH_DATASETS:-memer_samedrawer,memer_seasondish,memer_cabinetsearch,memer_depthrecall}
 LOW_STEPS=${LOW_STEPS:-500}; LOW_SAVE=${LOW_SAVE:-200}; LOW_FRAMES=${LOW_FRAMES:-50}
 HIGH_STEPS=${HIGH_STEPS:-60}; HIGH_EVAL=${HIGH_EVAL:-999}
-MVLA_EPISODES=${MVLA_EPISODES:-3}; MVLA_STEPS=${MVLA_STEPS:-300}; MVLA_BS=${MVLA_BS:-32 16 8 4 2}
+MVLA_EPISODES=${MVLA_EPISODES:-3}; MVLA_STEPS=${MVLA_STEPS:-300}; MVLA_BS=${MVLA_BS:-32 16}   # whole groups of 16 (train.sh's group loader)
 MVLA_HELD_OUT=${MVLA_HELD_OUT:-990,991}
 ENDLESS=10000000   # steps and save interval of a run that is stopped from outside
 LAYOUT=$REPO/vla/memer/configs/fetch_stacked_rgb_camera_layout.json
@@ -93,6 +95,10 @@ low() {
   local ck=$PI05_WORK/checkpoints/$cfg/$exp
   export PYTHONPATH=$REPO/vla/pi05_first_frame/src MEMER_DATA_ROOT=$DATA
   [ -f "$W/.low_done" ] && return 0
+  # The debug config shares the full run's stats directory; compute them from all episodes, as
+  # the full run does, so a debug run never leaves 980-episode stats for it to pick up.
+  STAGES="check stats" "$REPO/vla/memer/train_low.sh" debug4-stats > "$LOGS/low_stats.log" 2>&1 \
+    || { say "low: norm stats FAILED (log $LOGS/low_stats.log)"; tail -n 20 "$LOGS/low_stats.log" >> "$REPORT"; return 1; }
   steps=$LOW_STEPS; [ "$CHECKPOINTS" = 0 ] && steps=$ENDLESS
   say "low: $cfg on 4 GPUs, $LOW_STEPS steps (log $LOGS/low_train.log)"
   run_until low_train "$LOW_STEPS" "grep -oE 'Step [0-9]+:' '$LOGS/low_train.log' | tail -1 | grep -oE '[0-9]+'" -- \

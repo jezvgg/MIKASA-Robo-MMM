@@ -21,7 +21,8 @@
       "sim_freq": 100
     },
     "assisted_grasp": true,
-    "assisted_grasp_hand_collides": true
+    "assisted_grasp_hand_collides": true,
+    "instruction_version": 2
   },
   "task": {
     "terminal": "nudge",
@@ -140,5 +141,6 @@
   "profile_5": "Profile 5 = profile 4 with the wrist-first turn and the fist made during the pre-contact move (FIST_TURN_ON_THE_WAY): the sequential screw path with the turn blended in, the gripper closing from its first knot on an even step; the sequential order is the fallback. ~2.5 s shorter per fist close. The owner, 2026-10-24: «Поворачивать гриппер у других дверей и закрывать его можно одновременно». Profile 4 (c5v4-train-*, seeds from 7920400) is not part of the dataset.",
   "profile_6": "Profile 6 = profile 5 without the separate wrist turn back after a fist close (FIST_WRIST_BACK off): the fold to the drive posture sets the wrist roll with every other arm joint, so the gripper turns while the arm returns to rest; ~2.5 s shorter per fist close. The owner, 2026-10-25: «После закрытия тоже можно одновременно поворачивать гриппер и возвращаться в rest позу». Profile 5 (c5v5-train-001..005, seeds 7920500-7920599) is not part of the dataset.",
   "profile_7": "Profile 7 = profile 6 with the fist opening during its back-off, 0.20 m off the leaf (FIST_OPEN_WHILE_BACKING), and the fold to the drive posture before the closure is read (FOLD_BEFORE_VERIFY): the release dwell runs during the fold. The owner, 2026-10-25: «И гриппер закрывать тоже одновременно можно». Profile 6 (c5v6-train-*, seeds from 7920600) is not part of the dataset.",
-  "one_branch_2026_10_26": "Reproduction on train/vla (owner 2026-10-26): assisted_grasp_hand_collides true is the proxy drive under which the hand collides with the door leaves (tools/assisted_grasp_check/RESULTS.md); CabinetSearch's default."
+  "one_branch_2026_10_26": "Reproduction on train/vla (owner 2026-10-26): assisted_grasp_hand_collides true is the proxy drive under which the hand collides with the door leaves (tools/assisted_grasp_check/RESULTS.md); CabinetSearch's default.",
+  "one_instruction_2026_10_30": "One instruction per task (owner 2026-10-30): the env gives the first phrasing for every episode (instruction_version 2), and since HF commits 7de4ef7 (nurtayev-d/cabinetsearch5-ag-1000ep), 1e2f20a (nurtayev-d/depthrecall-ag-1000ep) and f187a42 (MIKASA-Robo-MMM/MIKASA-Robo-MMM) every episode of cabinetsearch5-ag-1000ep carries it, so this profile pins 2. Version 1, the phrasing each episode drew (336/300/364), rebuilds sources/ as collected; the draw itself happens in both, so the scenes are the same."
 }

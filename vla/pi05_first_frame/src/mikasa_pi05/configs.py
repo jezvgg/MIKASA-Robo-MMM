@@ -13,7 +13,6 @@ import functools
 import os
 import pathlib
 
-import flax.nnx as nnx
 import openpi.models.pi0_config as pi0_config
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.config as _config
@@ -107,11 +106,12 @@ class SameDrawerDataConfig(_config.DataConfigFactory):
         )
 
 
-def _model(action_horizon: int = ACTION_HORIZON, **kwargs) -> pi0_config.Pi0Config:
+def _model(action_horizon: int = ACTION_HORIZON, discrete_state_input: bool = True,
+           **kwargs) -> pi0_config.Pi0Config:
     return pi0_config.Pi0Config(
         pi05=True,
         action_horizon=action_horizon,
-        discrete_state_input=True,
+        discrete_state_input=discrete_state_input,
         image_keys=kwargs.pop("image_keys", sd.IMAGE_KEYS),
         **kwargs,
     )
@@ -209,23 +209,22 @@ CONFIGS["pi05_sd_ff_h50_4xh100"] = dataclasses.replace(
 
 
 # --- MemER's low-level policy (Sridhar et al., arXiv 2510.20328, §3.3 + Table 5) -----------------
-# pi0.5 fine-tuned from the public pi0.5-DROID checkpoint on (current images, state, the frame's
-# subtask) -> action chunk, one policy over all tasks. The memer repo has no low-level trainer
-# ("start from openpi, put the subtask in the prompt"), so this is openpi's pi0.5 fine-tune with:
-#   Table 5: batch 128, 18,000 steps, AdamW b1 0.9 b2 0.95, weight decay 0, clip 1, cosine with
-#            warmup ratio 0.033 (594 steps), every parameter trained;
-#   §4:      chunks of 15 actions (pi05_droid's horizon);
-#   openpi defaults where Table 5 says nothing: peak LR 2.5e-5 decaying to 2.5e-6 and EMA 0.99
-#            (CosineDecaySchedule/TrainConfig, as pi05_droid_finetune leaves them), weight decay
-#            1e-10 (openpi's stand-in for 0);
-#   ours: the three Fetch cameras in pi0.5's own three slots, our 13D actions with their own norm
-#         stats (DROID's stats are for DROID's actions), the six tasks' labelled copies
+# pi0.5 fine-tuned on (current images, state, the frame's subtask) -> action chunk, one policy over
+# all tasks. The memer repo has no low-level trainer ("start from openpi, put the subtask in the
+# prompt"). The recipe is RoboMME's for pi0.5 base (their mme_vla_suite, which runs MemER's
+# subtasks; openpi's pi05_libero schedule), taken whole: Fetch is not a DROID robot, neither is
+# RoboMME's, so the paper's pi0.5-DROID start and the openpi defaults it implies are not used:
+#   RoboMME: pi0.5 base, SigLIP frozen, AdamW b1 0.9 b2 0.95 with clip 1, 5e-5 constant after
+#            10,000 warmup steps, EMA 0.999, 80,000 steps, chunks of 20 with 16 executed, no state;
+#   ours (forced by the robot, the data or the GPUs): batch 128 on 4 FSDP devices (RoboMME 64 on
+#         4 A40; an H100 has 80 GB, an A40 48 GB), the three Fetch cameras in pi0.5's own three
+#         slots (RoboMME two), our 13D actions with their own norm stats per chunk length (arm
+#         deltas from the current joints widen with the chunk), the six tasks' labelled copies
 #         (vla/memer/label_subtasks.py) under $MEMER_DATA_ROOT (default ~/datasets/memer).
 MEMER_TASKS = ("samedrawer", "seasondish", "cabinetsearch", "depthrecall", "takeitback", "veggie")
-MEMER_ACTION_HORIZON = 15
-MEMER_STEPS = 18_000
-MEMER_NORM_STATS_DIR = WORK / "assets" / "memer-lowlevel"
-DROID_WEIGHTS = "gs://openpi-assets/checkpoints/pi05_droid/params"
+MEMER_ACTION_HORIZON = 20
+MEMER_STEPS = 80_000
+MEMER_NORM_STATS_DIR = WORK / "assets" / f"memer-lowlevel-h{MEMER_ACTION_HORIZON}"  # per chunk
 MEMER_POLICY_METADATA = {
     "mikasa_data": MIKASA_DATA,
     "prompt": "MemER subtask (meta/subtasks.parquet)",
@@ -274,14 +273,19 @@ class MemerLowLevelDataConfig(_config.DataConfigFactory):
 
 def _memer_config(name: str, **kwargs) -> _config.TrainConfig:
     defaults = dict(
-        model=_model(action_horizon=MEMER_ACTION_HORIZON, image_keys=sd.CURRENT_IMAGE_KEYS),
+        # No state in the prompt, as RoboMME (pi0.5 has no state input but the text; the deltas
+        # still take the state, outside the model).
+        model=_model(action_horizon=MEMER_ACTION_HORIZON, image_keys=sd.CURRENT_IMAGE_KEYS,
+                     discrete_state_input=False),
         data=MemerLowLevelDataConfig(),
-        weight_loader=weight_loaders.CheckpointWeightLoader(DROID_WEIGHTS),
+        weight_loader=weight_loaders.CheckpointWeightLoader(BASE_WEIGHTS),
         policy_metadata=MEMER_POLICY_METADATA,
-        freeze_filter=nnx.Nothing(),   # Table 5 freezes nothing (openpi's default)
+        freeze_filter=nnx_utils.PathRegex(".*img.*"),   # SigLIP, as RoboMME's get_freeze_filter without LoRA
         num_train_steps=MEMER_STEPS,
+        # RoboMME's (= openpi's pi05_libero): equal peak and end, so constant after the warmup.
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=round(0.033 * MEMER_STEPS), peak_lr=2.5e-5, decay_steps=MEMER_STEPS, decay_lr=2.5e-6),
+            warmup_steps=10_000, peak_lr=5e-5, decay_steps=100_000, decay_lr=5e-5),
+        ema_decay=0.999,
     )
     defaults.update(kwargs)
     return _train_config(name, **defaults)
@@ -301,11 +305,15 @@ CONFIGS["memer_lowlevel_debug_1xh100"] = _memer_config(
     "memer_lowlevel_debug_1xh100", data=MemerLowLevelDataConfig(episodes=MEMER_DEBUG_TRAIN_EPISODES),
     batch_size=32, num_workers=6, num_train_steps=2_000, save_interval=2_000, keep_period=None, ema_decay=None,
     lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=100, peak_lr=1e-4, decay_steps=2_000, decay_lr=1e-5))
-# Four-GPU debug (vla/debug_4gpu.sh): the full run's config (batch 128 on 4 FSDP devices, its LR
-# schedule, EMA) on episodes 0-979 of every task, so 980-999 stay held out for the check.
+# Four-GPU debug (vla/debug_4gpu.sh): the full run's config (batch 128 on 4 FSDP devices, peak LR)
+# on episodes 0-979 of every task, so 980-999 stay held out for the check; but a 100-step warmup
+# and no EMA, since in 600 steps the full run's 10,000-step warmup would reach 3e-6 and EMA 0.999
+# would keep about half of the initial weights.
 CONFIGS["memer_lowlevel_debug_4xh100"] = _memer_config(
     "memer_lowlevel_debug_4xh100", data=MemerLowLevelDataConfig(episodes=MEMER_DEBUG_TRAIN_EPISODES),
-    batch_size=128, fsdp_devices=4, num_workers=16, num_train_steps=600, save_interval=200, keep_period=None)
+    batch_size=128, fsdp_devices=4, num_workers=16, num_train_steps=600, save_interval=200, keep_period=None,
+    ema_decay=None,
+    lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=100, peak_lr=5e-5, decay_steps=1_000, decay_lr=5e-5))
 
 
 # Steps between full checkpoints (with optimizer state) for configs that snapshot more often.

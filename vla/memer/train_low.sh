@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# MemER low level (pi0.5 from pi0.5-DROID, openpi) on 4 GPUs: config memer_lowlevel_4xh100 of
-# vla/pi05_first_frame/src/mikasa_pi05/configs.py (Table 5: batch 128 on 4 FSDP devices, 18,000
-# steps, cosine with warmup 0.033, every parameter trained; chunks of 15) on the six labelled copies
+# MemER low level (pi0.5 from pi0.5 base, as RoboMME; openpi) on 4 GPUs: memer_lowlevel_4xh100
+# of vla/pi05_first_frame/src/mikasa_pi05/configs.py (RoboMME's recipe for pi0.5 base: SigLIP
+# frozen, 5e-5 constant after 10,000 warmup steps, EMA 0.999, 80,000 steps, chunks of 20; batch 128
+# on 4 FSDP devices; ~1.5 s/step -> ~33 h, est.) on the six labelled copies
 # under $MEMER_DATA_ROOT (vla/memer/label_subtasks.py). Stages, each skipped when already done:
 #   check  every task's copy holds meta/subtasks.parquet;
-#   stats  the norm stats ($PI05_WORK/assets/memer-lowlevel/memer-lowlevel/norm_stats.json) are
+#   stats  the norm stats ($PI05_WORK/assets/memer-lowlevel-h20/memer-lowlevel/norm_stats.json) are
 #          computed on CPU when missing or older than any copy's subtasks.parquet: openpi loads
 #          whatever file is there, so stale stats from older data would be used without a word;
 #   train  the run; a re-run of the same command resumes from the last full checkpoint (every

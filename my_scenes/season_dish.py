@@ -15,7 +15,9 @@ What makes it a memory task rather than a pick-and-place with a colour:
 - the two condiments swap sides per episode, so "always go left" is worth 50 %,
   not 100 %;
 - the number is drawn per episode from `shake_counts`, independently of the condiment, and
-  shaking more than it is a failure (`fail`), so it too has to be remembered;
+  both ways of missing it fail (`fail`): shaking more, and turning the condiment upright again
+  before the last shake. Without the second, a policy that does not know the number shakes once,
+  turns upright and holds, and repeats until the hold succeeds (owner 2026-10-30, after review);
 - success requires the wrong condiment to be left untouched at its spawn. Without
   that clause a memoryless policy seasons with both and wins every time. That one
   predicate — `distractor_ok` in evaluate() — is what makes the 50 % ceiling true,
@@ -163,10 +165,13 @@ class SeasonDishConfig:
     you can see `success=False` but not which of six criteria missed.
     """
 
-    horizon: int = int(os.environ.get("MIKASA_HORIZON", "2000"))
+    horizon: int = int(os.environ.get("MIKASA_HORIZON", "2500"))
     """Episode length. Must equal max_episode_steps in the decorator.
 
-    **2000 since 2026-10-28 (up to 9 shakes, upright again at the end), 1300 on 10-27, was
+    **2500 since 2026-10-30 (owner)**: 1.5 x the longest oracle episode of
+    seasondish-shake-ag-1000ep (1656 steps; median 1156), so that an evaluated policy slower than
+    the oracle is not cut off; the oracle ends at success long before, so the recorded episodes
+    are the same. **2000 from 2026-10-28 (up to 9 shakes, upright again at the end), 1300 on 10-27, was
     1100.** On the one-tip task the successes of seasondish-ag-1000ep took median 905 steps
     and 294 of 1044 ended within 100 steps of 1100. Measured on the shaking pour at the
     planner's own speed (2026-10-28): the turn over takes ~90 steps, each shake ~60, the turn
@@ -1040,7 +1045,6 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
                 Pose.create_from_pq(p=bottle_pos, q=self._yaw_quat(b))
             )
 
-            target_pos = torch.where(target_bits.unsqueeze(-1), shaker_pos, bottle_pos)
             distractor_pos = torch.where(target_bits.unsqueeze(-1), bottle_pos, shaker_pos)
             self._distractor_home[env_idx] = distractor_pos
 
@@ -1360,13 +1364,19 @@ class SeasonDishTask(AssistedGraspTask, BaseEnv):
         # One shake too many can never be taken back: the episode fails there (and ends,
         # as CabinetSearch's `fail` does).
         overshaken = self.shake_count > self.num_shakes
+        # Nor can turning upright again before the last shake: once shaking has begun, the held
+        # condiment inside the upright cone with fewer shakes than the number fails. Without it a
+        # memoryless policy probes (one shake, upright and hold, again) until the hold succeeds.
+        # The oracle turns upright only at the number, so recorded episodes are unaffected.
+        early_upright = (self.shake_armed & grasp_target & (self.shake_count < self.num_shakes)
+                         & (torch.rad2deg(tilt_rad) <= self.cfg.upright_enter_deg))
 
         # A brace literal, not dict(success=...): the convention check is
         # `"dict(success=" in src.replace(" ", "")` (test_task_conventions.py:161),
         # which a multi-line dict(...) call trips even when it returns intermediates.
         return {
             "success": success,
-            "fail": overshaken & ~success,
+            "fail": (overshaken | early_upright) & ~success,
             "pour_now": pour_now,
             "pour_hold": self.pour_hold,
             "num_shakes": self.num_shakes,

@@ -6,12 +6,14 @@ from utils.collection import profile
 
 #: profile -> (assisted_grasp_hand_collides, instruction_version or None): the proxy for
 #: CabinetSearch5 only (its four-compartment sibling is gone, owner 2026-10-26); instruction_version
-#: 1 where the dataset predates the colour names, 3 for SeasonDish's shaking task (profile 28).
-EXPECTED = {"same_drawer": (False, None), "season_dish": (False, 3), "depth_recall": (False, 1),
-            "cabinet_search5": (True, None)}
+#: 3 for SeasonDish's shaking task (profile 28); 2, the one current instruction, for DepthRecall
+#: and CabinetSearch5, whose HF datasets carry it since 2026-10-30.
+EXPECTED = {"same_drawer": (False, None), "season_dish": (False, 3), "depth_recall": (False, 2),
+            "cabinet_search5": (True, 2)}
 
-#: The texts the published datasets carry (meta/tasks of seasondish-ag-1000ep and
-#: depthrecall-ag-1000ep), copied here so a change to either scene breaks this test.
+#: The texts the episodes were recorded with (seasondish-ag-1000ep, and depthrecall-ag-1000ep's
+#: sources/ since its HF text became the current one), copied here so a change to either scene
+#: breaks this test.
 RECORDED = {
     "season_dish": "Remember the salt or pepper shown in the picture on the fridge. After the picture "
                    "disappears, take that condiment and tip it over the bowl to season the dish, leaving "
@@ -41,15 +43,15 @@ def test_instruction_version_1_is_the_recorded_text(name, module):
     assert latest == scene.INSTRUCTIONS != scene.INSTRUCTION_VERSIONS[1]
 
 
-@pytest.mark.parametrize("name", ["depth_recall"])
-def test_the_campaign_checks_the_profiles_own_text(name):
+def test_the_campaign_checks_the_profiles_own_text():
     """`validate_instructions` must vouch for the text the profile's env gives, or every
     episode fails its collection contract ("Task instruction was not checked")."""
     pytest.importorskip("mani_skill")
-    pinned = profile.read_json(profile.PROFILE.with_name(f"{name}_profile.json"))
-    assert RECORDED[name] in profile.profile_instructions(pinned)
-    current = dict(pinned, env_kwargs={k: v for k, v in pinned["env_kwargs"].items() if k != "instruction_version"})
-    assert RECORDED[name] not in profile.profile_instructions(current)
+    from my_scenes import depth_recall_v1
+    pinned = profile.read_json(profile.PROFILE.with_name("depth_recall_profile.json"))
+    assert profile.profile_instructions(pinned) == set(depth_recall_v1.INSTRUCTIONS)
+    recorded = dict(pinned, env_kwargs=dict(pinned["env_kwargs"], instruction_version=1))
+    assert profile.profile_instructions(recorded) == {RECORDED["depth_recall"]}
 
 
 def test_season_dish_collects_the_shaking_task_text():
@@ -60,3 +62,37 @@ def test_season_dish_collects_the_shaking_task_text():
     texts = profile.profile_instructions(pinned)
     assert season_dish.INSTRUCTIONS[0] in texts and RECORDED["season_dish"] not in texts
     assert "number" in season_dish.INSTRUCTIONS[0] and "shake" in season_dish.INSTRUCTIONS[0]
+
+
+@pytest.mark.parametrize("module", ["my_scenes.same_drawer", "my_scenes.season_dish",
+                                    "my_scenes.depth_recall_v1", "my_scenes.cabinet_search"])
+def test_one_instruction_per_task(module):
+    """One instruction per task (owner 2026-10-30), as LIBERO, RoboCasa and MIKASA-Robo-VLA."""
+    pytest.importorskip("mani_skill")
+    scene = pytest.importorskip(module)
+    assert len(scene.INSTRUCTIONS) == 1
+    assert len(getattr(scene, "INSTRUCTIONS_NUDGE", ("",))) == 1
+
+
+@pytest.mark.parametrize("name", ["cabinet_search5"])
+def test_cabinet_profiles_vouch_for_the_one_instruction(name):
+    """The profile gives the one instruction of each terminal (CabinetSearch5's HF dataset carries it
+    since 2026-10-30); version 1 vouches for the three drawn phrasings the episodes were recorded with."""
+    pytest.importorskip("mani_skill")
+    from my_scenes import cabinet_search
+    pinned = profile.read_json(profile.PROFILE.with_name(f"{name}_profile.json"))
+    assert profile.profile_instructions(pinned) == {cabinet_search.PHRASINGS[0], cabinet_search.PHRASINGS_NUDGE[0]}
+    drawn = dict(pinned, env_kwargs=dict(pinned["env_kwargs"], instruction_version=1))
+    assert profile.profile_instructions(drawn) == set(cabinet_search.PHRASINGS) | set(cabinet_search.PHRASINGS_NUDGE)
+
+
+@pytest.mark.parametrize("version,expected", [(1, [0, 1, 2, 1]), (2, [0, 0, 0, 0])])
+def test_cabinet_search_gives_the_drawn_phrasing_only_under_version_1(version, expected):
+    pytest.importorskip("mani_skill")
+    import torch
+    from types import SimpleNamespace
+    from my_scenes import cabinet_search
+    env = SimpleNamespace(cfg=SimpleNamespace(home_marker="rug", terminal="nudge"), instruction_version=version,
+                          instruction_idx=torch.tensor([0, 1, 2, 1], dtype=torch.int32))
+    texts = cabinet_search.CabinetSearchTask.get_language_instruction(env)
+    assert texts == [cabinet_search.PHRASINGS_NUDGE[i] for i in expected]
