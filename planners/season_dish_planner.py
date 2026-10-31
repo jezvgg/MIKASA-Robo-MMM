@@ -95,7 +95,14 @@ def pour_targets(planner, task, q, hand_object):
     Yields (goal, reserve): the one-tip pour's 165 deg goal and its reserve, or for the
     shaking task the near-upside-down goal and, as the rows of `reserve`, it and the shake
     swing, so the roll window and the joint limits are checked for the whole pour before
-    the robot commits to the transfer."""
+    the robot commits to the transfer.
+
+    The shaking poses are tight: the rest is `shake_return_deg - SHAKE_LEAN_MARGIN_DEG`
+    short of straight down, which halves into a `(90 - lean / 2)` limit on the wrist
+    axis' tilt off the horizon. At the profile's 10 degree return and 3 degree margin
+    that is 3.5 degrees: an axis 6.1 degrees off the horizon has no rest angle at all,
+    and `rest_angles` comes back empty. Validation seeds whose grasp lands that far off
+    are therefore unreachable for this task rather than for the path."""
     p = planner.planner
     fk = kinematics(planner, task)
     wrist = fk.matrix(q, 'wrist_roll_link')

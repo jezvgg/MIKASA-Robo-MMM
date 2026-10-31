@@ -236,11 +236,26 @@ torch 2.14.0, numpy 1.26.4, h5py 3.16.0, mplib 0.2.1. `load_profile()`
 
 | Задача | success | missed | no_plan | error | baseline (индекс до рефакторинга) |
 |---|---|---|---|---|---|
-| SameDrawer 21 | 91 | 1 | 8 | 0 | 81 / 3 / 16 / 0 (и 79 / 2 / 19 / 0 на `origin/train/vla`, `c6a429d`) |
-| DepthRecall 6 | 98 | 2 | 0 | 0 | 98 / 2 / 0 / 0 |
+| SameDrawer 21 | 98 | 1 | 1 | 0 | 79 / 2 / 19 / 0 на `origin/train/vla` (`c6a429d`) |
+| DepthRecall 6 | 100 | 0 | 0 | 0 | 98 / 1 / 1 / 0 на `origin/train/vla`, те же сиды |
 | SeasonDish 26 (repo v2) | 83 | 1 | 16 | 0 | 83 / 0 / 17 / 0 |
-| SeasonDish 28 (карточка+встряхивания) | 91 | 0 | 9 | 0 | 91 / 0 / 9 / 0 на `origin/train/vla` (`c6a429d`), те же сиды |
-| CabinetSearch5 7 | 100 | 0 | 0 | 0 | 100 / 0 / 0 / 0 на `origin/train/vla` (`c6a429d`), те же сиды |
+| SeasonDish 28 (карточка+встряхивания) | 96 | 0 | 4 | 0 | 91 / 0 / 9 / 0 на `origin/train/vla` (`c6a429d`), те же сиды |
+| CabinetSearch5 7 | 99 | 1 | 0 | 0 | 100 / 0 / 0 / 0 на `origin/train/vla` (`c6a429d`), те же сиды |
+
+Числа выше — прогон 2026-10-31 по сидам из HF-датасета (`<task>/validation_seeds.json`,
+правило `first_100_successful_scene_seeds_in_ascending_order`): samedrawer 8 250 000+,
+depthrecall 7 965 000+, seasondish 6 280 000+, cabinetsearch5 7 847 000+, по 100 сидов
+на задачу, 32 воркера, `MIKASA_IK_BACKEND=mplib`. Ранее опубликованные здесь числа
+(91/98/83/91/100) сняты на сидах 0–99 и больше не действуют: HF-сиды — те, на которых
+собирались датасеты.
+
+Два поведения записи, потерянные при сведении веток, восстановлены в
+`robots/fetch/extand.py` (коммиты `ec025ac`, `448ed17`): суб-`1e-6` базовые
+скорости снова обнуляются в `_compose`/`_from_abs`, а голова паркуется на
+приводах базы — но только там, где это было при записи (`head_zero_on_hold`
+включают `planners/myrobocasa_takeit_planner.py` и
+`planners/myrobocasa_fridge_veggies_planner.py`; MIKASA-оракулы целят голову
+сами, и общая парковка роняла DepthRecall 100→97).
 
 CabinetSearch5 до порта потерянных тактик давал 83/17/0/0: 17 сидов падали
 `cube nudge refused` (не было подготовительной стадии «ready arm за 0.10 м до
@@ -265,7 +280,8 @@ CabinetSearch5 до порта потерянных тактик давал 83/1
 (`BAR_CLEAR_DROP_M = 0.35`) — снова вдоль плоскости, — чтобы следующий круг не
 проносил её сквозь створку (`rotation sweep hits
 ...ds_fetch_r_gripper_finger_link<->...cab_main_main_group_0_hingerightdoor`,
-сид 74). Итог: 100/100.
+сид 74). Итог: 100/100 на сидах 0–99, 99/100 на HF-сидах (остаётся 7 847 060,
+где створка встаёт на 0.022 рад при `theta_closed = 0.01`).
 
 Вывод: регрессий нет. Там, где строки расходятся с baseline, виноват не
 рефакторинг, а потерянная тактика, и она возвращена: SameDrawer — 14 сидов
@@ -276,16 +292,22 @@ upstream, `move(..., contact=, contact_stretch=)`, fallback «align with apple»
 CabinetSearch — порт `nudge_the_cube`, `if closed: return res, True` в
 `close_and_verify`, поворот кисти под кулак и свободная ось проката.
 
-Остающиеся отказы SameDrawer (9 сидов: 22, 30, 43, 52, 60, 64, 66, 72, 78) —
-строгое подмножество отказов `origin/train/vla` (там их 21) и с теми же
-сообщениями: восемь — `no straight contact path` на подходе к ручке, сид 66 —
-`drawer reopened during withdrawal open_amount=0.0052` (кисть выдёргивает
-ящик на 5 мм при отходе). Двенадцать сидов, где upstream отказывает, здесь
-проходят.
+Остающиеся отказы SameDrawer на HF-сидах: 8 250 025 (`no_plan`: после
+отпускания яблока ни один из трёх кандидатов уборки открытой кисти не
+планируется) и 8 250 096 (`missed`: `wait for final drawer hold waited_steps=20
+reached=False`). На сидах 0–99 отказов девять (22, 30, 43, 52, 60, 64, 66, 72,
+78) — строгое подмножество отказов `origin/train/vla`, где их 21.
 
-Не покрыто:
-
-- TakeItBack и Veggie не проверялись (нет collection-профиля ни в одной ветке).
+TakeItBack и Veggie: collection-профиля нет ни в одной ветке, поэтому
+эталон — команда из `collection_provenance.json` датасета
+(`python -m utils.test_planner -n 1 --assisted-grasp --control-mode pd_joint_pos
+--sim-backend physx_cpu`) плюс `MIKASA_AG_LEGACY_DRIVE=1`. После двух
+восстановлений выше из 19 ранее падавших HF-сидов проходят 12: TakeItBack
+92→96 из 100 (остаются 100006, 100098 — планировщик доходит до тарелки, но
+`returned_to_initial` у сцены требует возврата чашки), Veggie 89→93 из 100
+(остаются 100050, 100079, 100111, 100128, 100145 — объект доведён до тарелки
+позиционно, `xy_error 0.0003`, но вращается в assisted-grasp захвате,
+`dbg_av ≈ 10`, и не становится статичным).
 
 Отказы SeasonDish 28 (9 `no_plan`): 5 — `no checked loaded route with a
 complete bowl pour` (сиды 21, 60, 76, 94, 99), 3 — `bounded horizontal
@@ -294,6 +316,16 @@ grasp/lift/continuation refused` (41, 42, 71), 1 — сид 86 (эпизод к�
 при переносе мы временно потеряли 6 сидов (11, 37, 44, 78, 79, 98) вместе с
 fallback'ом hover'а `more=True` (`EXTRA_SPINS` и `rest_shifts`), он восстановлен.
 Ни один отказ не вызван `preview_pour`.
+
+Отказы SeasonDish 28 на HF-сидах (6280002, 6280020, 6280092, 6280095) — упор в
+геометрию, а не в поиск пути: позы встряхивания требуют, чтобы ось запястья
+была не дальше `90 - lean/2` от горизонтали, то есть при `shake_return_deg 10`
+и `SHAKE_LEAN_MARGIN_DEG 3` — не дальше 3.5°. Замер на 6280002: наш захват
+даёт 6.1°, `origin/train/vla` — 3.1°; при 6.1° `rest_angles` возвращает пустой
+список и задача невыполнима ни при каком пути (проверено численно,
+`planners/oracle/wrist_pour.py:rest_angles`). Это же объясняет, почему такие
+сиды «плавают» между прогонами: сдвиг на микрон в записи меняет остаточный
+наклон бутылки в захвате на градусы.
 
 ## Проверки
 
