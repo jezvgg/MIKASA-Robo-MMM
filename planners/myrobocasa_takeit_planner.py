@@ -823,8 +823,6 @@ def _planning_episode(
         print_env_info=info,
         debug=debug,
     )
-    # The recorded episodes park the head through base drives (robots/fetch/extand.py:_hold_targets).
-    planner.head_zero_on_hold = True
     planner.action_noise = EXECUTION_ACTION_NOISE
     planner.noise_hold = EXECUTION_NOISE_HOLD
     planner.set_execution_noise_seed(seed)
