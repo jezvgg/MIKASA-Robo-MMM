@@ -753,10 +753,7 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         """
         arm_target = np.asarray(arm_target, dtype=np.float64).reshape(-1)
         body_target = np.asarray(body_target, dtype=np.float64).reshape(-1)
-        base_action = np.asarray(base_action, dtype=np.float64).reshape(-1).copy()
-        # The velocity drives command zero lateral motion; keep the arithmetic noise out
-        # of the recorded action, which is what the collection seeds were recorded with.
-        base_action[np.abs(base_action) < 1e-6] = 0.0
+        base_action = np.asarray(base_action, dtype=np.float64).reshape(-1)
         self._last_abs = np.hstack([arm_target, self.gripper_state, body_target, base_action])
         return self._from_abs(self._last_abs)
 
@@ -770,7 +767,6 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         # here makes the RECORDED action the executed one (the dataset check reads
         # `|a| <= 1`), nothing else changes.
         vec[-2:] = np.clip(vec[-2:], -1.0, 1.0)
-        vec[-2:][np.abs(vec[-2:]) < 1e-6] = 0.0
         mode = self.control_mode
         if mode == "pd_joint_pos":
             return vec
@@ -802,11 +798,10 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         q = self.env_agent.controller.controllers["arm"].qpos[0].cpu().numpy().astype(np.float64)
         return float(np.max(np.abs(np.asarray(arm_target, dtype=np.float64) - q)))
 
-    def _hold_targets(self, head_zero: bool = True):
-        """Hold measured arm/body positions, the head at zero when `head_zero`.
+    def _hold_targets(self, head_zero: bool = False):
+        """Hold measured arm/body positions; preserve both head joints by default.
 
-        The drives call this without an argument, so the default is the recorded
-        behaviour of every collection run: the head is parked while the base moves.
+        An explicit head_zero is a recorded motion request, never an eval override.
         """
         arm = self.env_agent.controller.controllers["arm"].qpos[0].cpu().numpy().astype(np.float64)
         body = self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy().astype(np.float64)
