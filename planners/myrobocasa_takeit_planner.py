@@ -24,13 +24,13 @@ from mani_skill.utils.wrappers import RecordEpisode
 from my_scenes.my_robocasa_takeit import MyRoboCasaSceneTakeIt
 from my_scenes.my_robocasa_takeitback import MyRoboCasaSceneTakeItBack
 from planners.takeitback_common import _tcp_to
-from robots.fetch.extand import (
+from robots.fetch.extand_legacy import (
     OPEN,
     PLANNING_TIME,
     RRT_RANGE,
     FetchMotionPlanningSapienSolver,
 )
-from robots.fetch.utils import attach_object
+from robots.fetch.utils_legacy import attach_object
 from robots.fetch.forward_rrt import plan_forward_rrt
 from utils.logging_utils import PlannerLogger, StreamingVideoRecorder, capture_stdout
 from utils.planners_utils import lower_torso_smooth
@@ -826,6 +826,8 @@ def _planning_episode(
     planner.action_noise = EXECUTION_ACTION_NOISE
     planner.noise_hold = EXECUTION_NOISE_HOLD
     planner.set_execution_noise_seed(seed)
+    # The recorded episodes park the head on every body-drive hold.
+    planner.head_zero_on_hold = True
 
     # Keep cup as a real obstacle throughout planning; only grasp stages may
     # later opt into contact explicitly.

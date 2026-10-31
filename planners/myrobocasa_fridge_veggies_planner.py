@@ -102,7 +102,7 @@ def _fit_rim_circle(xy):
 def _attach_object(planner, obj):
     """Register the grasped object as attached to the gripper in the mplib
     planning world so lift/transport plans stop treating it as an obstacle."""
-    from robots.fetch.utils import attach_object
+    from robots.fetch.utils_legacy import attach_object
 
     gripper_link = next(
         l for l in planner.robot._objs[0].get_links() if l.name.endswith("gripper_link")
@@ -1075,6 +1075,8 @@ def _planning_episode(env, seed, debug=False):
         env, base_pose=agent.robot.pose, vis=False, debug=debug
     )
     planner.MAX_REFINE_STEPS = 100
+    # The recorded episodes park the head on every body-drive hold.
+    planner.head_zero_on_hold = True
     planner.action_noise = EXECUTION_ACTION_NOISE
     planner.noise_hold = EXECUTION_NOISE_HOLD
     planner.set_execution_noise_seed(seed)

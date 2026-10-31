@@ -753,7 +753,10 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         """
         arm_target = np.asarray(arm_target, dtype=np.float64).reshape(-1)
         body_target = np.asarray(body_target, dtype=np.float64).reshape(-1)
-        base_action = np.asarray(base_action, dtype=np.float64).reshape(-1)
+        base_action = np.asarray(base_action, dtype=np.float64).reshape(-1).copy()
+        # Sub-1e-6 base velocities are rounding, not motion: the recorded datasets carry an
+        # exact 0.0 there, and the collection runs zeroed them before the controller saw them.
+        base_action[np.abs(base_action) < 1e-6] = 0.0
         self._last_abs = np.hstack([arm_target, self.gripper_state, body_target, base_action])
         return self._from_abs(self._last_abs)
 
@@ -798,14 +801,18 @@ class FetchMotionPlanningSapienSolver(PandaArmSapienSolver):
         q = self.env_agent.controller.controllers["arm"].qpos[0].cpu().numpy().astype(np.float64)
         return float(np.max(np.abs(np.asarray(arm_target, dtype=np.float64) - q)))
 
-    def _hold_targets(self, head_zero: bool = False):
-        """Hold measured arm/body positions; preserve both head joints by default.
+    head_zero_on_hold = False
+    """Park the head on the body drive whenever a drive holds the body.
 
-        An explicit head_zero is a recorded motion request, never an eval override.
-        """
+    False by default because the MIKASA oracles aim the head themselves and a parked head
+    costs DepthRecall seeds. The legacy planners set it, because that is how the recorded
+    TakeItBack and Veggie episodes moved the body (`_hold_targets()` defaults to it)."""
+
+    def _hold_targets(self, head_zero: bool | None = None):
+        """Hold measured arm/body positions; the head follows `head_zero_on_hold`."""
         arm = self.env_agent.controller.controllers["arm"].qpos[0].cpu().numpy().astype(np.float64)
         body = self.env_agent.controller.controllers["body"].qpos[0].cpu().numpy().astype(np.float64)
-        if head_zero:
+        if self.head_zero_on_hold if head_zero is None else head_zero:
             body[0] = body[1] = 0.0
         return arm, body
 

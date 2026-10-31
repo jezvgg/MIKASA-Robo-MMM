@@ -11,8 +11,8 @@ from trimesh.primitives import Box
 
 from mani_skill.agents.robots import Fetch
 from my_scenes import MyRoboCasaScene
-from robots.fetch.extand import FetchMotionPlanningSapienSolver
-from robots.fetch.utils import (
+from robots.fetch.extand_legacy import FetchMotionPlanningSapienSolver
+from robots.fetch.utils_legacy import (
     compute_box_grasp_thin_side_info,
 )
 from utils.logging_utils import PlannerLogger, StreamingVideoRecorder, capture_stdout

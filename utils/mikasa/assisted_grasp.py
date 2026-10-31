@@ -257,9 +257,14 @@ class AssistedGrasp:
             self._hand_drive.disable()
         self._drives = []
         for obj in self.objects:
-            entity = obj._objs[0].entity if _is_link(obj) else obj._objs[0]
-            component = sub.create_drive(hand_entity if legacy else self._proxy, sapien.Pose(),
-                                         entity, sapien.Pose())
+            if legacy:
+                # Byte-for-byte the drive the recorded episodes were made with: the scene-level
+                # helper takes the link/actor structs themselves, and the sub-scene call with the
+                # bare entities is a different setup (it is what the proxy path needs).
+                component = env.scene.create_drive(self.hand, sapien.Pose(), obj, sapien.Pose())._objs[0]
+            else:
+                entity = obj._objs[0].entity if _is_link(obj) else obj._objs[0]
+                component = sub.create_drive(self._proxy, sapien.Pose(), entity, sapien.Pose())
             if not _is_link(obj):
                 self._lock(component)
             else:
