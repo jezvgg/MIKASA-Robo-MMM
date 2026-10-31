@@ -416,3 +416,27 @@ python3 scripts/tree_loc.py --assets robots      # с бинарными асс�
    а не по абсолютному числу успехов.
 4. Запускать через `uv`, окружение `.venv-sim`, `MS_ASSET_DIR=$PWD/.venv-sim/maniskill-assets`,
    `OMP_NUM_THREADS=1`, все `MIKASA_*` сбрасывать перед прогоном.
+
+## Воспроизводимость: замороженный стек legacy и шум параллельного пула (2026-10-31)
+
+Сиды TakeItBack и Veggie воспроизводятся на модулях, записанных в датасет:
+`robots/fetch/extand_legacy.py`, `robots/fetch/utils_legacy.py`,
+`utils/mikasa/assisted_grasp_legacy.py` (побайтные копии `4119aa4`, коммит
+`7b04151`), а `planners/myrobocasa_takeit_planner.py` и
+`planners/myrobocasa_fridge_veggies_planner.py` восстановлены из `4119aa4`
+целиком, с заменой только двух строк импорта (`extand` → `extand_legacy`,
+`utils` → `utils_legacy`). Сцены `my_scenes/my_robocasa_takeitback.py` и
+`my_scenes/my_robocasa_fridge_veggies.py` — тоже побайтно из `4119aa4`
+(`16ec7d07`, `d204c9f3`).
+
+Три прогона 100 сидов TakeItBack пулом на 28 воркеров: наша ветка 98, 97, 97;
+исходное дерево `4119aa4` — 99, 97, 98. Серией (по одному процессу) все три
+сида, которые падали в пуле (100010, 100034, 100046), проходят **на обоих
+деревьях**. То есть остаточное расхождение — это разброс от параллельного
+запуска (резьба PhysX на CPU), а не код: сид, падающий в пуле, проходит в
+одиночном прогоне и на записанном дереве тоже.
+
+Четыре задачи из профилей на этом дереве: SameDrawer 98/100, DepthRecall
+100/100, CabinetSearch5 99/100, SeasonDish 95/100 — против 100/100/100/99 на
+`origin/train/vla` (`c6a429d`). Их остаток описан выше (геометрия оси запястья
+6.1° против 3.5°, уборка кисти после отпускания, створка на 0.022 рад).
