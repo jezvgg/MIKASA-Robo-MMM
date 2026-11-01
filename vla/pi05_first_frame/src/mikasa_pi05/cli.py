@@ -83,6 +83,10 @@ def _wandb_logged_in() -> bool:
 
 
 SNAPSHOT_KEEP = 3  # newest progress snapshots kept on disk (~6.6 GB each)
+# The last three checkpoints SNAPSHOT_KEEP_PERIOD apart are never removed (80,000 steps: 60,000,
+# 70,000 and the last step): RoboMME saves every 10,000 steps and reports the mean over the last
+# three checkpoints (2026-11-01).
+SNAPSHOT_KEEP_PERIOD = 10_000
 
 
 def _install_save_state(config, *, params_only: bool, snapshots: bool, full_every: int | None) -> None:
@@ -92,7 +96,8 @@ def _install_save_state(config, *, params_only: bool, snapshots: bool, full_ever
                  ~45 GB with optimizer state); serves and evaluates the same, cannot --resume.
     snapshots    also write such a params-only snapshot to $PI05_WORK/snapshots/<config>/<exp>/<step>
                  at every save step, for the progress SR (scripts/sr_monitor.sh). The newest
-                 SNAPSHOT_KEEP stay on disk. With snapshots, openpi's own checkpoint is written only
+                 SNAPSHOT_KEEP stay on disk, and the last two SNAPSHOT_KEEP_PERIOD-th before the last step.
+                 With snapshots, openpi's own checkpoint is written only
                  every `full_every` steps and at the last step (params-only mode: last step only).
     """
     import shutil
@@ -135,7 +140,8 @@ def _install_save_state(config, *, params_only: bool, snapshots: bool, full_ever
         partial.rename(final)  # the monitor only ever sees complete snapshots
         steps = sorted(int(d.name) for d in snapshot_root.iterdir() if d.name.isdigit())
         for old in steps[:-SNAPSHOT_KEEP]:
-            shutil.rmtree(snapshot_root / str(old), ignore_errors=True)
+            if old % SNAPSHOT_KEEP_PERIOD or old < last_step + 1 - 2 * SNAPSHOT_KEEP_PERIOD:
+                shutil.rmtree(snapshot_root / str(old), ignore_errors=True)
         logging.info("snapshot %s", final)
 
     def save_state(checkpoint_manager, state, data_loader, step):
