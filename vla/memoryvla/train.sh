@@ -9,7 +9,8 @@
 # GPUS. Loader $LOADER: group, as their MIKASA script and RoboMME (16 random frames of an episode
 # per group, memory 16; the per-device batch must hold whole groups); LOADER=stream gives their
 # train_real.sh's stream (consecutive frames, memory 256). The shuffle buffer $SHUFFLE counts
-# groups of 16 frames with group (theirs 64,000; ~0.9 MB each of ours, ~57 GB per rank, est.) and
+# groups of 16 frames with group (32,000; theirs 64,000: measured 2026-11-01, a rank holds ~47 GiB plus
+# 1.7 MiB per buffered group: 64,000 is ~155 GiB per rank, four pass the pod's guard; 32,000 is 94) and
 # whole episodes with stream (~50 MB each; 500, since 64,000 episodes would be ~3 TB per rank).
 # Stages (a finished stage is skipped on a re-run):
 #   stats  a first launch computes every dataset's dataset_statistics_<hash>.json next to its RLDS
@@ -25,7 +26,7 @@
 # usage: train.sh <RLDS root holding fetch_*> <run root> <run id> <max steps> [save interval]
 #   max steps: 160000, as RoboMME's script; the LR is constant, so nothing else follows it.
 #   Every checkpoint is kept (32 GB each): delete evaluated ones as the run goes.
-# env: GPUS (4), BS (32), CHUNK (16), LOADER (group | stream), SHUFFLE (64000 group, 500 stream),
+# env: GPUS (4), BS (32), CHUNK (16), LOADER (group | stream), SHUFFLE (32000 group, 500 stream),
 #      MIX (fetch_six), LR (2e-5), MASTER_PORT (29531),
 #      BASE_BOUNDS (minmax | pm1, see set_norm_bounds.py), OPENVLA_CKPT, RESUME_CKPT
 set -uo pipefail
@@ -43,7 +44,7 @@ PY=$HOME/envs/memvla/bin/python; TORCHRUN=$HOME/envs/memvla/bin/torchrun
 mkdir -p "$RUNS/logs"
 say() { printf '[%s] memoryvla %s\n' "$(date '+%F %T')" "$*"; }
 case $LOADER in
-  group)  MEM=16; SHUFFLE=${SHUFFLE:-64000}
+  group)  MEM=16; SHUFFLE=${SHUFFLE:-32000}
           [ $((BS % 16)) -eq 0 ] || { say "group loader: per-device batch $BS must be a multiple of 16"; exit 1; } ;;
   stream) MEM=256; SHUFFLE=${SHUFFLE:-500} ;;
   *)      say "LOADER must be group or stream, not $LOADER"; exit 1 ;;
