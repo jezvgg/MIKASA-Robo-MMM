@@ -17,6 +17,9 @@
 #   train  the run, which loads the edited files and saves them into its run dir: it is stopped at
 #          once if the run dir's statistics are not the edited ones.
 # Checkpoints: model weights only (the authors' save; 32 GB each, fp32), every $SAVE steps.
+# RESUME_CKPT=<run dir>/checkpoints/step-NNNNNN-epoch-EE-loss=*.pt continues a stopped run from that
+# checkpoint with the authors' --is_resume (step and epoch from its name): the weights and the step
+# count carry over, the optimizer starts afresh (their save holds no optimizer; the LR is constant).
 # vla/mem_guard.py stops a launch whose container memory passes 80% of its limit (past it the pod
 # is killed; log <run id>.guard.log).
 # usage: train.sh <RLDS root holding fetch_*> <run root> <run id> <max steps> [save interval]
@@ -24,13 +27,18 @@
 #   Every checkpoint is kept (32 GB each): delete evaluated ones as the run goes.
 # env: GPUS (4), BS (32), CHUNK (16), LOADER (group | stream), SHUFFLE (64000 group, 500 stream),
 #      MIX (fetch_six), LR (2e-5), MASTER_PORT (29531),
-#      BASE_BOUNDS (minmax | pm1, see set_norm_bounds.py), OPENVLA_CKPT
+#      BASE_BOUNDS (minmax | pm1, see set_norm_bounds.py), OPENVLA_CKPT, RESUME_CKPT
 set -uo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 DATA=$1; RUNS=$2; RUN_ID=$3; STEPS=$4; SAVE=${5:-$STEPS}
 GPUS=${GPUS:-4}; BS=${BS:-32}; CHUNK=${CHUNK:-16}; MIX=${MIX:-fetch_six}; LR=${LR:-2e-5}; LOADER=${LOADER:-group}
 BASE_BOUNDS=${BASE_BOUNDS:-minmax}; PORT=${MASTER_PORT:-29531}
 CKPT=${OPENVLA_CKPT:-$HOME/models/openvla-7b-prismatic/checkpoints/step-295000-epoch-40-loss=0.2200.pt}
+RESUME_ARGS="--is_resume False"
+if [ -n "${RESUME_CKPT:-}" ]; then
+  [[ $(basename "$RESUME_CKPT") =~ ^step-0*([0-9]+)-epoch-0*([0-9]+)- ]] || { echo "RESUME_CKPT: no step/epoch in $RESUME_CKPT"; exit 1; }
+  CKPT=$RESUME_CKPT; RESUME_ARGS="--is_resume True --resume_step ${BASH_REMATCH[1]} --resume_epoch ${BASH_REMATCH[2]}"
+fi
 PY=$HOME/envs/memvla/bin/python; TORCHRUN=$HOME/envs/memvla/bin/torchrun
 mkdir -p "$RUNS/logs"
 say() { printf '[%s] memoryvla %s\n' "$(date '+%F %T')" "$*"; }
@@ -61,7 +69,7 @@ launch() {  # launch RUN_ID MAX_STEPS SAVE_INTERVAL: the authors' command; runs 
     --vla.learning_rate "$LR" --vla.max_steps "$2" --vla.shuffle_buffer_size "$SHUFFLE" \
     --data_root_dir "$DATA" --run_root_dir "$RUNS" --run_id "$1" --image_aug True --save_interval "$3" \
     --repeated_diffusion_steps 4 --future_action_window_size $((CHUNK - 1)) --action_model_type DiT-L \
-    --dataloader_type "$LOADER" --mem_length "$MEM" --is_resume False --hf_token HF_TOKEN --trackers '["jsonl"]' \
+    --dataloader_type "$LOADER" --mem_length "$MEM" ${RESUME_ARGS:---is_resume False} --hf_token HF_TOKEN --trackers '["jsonl"]' \
     --action_dim 13 --load_bi_wrist True
 }
 stats_files() { for d in $DATASETS; do find "$DATA/$d" -name 'dataset_statistics_*.json' 2>/dev/null; done; }
@@ -92,7 +100,7 @@ done
 RUN=$RUNS/$RUN_ID--image_aug
 say "train: $RUN_ID, $GPUS GPUs x batch $BS, chunk $CHUNK, $LOADER loader (memory $MEM, shuffle $SHUFFLE), $STEPS steps, checkpoints every $SAVE (log $RUNS/logs/$RUN_ID.log)"
 setsid bash -c "$(declare -f launch); REPO='$REPO' GPUS='$GPUS' BS='$BS' CHUNK='$CHUNK' LOADER='$LOADER' MEM='$MEM' MIX='$MIX' LR='$LR' SHUFFLE='$SHUFFLE' \
-  DATA='$DATA' RUNS='$RUNS' PORT='$PORT' CKPT='$CKPT' TORCHRUN='$TORCHRUN' launch '$RUN_ID' '$STEPS' '$SAVE'" \
+  DATA='$DATA' RUNS='$RUNS' PORT='$PORT' CKPT='$CKPT' RESUME_ARGS='$RESUME_ARGS' TORCHRUN='$TORCHRUN' launch '$RUN_ID' '$STEPS' '$SAVE'" \
   > "$RUNS/logs/$RUN_ID.log" 2>&1 &
 pid=$!
 "$PY" "$REPO/vla/mem_guard.py" "$pid" >> "$RUNS/logs/$RUN_ID.guard.log" 2>&1 &
