@@ -54,7 +54,7 @@ GPU count:
 | Until 2026-10-31, now `LOADER=stream` only (the default is their MIKASA group loader; not settled, below). Memory settings for long episodes: `--dataloader_type stream --mem_length 256` from the authors' `script/train/real_world/train_real.sh` in their MIKASA recipe (OpenVLA init and the 4-step window kept) | MemoryVLA | supervisor 2026-10-22 ("take the authors' settings for long episodes"). The paper (App. G, Tab. 9-10) ties memory length to episode length and uses 256 for its long real tasks (median 236, up to 902 frames after filtering); ours run 452-1373 frames (median per task), MIKASA's 60-90 |
 | With `LOADER=stream` only (group keeps their 64,000 groups of 16 frames, ~0.9 MB each of ours, ~57 GB per rank, est.): shuffle buffer of 500 episodes per rank instead of their 64,000 (`vla/memoryvla/train.sh`, `SHUFFLE`) | MemoryVLA | the stream dataloader shuffles whole episodes (their `make_interleaved_episodic_dataset` leaves out the frame flatten, and images are decoded after the shuffle), so the number counts encoded episodes, ~50 MB each of ours (RLDS: 6.0 GB for 120 episodes). Their 64,000 comes from the group-dataloader MIKASA script and would mean ~3 TB per rank: on 2026-10-27 the four ranks filled ~640 GB in 90 s and the pod was killed at its 728 GiB limit. Their stream script (`train_real.sh`) uses 32,000, with the comment to lower it if memory is limited; 500 is ~25 GB per rank and covers 8% of our 6000 episodes on each rank |
 | Dataloader workers per GPU: 2 instead of their 8 (`vla/memer/train_high.sh`, `WORKERS`; owner's choice 2026-10-29) | MemER high | each worker of their Qwen loader turns its copy-on-write view of the parsed `train.json` into a private copy within ~10 min (Python's reference counts write to every page): ~21 GiB per worker for four tasks, plateaus 260 / 345 / 429 GiB at 2 / 3 / 4 workers (`vla/memer/probe_loader_mem.sh`); their 8 killed the pod on 2026-10-27. The sampler runs in the main process, so the samples and their order do not depend on it, only the loading speed does. Six tasks of the every-frame export need fewer: the fit 7 + 4·(1 + W)·D GiB with D = 29.6–32.7 GiB per copy gives 362–399 GiB at 2 workers, 481–530 at 3, 599–661 at 4 (the guard stops at 582; the longer new SeasonDish adds ~3%). The price of 2: a step of 6.2 s instead of 5.4 s at 4 (probe of 2026-10-27, four tasks) |
-| Subtask boundaries from the oracle's recorded events; subtask names and keyframe rules written by us | MemER | theirs: operator key presses and their own per-task rules (App. E); every task needs its own. Approved list: ~/Downloads/memer_subtasks_2026-10-20.txt |
+| Subtask boundaries from the oracle's recorded events; subtask names and keyframe rules written by us | MemER | theirs: operator key presses and their own per-task rules (App. E); every task needs its own. Approved list: ~/Downloads/memer_subtasks_2026-10-20.txt. CabinetSearch since 2026-11-01 (owner): "open the k-th cabinet" starts at the oracle's `round` event, where it picks the compartment (it started at the arrival on the rug, 18-55 frames earlier, when no frame shows which cabinet comes next), and "go to the floor mark" is "go to the rug", the instruction's word since 2026-10-30 |
 | A keyframe before a sample's first subsampled frame moves to that frame instead of being dropped (`vla/memer/patches/memer-0001-early-keyframes.patch`, one line in their `generate_sft_data.py`) | MemER high | owner 2026-10-22; without it SameDrawer's cue reaches 20% of the samples that need it. See "Early keyframes" below |
 | Data: 6 tasks x 1000 oracle episodes, no interventions | all | our benchmark. MemER: 3 tasks x 50 demos (+10-15 interventions for the low level); MemoryVLA on MIKASA-Robo: 5 tasks x 250 demos at 128x128 |
 | Data formats: RLDS built from our LeRobot; MemER export from LeRobot | MemoryVLA, MemER high | format only; their loaders read them |
@@ -197,7 +197,21 @@ RoboMME's and here. The authors' code is kept as is; a deploy adapter could add 
 
 ## Evaluation protocol (not training, for later)
 
-MemoryVLA reports the best validation step (validation every 1k steps); its checkpoints are 32 GB
-each, so they are evaluated and pruned as the run goes. Inference: DDIM 10 steps, CFG 1.5. MemER:
-high level ~1 Hz, low level executes 8 of 15 actions; their deploy wrapper uses merge_distance 5.
+Checkpoints (owner 2026-11-01): the mean over the last three, as RoboMME reports (§5.1: last three
+checkpoints x three seeds, saved every 10,000 of 80,000 steps). MemoryVLA keeps its last three
+(`KEEP=3` of the launcher: 120,000, 140,000, 160,000); MemER high keeps all three of its saves
+(`SAVE_LIMIT=3`: 500, 1000, 1500); MemER low keeps the snapshots of 60,000, 70,000 and its last step
+(`SNAPSHOT_KEEP_PERIOD` in cli.py). MemoryVLA's authors instead evaluate checkpoints at intervals and
+report the best (their README), which would need every 32 GB checkpoint kept or evaluated as the run goes.
+
+MemER's memory at evaluation merges keyframes 4 subsampled steps apart or closer, not the authors'
+`merge_distance` 5: SeasonDish's shake keyframes are exactly 30 frames (6 steps) apart, so with 5 a
+keyframe placed one step off merges two shakes and the count is lost; 4 (20 frames) keeps them apart
+and still merges one event's duplicates. RoboMME's own MemER wrapper does the same: it merges within
+8 execution frames of a recent window taken every 2nd frame, i.e. 4 steps
+(`examples/robomme/subgoal_prediction/qwenvl/api_memer.py`, `merge_key_frame_paths`), on tasks that also
+count repeats (PickXtimes, SwingXtimes). Offline subtask accuracy is reported as the authors' exact match
+and with a tolerance of one subsampled step at each boundary.
+
+Inference: DDIM 10 steps, CFG 1.5. MemER: high level ~1 Hz, low level executes 8 of 15 actions.
 jezv's tasks reset with `reconfigure=True`.
