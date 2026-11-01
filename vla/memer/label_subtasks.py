@@ -24,7 +24,7 @@ not fit its task's sequence, nothing is written (LeRobot v3 indexes frames globa
 episode cannot simply be dropped): the report lists them and the rules get fixed first.
 `--check` writes only the report. CabinetSearch5 (since 2026-10-26) also reads the oracle's
 event log (`--events`): its first compartment is opened and shut on one grip, so no gripper
-edge marks where the close begins.
+edge marks where the close begins; since 2026-11-01 its `round` events also start each open.
 
 SeasonDish with shaking (profile 28, collected 2026-10-28; scheme A approved by the owner
 2026-10-29) is labelled from its event log (`--events`), which also gives the episode's answer
@@ -217,24 +217,29 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict,
                 (d[-1][1] + 1, f"pick up the {c}"), (g1[0] + 1, f"bring the {c} to the bowl"),
                 (pour, f"tip the {c} over the bowl")]
     if task == "cabinetsearch":
-        # Rounds are cut at the arrivals on the floor mark. In a round the first grasp is the
+        # Rounds are cut at the arrivals on the rug. In a round the first grasp is the
         # handle (open: grasp, pull, release); every later one is the fist closing the door,
         # re-pushes included (the oracle's "one re-push"); the last release ends the close.
         # CabinetSearch5's first compartment (cab_1, one door) is shut on the grip that opened
         # it: there the close starts at the oracle's "swing shut on the bar" (`--events`).
+        # "open the k-th cabinet" starts at the oracle's `round` event, where it picks the
+        # compartment; until then the robot settles on the rug and no frame shows which cabinet
+        # comes next, the search order being a random permutation (owner 2026-11-01; it started
+        # at the arrival, 18-55 frames earlier). The rug was "the floor mark" until 2026-11-01,
+        # as in the instruction until 2026-10-30.
         order, cube = p["search_order"], p["cube_cab"]
         rounds = order[:order.index(cube) + 1]
-        shut = []
-        if events is not None:
-            visited = [ev["compartment"] for _, ev in events if ev.get("message") == "round"]
-            if visited != [p["compartments"][c] for c in rounds]:
-                raise Unfit(f"oracle rounds {visited} != search order {rounds}")
-            shut = [f for f, ev in events if ev.get("message") == "swing shut on the bar"]
+        if events is None:
+            raise Unfit("CabinetSearch needs the oracle's event log (--events)")
+        picked = [(f, ev["compartment"]) for f, ev in events if ev.get("message") == "round"]
+        if [c for _, c in picked] != [p["compartments"][c] for c in rounds]:
+            raise Unfit(f"oracle rounds {[c for _, c in picked]} != search order {rounds}")
+        shut = [f for f, ev in events if ev.get("message") == "swing shut on the bar"]
         home = np.asarray(p["home_xy"])
         inside = np.linalg.norm(g[:, :2] - home, axis=1) <= p["home_radius"]
         arrivals = [t for t in range(n) if inside[t] and (t == 0 or not inside[t - 1])]
         if len(arrivals) != len(rounds):
-            raise Unfit(f"{len(arrivals)} arrivals at the floor mark for {len(rounds)} rounds")
+            raise Unfit(f"{len(arrivals)} arrivals at the rug for {len(rounds)} rounds")
         out, start = [], 0
         for r, cab in enumerate(rounds):
             name = f"{ORDINAL[cab]} cabinet from the left"
@@ -244,7 +249,10 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict,
             bar = [f for f in shut if lo < f < hi]
             if len(gr) < (1 if last or bar else 2):
                 raise Unfit(f"round {r}: {len(gr)} grasps")
-            out += [(start, "go to the floor mark"), (lo + 1, f"open the {name}")]
+            pick = picked[r][0]
+            if not start < pick < gr[0][0]:
+                raise Unfit(f"round {r}: picked at frame {pick}, on the rug from {lo}, handle grasp {gr[0][0]}")
+            out += [(start, "go to the rug"), (pick, f"open the {name}")]
             if last:
                 out.append((gr[0][1] + 1, "push the cola can"))
             else:
