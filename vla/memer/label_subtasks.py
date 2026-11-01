@@ -10,6 +10,9 @@ hold (the low-level policy has none):
   frames are one drive;
 * grasp: the gripper command (channel 7) drops from open (+1) to closed; release: it is back
   at +1 (the frame a ramped opening ends);
+* lift (TakeItBack, since 2026-11-02): the first frame after a grasp whose arm joint targets
+  (channels 0-6) are LIFT_RAD away from those at the grasp; the oracle holds the closed grip
+  ~3 s (28-33 frames) before it;
 * the answer (which drawer, condiment, prop, vegetable; the search order) comes from
   `task_params.py`, which resets each episode's environment with its seed.
 
@@ -51,6 +54,7 @@ import numpy as np
 import pandas as pd
 
 DRIVE_GAP = 5          # frames (0.5 s): the oracle's legs of one drive are 0.1-0.2 s apart
+LIFT_RAD = 0.02        # summed arm joint target change that starts a lift (the hold before it moves < 0.001)
 DRAWERS = {0: "bottom", 1: "third from the top", 2: "second from the top", 3: "top"}
 ORDINAL = ["first", "second", "third", "fourth", "fifth"]
 PAD_COLOURS = ["red", "green", "blue", "yellow"]   # prop i's pad (depth_recall_v1.PAD_MAP)
@@ -115,6 +119,14 @@ def grasps(a: np.ndarray) -> list[tuple[int, int]]:
     if closed_at is not None:
         out.append((closed_at, len(g) - 1))   # held to the end (SeasonDish pours and holds)
     return out
+
+
+def lift(a: np.ndarray, close: int, release: int) -> int:
+    """The first frame after `close`, before `release`, whose arm joint targets are LIFT_RAD from those at `close`."""
+    moved = np.flatnonzero(np.abs(a[close + 1:release, :7] - a[close, :7]).sum(1) > LIFT_RAD)
+    if not len(moved):
+        raise Unfit(f"no lift between the grasp at {close} and the release at {release}")
+    return close + 1 + int(moved[0])
 
 
 def first_after(items, t):
@@ -276,8 +288,11 @@ def segments(task: str, a: np.ndarray, g: np.ndarray, p: dict,
         if len(G) != 2:
             raise Unfit(f"{len(G)} grasps, expected 2")
         (c1, o1), (c2, o2) = G
-        return [(0, "pick up the cup"), (c1 + 1, "place the cup on the tray"),
-                (o1 + 1, "pick up the cup from the tray"), (c2 + 1, "put the cup back where it was")]
+        # Each pick-up ends where the arm starts lifting the cup, not at the grasp (owner 2026-11-02):
+        # the oracle re-grasps the cup on the tray 0.4 s after releasing it, so a cut at the grasp left
+        # "pick up the cup from the tray" 4 frames long, shorter than one step of the high level.
+        return [(0, "pick up the cup"), (lift(a, c1, o1), "place the cup on the tray"),
+                (o1 + 1, "pick up the cup from the tray"), (lift(a, c2, o2), "put the cup back where it was")]
     if task == "veggie":
         v = " ".join(p["veggies"][p["picture_target"]].split("_")[1:-1])    # veg_sweet_potato_2 -> sweet potato
         if not D or len(G) != 1:
