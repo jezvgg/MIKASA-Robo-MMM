@@ -2,8 +2,8 @@
 # MemER high level (Qwen3-VL-4B) on $GPUS GPUs (default 4): the command of memer/TRAINING_QWEN3VL.md
 # (the authors' run on 2 B200) with what our GPUs change: per-device batch $BS (theirs 8; an H100
 # has 80 GB, a B200 180 GB) and their accumulation 8, so 4 GPUs x 4 x 8 = their global batch 128.
-# Checkpoints as theirs, every SAVE steps with the newest SAVE_LIMIT kept (theirs 2; 3 for the mean over
-# the last three checkpoints, as RoboMME reports; ~23 GB each with the optimizer),
+# Checkpoints as theirs, every SAVE steps with the newest SAVE_LIMIT kept (theirs 2, our run too: the
+# final checkpoint is the one evaluated, as they publish it; ~23 GB each with the optimizer),
 # or weights only with SAVE_ONLY_MODEL=1 (~18 GB, fp32, cannot resume). An output dir that holds a
 # checkpoint-* resumes from it: the authors' train_qwen.py does that itself. vla/mem_guard.py stops
 # the run when the container's memory passes 80% of its limit (past it the pod is killed); each

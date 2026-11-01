@@ -197,12 +197,15 @@ RoboMME's and here. The authors' code is kept as is; a deploy adapter could add 
 
 ## Evaluation protocol (not training, for later)
 
-Checkpoints (owner 2026-11-01): the mean over the last three, as RoboMME reports (§5.1: last three
-checkpoints x three seeds, saved every 10,000 of 80,000 steps). MemoryVLA keeps its last three
-(`KEEP=3` of the launcher: 120,000, 140,000, 160,000); MemER high keeps all three of its saves
-(`SAVE_LIMIT=3`: 500, 1000, 1500); MemER low keeps the snapshots of 60,000, 70,000 and its last step
-(`SNAPSHOT_KEEP_PERIOD` in cli.py). MemoryVLA's authors instead evaluate checkpoints at intervals and
-report the best (their README), which would need every 32 GB checkpoint kept or evaluated as the run goes.
+Checkpoints (owner 2026-11-01), each model as its recipe's source. MemoryVLA and MemER low: the mean
+over the last three, as RoboMME reports (§5.1: last three checkpoints x three seeds). MemoryVLA saves
+every 10,000 steps as RoboMME's script and keeps its last three (`SAVE=10000 KEEP=3` of the launcher:
+140,000, 150,000, 160,000); MemER low keeps the snapshots of 60,000, 70,000 and its last step
+(`SNAPSHOT_KEEP_PERIOD` in cli.py). MemER high, trained as the authors' code: their final
+checkpoint-1500, the one they publish, with their `--save_total_limit 2` (with saves every 500, the last
+three would be a third, two thirds and all of the run). MemoryVLA's authors instead evaluate checkpoints
+at intervals and report the best (their README), which would need every 32 GB checkpoint kept or
+evaluated as the run goes.
 
 MemER's memory at evaluation merges keyframes 4 subsampled steps apart or closer, not the authors'
 `merge_distance` 5: SeasonDish's shake keyframes are exactly 30 frames (6 steps) apart, so with 5 a
