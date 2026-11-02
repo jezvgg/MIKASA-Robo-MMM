@@ -216,8 +216,8 @@ CONFIGS["pi05_sd_ff_h50_4xh100"] = dataclasses.replace(
 # RoboMME's, so the paper's pi0.5-DROID start and the openpi defaults it implies are not used:
 #   RoboMME: pi0.5 base, SigLIP frozen, AdamW b1 0.9 b2 0.95 with clip 1, 5e-5 constant after
 #            10,000 warmup steps, EMA 0.999, 80,000 steps, chunks of 20 with 16 executed, no state;
-#   ours (forced by the robot, the data or the GPUs): batch 128 on 4 FSDP devices (RoboMME 64 on
-#         4 A40; an H100 has 80 GB, an A40 48 GB), the three Fetch cameras in pi0.5's own three
+#   ours: batch 128 on 4 FSDP devices, the MemER paper's (Table 5; owner 2026-11-02; RoboMME 64
+#         on 4 A40); forced by the robot or the data: the three Fetch cameras in pi0.5's own three
 #         slots (RoboMME two), our 13D actions with their own norm stats per chunk length (arm
 #         deltas from the current joints widen with the chunk), the six tasks' labelled copies
 #         (vla/memer/label_subtasks.py) under $MEMER_DATA_ROOT (default ~/datasets/memer).

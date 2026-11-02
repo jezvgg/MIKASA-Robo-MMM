@@ -21,9 +21,9 @@ GPU count:
 
 | | authors | ours (4 x H100) |
 |---|---|---|
-| MemoryVLA | 8 GPUs x 32 = 256, no accumulation | 4 x 32 = **128** |
+| MemoryVLA | 8 A100 (80 GB) x 32 = 256, no accumulation (RoboMME: 2 H200 x 32 = 64) | 4 x 32 = **128** |
 | MemER high level | 2 B200 x 8 x accumulation 8 = 128 (their recipe accumulates) | 4 x 4 x their accumulation 8 = 128 (per-device 4: an H100 has 80 GB, a B200 180 GB) |
-| MemER low level | 128 | 128 (openpi, no accumulation; fits 4 x H100) |
+| MemER low level | 128 (paper, Table 5; RoboMME: 4 A40 x 16 = 64) | 4 x 32 = 128, the paper's (owner 2026-11-02; openpi, no accumulation) |
 
 ## Filled where the paper says nothing
 
@@ -45,7 +45,7 @@ GPU count:
 
 | Change | Where | Why |
 |---|---|---|
-| Three cameras (left base, fetch_hand, right base) | all | owner's decision 2026-10-21. Papers: MemER wrist + exterior; MemoryVLA one third-person view (its MIKASA script: + optional wrist). MemoryVLA uses the authors' own three-view code path (`--load_bi_wrist`), which no script of theirs runs; its image_aug crops (0.9) and jitters all three, each with its own seed. pi0.5 has three slots, one third-person and two wrist (openpi `libero_policy.py`); the right base camera takes `right_wrist_0_rgb`, as robocasa-benchmark/openpi maps RoboCasa's right agent view, and so, by openpi's training augmentation (`models/model.py`: crop and rotate only for slots without "wrist" in the name), gets colour jitter only, as the hand camera; the left base camera is cropped and rotated too |
+| Three cameras (left base, fetch_hand, right base) | all | owner's decision 2026-10-21. Papers: MemER wrist + exterior; MemoryVLA one third-person view (its MIKASA script: + optional wrist). MemoryVLA uses the authors' own three-view code path (`--load_bi_wrist`), which no script of theirs runs; its image_aug crops (0.9) and jitters all three, each with its own seed. pi0.5 has three slots, one third-person and two wrist (openpi `libero_policy.py`); the right base camera takes `right_wrist_0_rgb`, as robocasa-benchmark/openpi maps RoboCasa's right agent view, and so, by openpi's training augmentation (`models/model.py`: crop and rotate only for slots without "wrist" in the name), gets colour jitter only, as the hand camera; the left base camera is cropped and rotated too (owner 2026-11-02: kept so) |
 | Three views stacked into one 192x576 image (the export since 2026-10-31; 256x768 tested) | MemER high | Qwen would shrink a larger stack to 192x576 under their max_pixels anyway (108 tokens; theirs 110 for 2 x 320x180). Their stack_frame_images pads the 128-wide hand image to 256 with black before scaling, so the hand view is 96x115 beside a black block and each base view 192x230; training, their eval and their deploy build it the same way |
 | 13D Fetch actions (arm 7 joint targets, gripper, torso/head 3, base forward/yaw velocity) | all | our robot. Theirs: 7D EEF (MemoryVLA), 8D DROID joint velocity (pi0.5-DROID). MemoryVLA gets a FETCH_JOINT encoding (patch 0001) and `--action_dim 13`: its loader otherwise accepts only EEF_POS/EEF_R6 (EEF deltas), so, on the supervisor's answer (2026-10-22, option (b) of `artifacts/memoryvla-questions-for-supervisor.md`), arm, head and torso are recomputed as deltas from the same frame's recorded joints (`fetch_dataset_transform`; the measured joints are added back at inference) and, like the base velocities, are relative; the gripper stays absolute; all but the gripper are normalized. MemER low: arm, head and torso become deltas from the current joint position for the whole 20-step chunk (openpi `DeltaActions` with `DELTA_ACTION_MASK`; `AbsoluteActions` adds the state back at inference), openpi's own convention for absolute joint data (ALOHA, DROID joint-position); gripper and base velocities stay as recorded; pi0.5 gets no state (RoboMME; below) |
 | Our own norm stats | MemER low, MemoryVLA | DROID's/MIKASA's statistics describe other action spaces |
@@ -143,8 +143,8 @@ whether to go on is decided on oracle episodes recorded on the validation seeds.
 
 ## MemER low level: RoboMME's recipe, no state (settled 2026-10-31)
 
-RoboMME's recipe is taken whole (above). The batch stays 128 (4 x H100 x 32) against RoboMME's 64 (4
-A40 x 16): an H100 has 80 GB, an A40 48 GB, so it holds twice their per-device batch. No state in
+RoboMME's recipe is taken whole (above), except the batch: 128 (4 x H100 x 32), the MemER paper's
+(Table 5; owner 2026-11-02), not RoboMME's 64 (4 A40 x 16, with two images). No state in
 the prompt, as RoboMME (Table 6: "Proprioception False", no reason given; their actions are absolute
 joints, so it is not about deltas): pi0.5 has no state input of its own, only the text
 (`discrete_state_input`), and the deltas still take the state outside the model. Beyond the one-
