@@ -9,11 +9,12 @@
 #          computed on CPU when missing or older than any copy's subtasks.parquet: openpi loads
 #          whatever file is there, so stale stats from older data would be used without a word;
 #   train  the run; a re-run of the same command resumes from the last full checkpoint (every
-#          6000 steps; params-only snapshots every 1000, the newest 3 kept, ~6.6 GB each; a full
+#          6000 steps; params-only snapshots every 1000, the newest 3 kept, ~5 GB each; a full
 #          checkpoint with the optimizer and EMA ~38 GB, measured 2026-10-07). A save cut short
 #          (<step>.orbax-checkpoint-tmp-*) is removed first: openpi resumes from the last finished
-#          step but leaves it on disk. The previous log is kept as .prev. vla/mem_guard.py stops it
-#          when the container's memory passes 80% of its limit (past it the pod is killed whole).
+#          step but leaves it on disk. The previous log and guard log are kept as .prev.
+#          vla/mem_guard.py stops it when the container's memory passes 80% of its limit (past
+#          it the pod is killed whole).
 # usage: . ~/mikasa-pi05/server.env; nohup vla/memer/train_low.sh <exp name> > log 2>&1 < /dev/null &
 # env: MEMER_DATA_ROOT (~/datasets/memer), CONFIG (memer_lowlevel_4xh100), GPUS (0,1,2,3),
 #      STAGES (check stats train), TRAIN_ARGS (extra flags for `mikasa_pi05 train`)
@@ -61,7 +62,7 @@ fi
 
 if has train; then
   ckpt=$PI05_WORK/checkpoints/$CONFIG/$EXP
-  last=$(cfg "c.num_train_steps - 1")
+  last=$(cfg "c.num_train_steps - 1") && [[ $last =~ ^[0-9]+$ ]] || { say "train: cannot read num_train_steps of $CONFIG"; exit 1; }
   if [ -d "$ckpt/$last" ]; then say "train: already finished ($ckpt/$last)"; exit 0; fi
   for t in "$ckpt"/*.orbax-checkpoint-tmp-*; do
     [ -e "$t" ] && rm -rf "$t" && say "train: removed $(basename "$t"), a save cut short"
@@ -73,7 +74,7 @@ if has train; then
   elif [ -d "$ckpt" ]; then
     mode=(--overwrite)   # a directory without a checkpoint holds nothing to keep
   fi
-  [ -f "$LOGS/train-$EXP.log" ] && mv "$LOGS/train-$EXP.log" "$LOGS/train-$EXP.log.prev"
+  for f in "$LOGS/train-$EXP.log" "$LOGS/train-$EXP.guard.log"; do [ -f "$f" ] && mv "$f" "$f.prev"; done
   say "train: started (log $LOGS/train-$EXP.log; memory guard $LOGS/train-$EXP.guard.log)"
   # PYTHONUNBUFFERED: openpi prints its 'Step N:' loss lines with tqdm.write to stdout, which a file
   # otherwise holds until the process exits
@@ -81,7 +82,7 @@ if has train; then
     > "$LOGS/train-$EXP.log" 2>&1 &
   pid=$!
   trap 'kill -TERM -- "-$pid" 2>/dev/null; exit 143' TERM INT
-  python3 "$REPO/vla/mem_guard.py" "$pid" >> "$LOGS/train-$EXP.guard.log" 2>&1 &
+  python3 "$REPO/vla/mem_guard.py" "$pid" > "$LOGS/train-$EXP.guard.log" 2>&1 &
   wait "$pid"; rc=$?
   grep -h GUARD "$LOGS/train-$EXP.guard.log" 2>/dev/null | tail -1 | tee -a "$REPORT"
   if [ $rc -ne 0 ]; then say "train: FAILED (exit $rc)"; tail -n 40 "$LOGS/train-$EXP.log" | tee -a "$REPORT"; exit $rc; fi

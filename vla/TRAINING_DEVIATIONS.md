@@ -45,7 +45,7 @@ GPU count:
 
 | Change | Where | Why |
 |---|---|---|
-| Three cameras (left base, fetch_hand, right base) | all | owner's decision 2026-10-21. Papers: MemER wrist + exterior; MemoryVLA one third-person view (its MIKASA script: + optional wrist). MemoryVLA uses the authors' own three-view code path (`--load_bi_wrist`), which no script of theirs runs |
+| Three cameras (left base, fetch_hand, right base) | all | owner's decision 2026-10-21. Papers: MemER wrist + exterior; MemoryVLA one third-person view (its MIKASA script: + optional wrist). MemoryVLA uses the authors' own three-view code path (`--load_bi_wrist`), which no script of theirs runs; its image_aug crops (0.9) and jitters all three, each with its own seed. pi0.5 has three slots, one third-person and two wrist (openpi `libero_policy.py`); the right base camera takes `right_wrist_0_rgb`, as robocasa-benchmark/openpi maps RoboCasa's right agent view, and so, by openpi's training augmentation (`models/model.py`: crop and rotate only for slots without "wrist" in the name), gets colour jitter only, as the hand camera; the left base camera is cropped and rotated too |
 | Three views stacked into one 192x576 image (the export since 2026-10-31; 256x768 tested) | MemER high | Qwen would shrink a larger stack to 192x576 under their max_pixels anyway (108 tokens; theirs 110 for 2 x 320x180). Their stack_frame_images pads the 128-wide hand image to 256 with black before scaling, so the hand view is 96x115 beside a black block and each base view 192x230; training, their eval and their deploy build it the same way |
 | 13D Fetch actions (arm 7 joint targets, gripper, torso/head 3, base forward/yaw velocity) | all | our robot. Theirs: 7D EEF (MemoryVLA), 8D DROID joint velocity (pi0.5-DROID). MemoryVLA gets a FETCH_JOINT encoding (patch 0001) and `--action_dim 13`: its loader otherwise accepts only EEF_POS/EEF_R6 (EEF deltas), so, on the supervisor's answer (2026-10-22, option (b) of `artifacts/memoryvla-questions-for-supervisor.md`), arm, head and torso are recomputed as deltas from the same frame's recorded joints (`fetch_dataset_transform`; the measured joints are added back at inference) and, like the base velocities, are relative; the gripper stays absolute; all but the gripper are normalized. MemER low: arm, head and torso become deltas from the current joint position for the whole 20-step chunk (openpi `DeltaActions` with `DELTA_ACTION_MASK`; `AbsoluteActions` adds the state back at inference), openpi's own convention for absolute joint data (ALOHA, DROID joint-position); gripper and base velocities stay as recorded; pi0.5 gets no state (RoboMME; below) |
 | Our own norm stats | MemER low, MemoryVLA | DROID's/MIKASA's statistics describe other action spaces |
@@ -137,9 +137,9 @@ keeps every 32 GB checkpoint (16 at RoboMME's interval of 10,000: 512 GB); our l
 newest three whole ones (evaluation protocol below). Not timed on 4 GPUs: this configuration (4 x
 32, three cameras, full fine-tune) has not run a step yet, and a FLOP estimate gives 3-6 s/step,
 6-11 days for 160,000 steps; the step time is read from the run's first steps (owner 2026-11-02:
-decided on the measured time). MemER high level: the code's 1500 steps to start (10.2 s/step in
-the 2026-10-27 debug on 4 x H100, ~4.3 h); whether to go on is decided on oracle episodes recorded
-on the validation seeds.
+decided on the measured time). MemER high level: the code's 1500 steps to start (5.3 s/step in
+the 2026-10-27 debug on 4 x H100, 6.2 s with the run's 2 workers: ~2.6 h plus ~10 min of start);
+whether to go on is decided on oracle episodes recorded on the validation seeds.
 
 ## MemER low level: RoboMME's recipe, no state (settled 2026-10-31)
 
@@ -211,17 +211,20 @@ for MemER, each pod its own, with a RESTART.txt).
   is expected: the larger h50 config (four images, chunk 50, the state in the prompt, EMA, batch 128
   on 4 x H100) peaked at 28.2 GiB of its 59.4 GiB pool at 0.75 (`report-run3-h50.txt`).
 - MemER low level, checkpoints: a full one (optimizer and EMA, ~38 GB, measured 2026-10-07) every
-  6000 steps for `--resume`, openpi keeping one; params-only snapshots every 1000 (~6.6 GB, the EMA
-  weights), the newest three plus 60,000 and 70,000 kept. A resume restarts openpi's data order from
+  6000 steps for `--resume`, openpi keeping one (two on disk while the next is saved); params-only
+  snapshots every 1000 (~5 GB, measured 2026-10-27; the EMA weights), the newest three plus 60,000
+  and 70,000 kept. A resume restarts openpi's data order from
   its seed (openpi's loader); accepted.
 - MemoryVLA resume: `patches/0002` (their resume check runs a regex on the checkpoint path, which
   draccus parses into a Path, so every resume stopped there). The checkpoint loads through the same
   `load_vla` as the OpenVLA start, plus the action model and the memory modules; not run yet.
 - Checkpoints cut short by a stop or a failed save: MemoryVLA writes them in a background thread
   whose result nobody reads, so the launcher resumes from, and prunes to, whole ones only (a zip
-  whose central directory reads); MemER high removes a checkpoint-* without `trainer_state.json`
-  (written last) before resuming (`train_high.sh`); MemER low removes orbax's unfinished
-  `*.orbax-checkpoint-tmp-*` (`train_low.sh`).
+  whose central directory reads; a launch removes the others first); MemER high removes a
+  checkpoint-* without `trainer_state.json` (written last) before resuming (`train_high.sh`); MemER
+  low removes orbax's unfinished `*.orbax-checkpoint-tmp-*` (`train_low.sh`).
+- One launch at a time: each launcher takes a lock in the pod's /tmp that its processes inherit, so
+  a second launch while any of them lives refuses instead of removing or rotating their files.
 
 ## Evaluation protocol (not training, for later)
 

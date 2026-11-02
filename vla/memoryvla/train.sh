@@ -112,11 +112,16 @@ setsid bash -c "$(declare -f launch); REPO='$REPO' GPUS='$GPUS' BS='$BS' CHUNK='
 pid=$!
 "$PY" "$REPO/vla/mem_guard.py" "$pid" >> "$RUNS/logs/$RUN_ID.guard.log" 2>&1 &
 for _ in $(seq 1 240); do [ "$RUN/dataset_statistics.json" -nt "$STARTED" ] && break; kill -0 "$pid" 2>/dev/null || break; sleep 15; done
+log_tail() { tail -c 65536 "$LOG" | tr '\r' '\n' | tail -n 40; }   # tqdm redraws one line with \r
+if kill -0 "$pid" 2>/dev/null && ! [ "$RUN/dataset_statistics.json" -nt "$STARTED" ]; then
+  # an hour with no statistics from this launch: it is computing fresh, unedited ones
+  kill -TERM -- "-$pid" 2>/dev/null; say "train: STOPPED, no statistics from this launch in 60 min"; log_tail; exit 1
+fi
 if ! "$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$RUN/dataset_statistics.json" --base "$BASE_BOUNDS" --check > /dev/null 2>&1; then
-  kill -TERM -- "-$pid" 2>/dev/null; say "train: STOPPED, the run's statistics are not the edited ones"; tail -n 40 "$LOG"; exit 1
+  kill -TERM -- "-$pid" 2>/dev/null; say "train: STOPPED, the run's statistics are not the edited ones"; log_tail; exit 1
 fi
 wait "$pid"; rc=$?
 say "train: exit $rc; checkpoints: $(ls "$RUN/checkpoints" 2>/dev/null | tr '\n' ' ')"
-[ $rc -eq 0 ] || tail -n 40 "$LOG"
+[ $rc -eq 0 ] || log_tail
 grep -h GUARD "$RUNS/logs/$RUN_ID.guard.log" 2>/dev/null | tail -1
 exit $rc

@@ -9,8 +9,9 @@
 serve_policy with this package's configs.
 
 Params-only checkpoints (default for the dummy, overfit and 1x H100 configs) keep the
-inference weights in bfloat16 plus the norm stats: ~6.6 GB instead of ~38 GB for the full
-model with its optimizer state and EMA (measured 2026-10-07). They serve and evaluate like full ones but cannot --resume.
+inference weights in bfloat16 plus the norm stats: ~5 GB (measured 2026-10-27) instead of ~27 GB
+for the full model with its optimizer state (these configs have no EMA; with EMA ~38 GB, measured
+2026-10-07). They serve and evaluate like full ones but cannot --resume.
 """
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ def _wandb_logged_in() -> bool:
     return bool(os.environ.get("WANDB_API_KEY")) or (netrc.exists() and "api.wandb.ai" in netrc.read_text())
 
 
-SNAPSHOT_KEEP = 3  # newest progress snapshots kept on disk (~6.6 GB each)
+SNAPSHOT_KEEP = 3  # newest progress snapshots kept on disk (~5 GB each)
 # The last three checkpoints SNAPSHOT_KEEP_PERIOD apart are never removed (80,000 steps: 60,000,
 # 70,000 and the last step): RoboMME saves every 10,000 steps and reports the mean over the last
 # three checkpoints (2026-11-01).
@@ -92,8 +93,9 @@ SNAPSHOT_KEEP_PERIOD = 10_000
 def _install_save_state(config, *, params_only: bool, snapshots: bool, full_every: int | None) -> None:
     """Decide what openpi's training loop writes at each save step (every config.save_interval).
 
-    params_only  the checkpoint holds bf16 inference params and the norm stats (~6.6 GB instead of
-                 ~38 GB with optimizer state and EMA); serves and evaluates the same, cannot --resume.
+    params_only  the checkpoint holds bf16 inference params and the norm stats (~5 GB instead of
+                 ~27 GB with optimizer state, ~38 GB with EMA too); serves and evaluates the same,
+                 cannot --resume.
     snapshots    also write such a params-only snapshot to $PI05_WORK/snapshots/<config>/<exp>/<step>
                  at every save step, for the progress SR (scripts/sr_monitor.sh). The newest
                  SNAPSHOT_KEEP stay on disk, and the last two SNAPSHOT_KEEP_PERIOD-th before the last step.

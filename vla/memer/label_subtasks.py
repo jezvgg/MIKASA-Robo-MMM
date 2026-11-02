@@ -54,7 +54,7 @@ import numpy as np
 import pandas as pd
 
 DRIVE_GAP = 5          # frames (0.5 s): the oracle's legs of one drive are 0.1-0.2 s apart
-LIFT_RAD = 0.02        # summed arm joint target change that starts a lift (corrections during the hold stay under ~0.002; 0.02 is passed 1-2 frames into the lift)
+LIFT_RAD = 0.02        # summed arm joint target change that starts a lift (corrections during the hold: p99 ~0.004, max ~0.008 over the 2000 grasps)
 DRAWERS = {0: "bottom", 1: "third from the top", 2: "second from the top", 3: "top"}
 ORDINAL = ["first", "second", "third", "fourth", "fifth"]
 PAD_COLOURS = ["red", "green", "blue", "yellow"]   # prop i's pad (depth_recall_v1.PAD_MAP)
