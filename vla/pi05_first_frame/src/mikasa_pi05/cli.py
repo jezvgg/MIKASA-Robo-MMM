@@ -9,8 +9,8 @@
 serve_policy with this package's configs.
 
 Params-only checkpoints (default for the dummy, overfit and 1x H100 configs) keep the
-inference weights in bfloat16 plus the norm stats: ~6.6 GB instead of ~37 GB for the full
-model with its optimizer state. They serve and evaluate like full ones but cannot --resume.
+inference weights in bfloat16 plus the norm stats: ~6.6 GB instead of ~38 GB for the full
+model with its optimizer state and EMA (measured 2026-10-07). They serve and evaluate like full ones but cannot --resume.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ def _install_save_state(config, *, params_only: bool, snapshots: bool, full_ever
     """Decide what openpi's training loop writes at each save step (every config.save_interval).
 
     params_only  the checkpoint holds bf16 inference params and the norm stats (~6.6 GB instead of
-                 ~45 GB with optimizer state); serves and evaluates the same, cannot --resume.
+                 ~38 GB with optimizer state and EMA); serves and evaluates the same, cannot --resume.
     snapshots    also write such a params-only snapshot to $PI05_WORK/snapshots/<config>/<exp>/<step>
                  at every save step, for the progress SR (scripts/sr_monitor.sh). The newest
                  SNAPSHOT_KEEP stay on disk, and the last two SNAPSHOT_KEEP_PERIOD-th before the last step.

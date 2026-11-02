@@ -10,8 +10,10 @@
 #          whatever file is there, so stale stats from older data would be used without a word;
 #   train  the run; a re-run of the same command resumes from the last full checkpoint (every
 #          6000 steps; params-only snapshots every 1000, the newest 3 kept, ~6.6 GB each; a full
-#          checkpoint with the optimizer ~37 GB). vla/mem_guard.py stops it when the container's
-#          memory passes 80% of its limit (past it the pod is killed whole).
+#          checkpoint with the optimizer and EMA ~38 GB, measured 2026-10-07). A save cut short
+#          (<step>.orbax-checkpoint-tmp-*) is removed first: openpi resumes from the last finished
+#          step but leaves it on disk. The previous log is kept as .prev. vla/mem_guard.py stops it
+#          when the container's memory passes 80% of its limit (past it the pod is killed whole).
 # usage: . ~/mikasa-pi05/server.env; nohup vla/memer/train_low.sh <exp name> > log 2>&1 < /dev/null &
 # env: MEMER_DATA_ROOT (~/datasets/memer), CONFIG (memer_lowlevel_4xh100), GPUS (0,1,2,3),
 #      STAGES (check stats train), TRAIN_ARGS (extra flags for `mikasa_pi05 train`)
@@ -61,14 +63,21 @@ if has train; then
   ckpt=$PI05_WORK/checkpoints/$CONFIG/$EXP
   last=$(cfg "c.num_train_steps - 1")
   if [ -d "$ckpt/$last" ]; then say "train: already finished ($ckpt/$last)"; exit 0; fi
+  for t in "$ckpt"/*.orbax-checkpoint-tmp-*; do
+    [ -e "$t" ] && rm -rf "$t" && say "train: removed $(basename "$t"), a save cut short"
+  done
+  done_steps=$(find "$ckpt" -mindepth 1 -maxdepth 1 -type d -regex '.*/[0-9]+' 2>/dev/null | sort -V)
   mode=()
-  if ls -d "$ckpt"/[0-9]* > /dev/null 2>&1; then
-    mode=(--resume); say "train: resuming from $(ls -d "$ckpt"/[0-9]* | sort -V | tail -1)"
+  if [ -n "$done_steps" ]; then
+    mode=(--resume); say "train: resuming from $(tail -n 1 <<< "$done_steps")"
   elif [ -d "$ckpt" ]; then
     mode=(--overwrite)   # a directory without a checkpoint holds nothing to keep
   fi
+  [ -f "$LOGS/train-$EXP.log" ] && mv "$LOGS/train-$EXP.log" "$LOGS/train-$EXP.log.prev"
   say "train: started (log $LOGS/train-$EXP.log; memory guard $LOGS/train-$EXP.guard.log)"
-  CUDA_VISIBLE_DEVICES=$GPUS setsid "$PY" -m mikasa_pi05 train "$CONFIG" --exp-name "$EXP" "${mode[@]}" "${TRAIN_EXTRA[@]}" \
+  # PYTHONUNBUFFERED: openpi prints its 'Step N:' loss lines with tqdm.write to stdout, which a file
+  # otherwise holds until the process exits
+  CUDA_VISIBLE_DEVICES=$GPUS PYTHONUNBUFFERED=1 setsid "$PY" -m mikasa_pi05 train "$CONFIG" --exp-name "$EXP" "${mode[@]}" "${TRAIN_EXTRA[@]}" \
     > "$LOGS/train-$EXP.log" 2>&1 &
   pid=$!
   trap 'kill -TERM -- "-$pid" 2>/dev/null; exit 143' TERM INT

@@ -4,8 +4,10 @@
 # has 80 GB, a B200 180 GB) and their accumulation 8, so 4 GPUs x 4 x 8 = their global batch 128.
 # Checkpoints as theirs, every SAVE steps with the newest SAVE_LIMIT kept (theirs 2, our run too: the
 # final checkpoint is the one evaluated, as they publish it; ~23 GB each with the optimizer),
-# or weights only with SAVE_ONLY_MODEL=1 (~18 GB, fp32, cannot resume). An output dir that holds a
-# checkpoint-* resumes from it: the authors' train_qwen.py does that itself. vla/mem_guard.py stops
+# or weights only with SAVE_ONLY_MODEL=1 (~9 GB, bf16, cannot resume). An output dir that holds a
+# checkpoint-* resumes from it: the authors' train_qwen.py does that itself, from the highest one
+# whatever it holds, so a checkpoint-* cut short by a stop (no trainer_state.json, which the Trainer
+# writes last) is removed first and the run resumes from the one before. vla/mem_guard.py stops
 # the run when the container's memory passes 80% of its limit (past it the pod is killed); each
 # dataloader worker holds a private copy of the annotations (~21 GiB for four tasks), so WORKERS
 # sets the memory: their 8 per GPU killed the pod on 2026-10-27; 2 (the owner's choice, 2026-10-29)
@@ -20,6 +22,9 @@ GPUS=${GPUS:-4}; BS=${BS:-4}; LR=${LR:-6e-5}
 DATASETS=${DATASETS:-memer_samedrawer,memer_seasondish,memer_cabinetsearch,memer_depthrecall,memer_takeitback,memer_veggie}
 EXTRA=(); [ "${SAVE_ONLY_MODEL:-0}" = 1 ] && EXTRA=(--save_only_model True)
 export QWEN_VL_ATTN_IMPL=flash_attention_2 HF_HUB_OFFLINE=1
+for c in $(ls -d "$OUT"/checkpoint-* 2>/dev/null | sort -V); do
+  [ -f "$c/trainer_state.json" ] || { echo "train_high: removing $c, cut short (no trainer_state.json)" >&2; rm -rf "$c"; }
+done
 cd "$REPO/third_party/Qwen3-VL/qwen-vl-finetune"
 python3 "$REPO/vla/mem_guard.py" $$ >&2 &   # $$ is torchrun after the exec
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((GPUS - 1)))} exec "$HOME/envs/qwen3vl/bin/torchrun" \

@@ -8,8 +8,9 @@
 #    every tensorflow-metadata that tensorflow 2.15 accepts holds protobuf<4.21 (3.20.3), and the
 #    newest wandb (0.28) no longer imports under protobuf 3, so train.py's `import wandb` fails;
 #  * av, pandas, pyarrow for vla/memoryvla/rlds (LeRobot v3 -> RLDS).
-# It also applies patches/*.patch to the submodule's working tree (the six Fetch datasets,
-# their 13D action encoding and mixtures); the submodule stays pinned to the authors' commit.
+# It also applies patches/*.patch to the submodule's working tree (0001: the six Fetch datasets,
+# their 13D action encoding and mixtures; 0002: train.py's resume check reads the checkpoint
+# path as a string, as draccus parses it into a Path); the submodule stays pinned to the authors' commit.
 # usage: setup_memvla.sh [venv dir]   (default ~/envs/memvla; run from anywhere)
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)

@@ -46,8 +46,8 @@ GPU count:
 | Change | Where | Why |
 |---|---|---|
 | Three cameras (left base, fetch_hand, right base) | all | owner's decision 2026-10-21. Papers: MemER wrist + exterior; MemoryVLA one third-person view (its MIKASA script: + optional wrist). MemoryVLA uses the authors' own three-view code path (`--load_bi_wrist`), which no script of theirs runs |
-| Three views stacked into one 192x576 image (planned; 256x768 tested) | MemER high | Qwen would shrink a larger stack to 192x576 under their max_pixels anyway (108 tokens; theirs 110 for 2 x 320x180). Their stack_frame_images pads the 128-wide hand image to 256 with black before scaling, so the hand view is 96x115 beside a black block and each base view 192x230; training, their eval and their deploy build it the same way |
-| 13D Fetch actions (arm 7 joint targets, gripper, torso/head 3, base forward/yaw velocity) | all | our robot. Theirs: 7D EEF (MemoryVLA), 8D DROID joint velocity (pi0.5-DROID). MemoryVLA gets a FETCH_JOINT encoding (patch 0001) and `--action_dim 13`: its loader otherwise accepts only EEF_POS/EEF_R6 (EEF deltas), so, on the supervisor's answer (2026-10-22, option (b) of `artifacts/memoryvla-questions-for-supervisor.md`), arm, head and torso are recomputed as deltas from the same frame's recorded joints (`fetch_dataset_transform`; the measured joints are added back at inference) and, like the base velocities, are relative; the gripper stays absolute; all but the gripper are normalized. MemER low: arm, head and torso become deltas from the current joint position for the whole 15-step chunk (openpi `DeltaActions` with `DELTA_ACTION_MASK`; `AbsoluteActions` adds the state back at inference), openpi's own convention for absolute joint data (ALOHA, DROID joint-position); gripper and base velocities stay as recorded, and pi0.5 also gets the 12D state |
+| Three views stacked into one 192x576 image (the export since 2026-10-31; 256x768 tested) | MemER high | Qwen would shrink a larger stack to 192x576 under their max_pixels anyway (108 tokens; theirs 110 for 2 x 320x180). Their stack_frame_images pads the 128-wide hand image to 256 with black before scaling, so the hand view is 96x115 beside a black block and each base view 192x230; training, their eval and their deploy build it the same way |
+| 13D Fetch actions (arm 7 joint targets, gripper, torso/head 3, base forward/yaw velocity) | all | our robot. Theirs: 7D EEF (MemoryVLA), 8D DROID joint velocity (pi0.5-DROID). MemoryVLA gets a FETCH_JOINT encoding (patch 0001) and `--action_dim 13`: its loader otherwise accepts only EEF_POS/EEF_R6 (EEF deltas), so, on the supervisor's answer (2026-10-22, option (b) of `artifacts/memoryvla-questions-for-supervisor.md`), arm, head and torso are recomputed as deltas from the same frame's recorded joints (`fetch_dataset_transform`; the measured joints are added back at inference) and, like the base velocities, are relative; the gripper stays absolute; all but the gripper are normalized. MemER low: arm, head and torso become deltas from the current joint position for the whole 20-step chunk (openpi `DeltaActions` with `DELTA_ACTION_MASK`; `AbsoluteActions` adds the state back at inference), openpi's own convention for absolute joint data (ALOHA, DROID joint-position); gripper and base velocities stay as recorded; pi0.5 gets no state (RoboMME; below) |
 | Our own norm stats | MemER low, MemoryVLA | DROID's/MIKASA's statistics describe other action spaces |
 | MemER low level on RoboMME's recipe for pi0.5 base (start from pi0.5 base, SigLIP frozen, 5e-5 constant after 10,000 warmup steps, EMA 0.999, 80,000 steps, chunk 20 with 16 executed, no state) instead of pi0.5-DROID, openpi's defaults, 15 / 8 and the state as text | MemER low | pi0.5-DROID is fine-tuned for a Franka with 8D joint velocities and two cameras (third slot masked); Fetch is a mobile manipulator with 13D actions and three cameras. RoboMME, not a DROID robot either, trains this recipe from pi0.5 base (`mme_vla_suite`); one recipe per model, deviations only where the robot, the data or the GPUs force them. Own norm stats per chunk length (`assets/memer-lowlevel-h20`) |
 | Normalization bounds: each task's min/max instead of its 1st/99th percentile for every normalized channel (base velocities and arm/head/torso deltas; `vla/memoryvla/set_norm_bounds.py` edits q01/q99 in the authors' cached `dataset_statistics_*.json`; their code is unchanged) | MemoryVLA | their BOUNDS_Q99 clips each task to its percentiles; on our data that erases DepthRecall's turn (q01 = q99 = 0) and cuts TakeItBack's drives from 0.90 to 0.155 m/s; a 20k-step one-GPU check with their bounds indeed never turned and never drove faster than 0.17. Supervisor 2026-10-22: "do not clip the real important actions". Min/max clips nothing; it is what GR00T N1.5 uses for a mobile base and OpenVLA-OFT for joints and base (ALOHA; R1Pro in BEHAVIOR). The action contract's fixed -1/+1 for the base (the BEHAVIOR baselines' way) was tried first: at 10k debug steps it turned the model's residual noise into large base commands on still frames, so the narrower per-task scale was chosen (2026-10-23). Survey: `artifacts/base-normalization.md` |
@@ -116,15 +116,16 @@ are byte-identical.
 
 ## Training length on our data (settled 2026-10-31)
 
-The step counts were set for the authors' datasets. Ours have 5,141,099 frames (6000 episodes,
-~86 s each; 4,844,230 before CabinetSearch became five compartments), so the same steps see each
-frame far fewer times:
+The step counts were set for the authors' datasets. Ours have 5,308,563 frames (6000 episodes,
+~88 s each; counted in the six labelled copies on 2026-11-01, where the 10-31 count said 5,141,099;
+4,844,230 before CabinetSearch became five compartments), so the same steps see each frame far
+fewer times:
 
 | | samples (steps x batch) | our epochs | authors' epochs (estimate) |
 |---|---|---|---|
 | MemER high (code) | 1500 x 128 = 192k | 0.04 | ~6 (50 dusting episodes, ~31k frames) |
-| MemER low (RoboMME's steps) | 80,000 x 128 = 10.2M (Table 5's 18,000: 2.3M) | 1.99 (0.45) | ~10-20 (3 tasks x ~62 episodes) |
-| MemoryVLA (RoboMME's steps) | 160,000 x 128 = 20.5M (MIKASA's 20,000 x 256: 5.1M) | 3.98 (1.00) | ~50 (5 tasks x 250 short episodes) |
+| MemER low (RoboMME's steps) | 80,000 x 128 = 10.2M (Table 5's 18,000: 2.3M) | 1.93 (0.43) | ~10-20 (3 tasks x ~62 episodes) |
+| MemoryVLA (RoboMME's steps) | 160,000 x 128 = 20.5M (MIKASA's 20,000 x 256: 5.1M) | 3.86 (0.96) | ~50 (5 tasks x 250 short episodes) |
 
 Matching the authors' epochs would take 10-150x their steps. MemER low level and MemoryVLA take
 RoboMME's steps instead of the authors'. MemER low level: RoboMME's 80,000 steps (`mme_vla_suite`,
@@ -132,10 +133,13 @@ batch 64 there, so twice their samples here); ~1.5 s/step on 4 x H100 with chunk
 chunk 15, 1.68 with 50), ~33 h. MemoryVLA: RoboMME's 160,000 steps (their script, 2 x 32 = 64, so
 twice their samples here); the LR stays constant 2e-5 with no warmup (the diffusion VLA type
 inherits `lr_scheduler_type = "constant"`), so only `train.sh`'s <max steps> changes. Their code
-keeps every 32 GB checkpoint: RoboMME's save interval 10,000 means 512 GB, over our 400 GB, so
-checkpoints are evaluated and deleted as the run goes. Not timed on 4 GPUs yet. MemER high level:
-the code's 1500 steps to start; whether to go on is decided on oracle episodes recorded on the
-validation seeds.
+keeps every 32 GB checkpoint (16 at RoboMME's interval of 10,000: 512 GB); our launcher keeps the
+newest three whole ones (evaluation protocol below). Not timed on 4 GPUs: this configuration (4 x
+32, three cameras, full fine-tune) has not run a step yet, and a FLOP estimate gives 3-6 s/step,
+6-11 days for 160,000 steps; the step time is read from the run's first steps (owner 2026-11-02:
+decided on the measured time). MemER high level: the code's 1500 steps to start (10.2 s/step in
+the 2026-10-27 debug on 4 x H100, ~4.3 h); whether to go on is decided on oracle episodes recorded
+on the validation seeds.
 
 ## MemER low level: RoboMME's recipe, no state (settled 2026-10-31)
 
@@ -173,8 +177,8 @@ times breaking memory (LIBERO-Long 95.8 -> 5.4); ours is a few times.
 mem_length 16, shuffle 32,000 groups instead of their 64,000), as RoboMME trains MemoryVLA; `LOADER=stream` gives the stream
 + mem_length 256 of their `train_real.sh`, chosen on 2026-10-22 for our long episodes when the chunk
 was 4. With 8 executed per call neither loader matches inference's write cadence (above); group is
-chosen by the one-source rule. It does not train short-term memory (the last seconds), it has not
-been run on our data, and its buffer is an estimate.
+chosen by the one-source rule. It does not train short-term memory (the last seconds), and it has
+not trained a step on our data yet; its buffer is measured (32,000 groups, above).
 
 The one precedent with long episodes is RoboMME, and it is a poor result. RoboMME trained MemoryVLA
 with group (their LIBERO settings: chunk 16, memory 16; `script/train/robomme/train.sh`) and
@@ -196,6 +200,29 @@ An entry's time is the frame index in training and the call count at inference (
 RoboMME's and here. The authors' code is kept as is; a deploy adapter could add k - 1 to
 `cur_timestep` after each call without editing it, which would be a deviation from them.
 
+## How the runs are launched (2026-11-01/02; not part of the recipes)
+
+The launchers are on the server only (`~/memvla-run/launch.sh` for MemoryVLA, `~/memer-run/launch.sh`
+for MemER, each pod its own, with a RESTART.txt).
+
+- MemER low level, GPU memory: `XLA_PYTHON_CLIENT_MEM_FRACTION` 0.75 instead of 0.92 (owner
+  2026-11-01: room on GPU 3 for a progress monitor). The launcher's `memcheck` stage runs the real
+  config to step 100 before the high level and goes back to 0.92 if it runs out of GPU memory. A fit
+  is expected: the larger h50 config (four images, chunk 50, the state in the prompt, EMA, batch 128
+  on 4 x H100) peaked at 28.2 GiB of its 59.4 GiB pool at 0.75 (`report-run3-h50.txt`).
+- MemER low level, checkpoints: a full one (optimizer and EMA, ~38 GB, measured 2026-10-07) every
+  6000 steps for `--resume`, openpi keeping one; params-only snapshots every 1000 (~6.6 GB, the EMA
+  weights), the newest three plus 60,000 and 70,000 kept. A resume restarts openpi's data order from
+  its seed (openpi's loader); accepted.
+- MemoryVLA resume: `patches/0002` (their resume check runs a regex on the checkpoint path, which
+  draccus parses into a Path, so every resume stopped there). The checkpoint loads through the same
+  `load_vla` as the OpenVLA start, plus the action model and the memory modules; not run yet.
+- Checkpoints cut short by a stop or a failed save: MemoryVLA writes them in a background thread
+  whose result nobody reads, so the launcher resumes from, and prunes to, whole ones only (a zip
+  whose central directory reads); MemER high removes a checkpoint-* without `trainer_state.json`
+  (written last) before resuming (`train_high.sh`); MemER low removes orbax's unfinished
+  `*.orbax-checkpoint-tmp-*` (`train_low.sh`).
+
 ## Evaluation protocol (not training, for later)
 
 Checkpoints (owner 2026-11-01), each model as its recipe's source. MemoryVLA and MemER low: the mean
@@ -204,7 +231,9 @@ every 10,000 steps as RoboMME's script and keeps its last three (`SAVE=10000 KEE
 140,000, 150,000, 160,000); MemER low keeps the snapshots of 60,000, 70,000 and its last step
 (`SNAPSHOT_KEEP_PERIOD` in cli.py). MemER high, trained as the authors' code: their final
 checkpoint-1500, the one they publish, with their `--save_total_limit 2` (with saves every 500, the last
-three would be a third, two thirds and all of the run). MemoryVLA's authors instead evaluate checkpoints
+three would be a third, two thirds and all of the run). Their Trainer saves only the tokenizer into
+checkpoint-*; the image processor is in the run's root dir, so the eval of checkpoint-1500 takes it
+from there (`--processor-path`). MemoryVLA's authors instead evaluate checkpoints
 at intervals and report the best (their README), which would need every 32 GB checkpoint kept or
 evaluated as the run goes.
 
@@ -217,5 +246,5 @@ and still merges one event's duplicates. RoboMME's own MemER wrapper does the sa
 count repeats (PickXtimes, SwingXtimes). Offline subtask accuracy is reported as the authors' exact match
 and with a tolerance of one subsampled step at each boundary.
 
-Inference: DDIM 10 steps, CFG 1.5. MemER: high level ~1 Hz, low level executes 8 of 15 actions.
+Inference: DDIM 10 steps, CFG 1.5. MemER: high level ~1 Hz, low level executes 16 of its 20 actions (RoboMME's; above).
 jezv's tasks reset with `reconfigure=True`.

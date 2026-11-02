@@ -1,0 +1,14 @@
+diff --git a/train.py b/train.py
+--- a/train.py
++++ b/train.py
+@@ -146,8 +146,8 @@
+         # [Validate] Pretrained Checkpoint `step` and `epoch` should match `resume_step` and `resume_epoch`
+         #   =>> Note :: We make developers pass in `resume_*` arguments as an extra sanity check!
+         if cfg.is_resume:
+-            step_match = re.search(r"step-(\d+)-", cfg.pretrained_checkpoint)
+-            epoch_match = re.search(r"epoch-(\d+)-", cfg.pretrained_checkpoint)
++            step_match = re.search(r"step-(\d+)-", str(cfg.pretrained_checkpoint))
++            epoch_match = re.search(r"epoch-(\d+)-", str(cfg.pretrained_checkpoint))
+ 
+             if step_match and epoch_match:
+                 step = int(step_match.group(1))  # remove leading zeros

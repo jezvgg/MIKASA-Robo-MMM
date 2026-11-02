@@ -15,12 +15,14 @@
 # Stages (a finished stage is skipped on a re-run):
 #   stats  a first launch computes every dataset's dataset_statistics_<hash>.json next to its RLDS
 #          and is stopped as soon as all exist; set_norm_bounds.py then rewrites their q01/q99;
-#   train  the run, which loads the edited files and saves them into its run dir: it is stopped at
-#          once if the run dir's statistics are not the edited ones.
+#   train  the run, which loads the edited files and saves them into its run dir (every launch,
+#          a resume too): it is stopped at once if the file this launch wrote is not the edited
+#          ones. The previous launch's log is kept as .prev; a failed launch prints its last 40 lines.
 # Checkpoints: model weights only (the authors' save; 32 GB each, fp32), every $SAVE steps.
 # RESUME_CKPT=<run dir>/checkpoints/step-NNNNNN-epoch-EE-loss=*.pt continues a stopped run from that
-# checkpoint with the authors' --is_resume (step and epoch from its name): the weights and the step
-# count carry over, the optimizer starts afresh (their save holds no optimizer; the LR is constant).
+# checkpoint with the authors' --is_resume (step and epoch from its name; patches/0002): the weights
+# and the step count carry over, the optimizer starts afresh (their save holds no optimizer; the LR
+# is constant).
 # vla/mem_guard.py stops a launch whose container memory passes 80% of its limit (past it the pod
 # is killed; log <run id>.guard.log).
 # usage: train.sh <RLDS root holding fetch_*> <run root> <run id> <max steps> [save interval]
@@ -99,17 +101,22 @@ for f in $(stats_files); do
 done
 
 RUN=$RUNS/$RUN_ID--image_aug
-say "train: $RUN_ID, $GPUS GPUs x batch $BS, chunk $CHUNK, $LOADER loader (memory $MEM, shuffle $SHUFFLE), $STEPS steps, checkpoints every $SAVE (log $RUNS/logs/$RUN_ID.log)"
+LOG=$RUNS/logs/$RUN_ID.log; STARTED=$RUNS/logs/.$RUN_ID.started
+[ -f "$LOG" ] && mv "$LOG" "$LOG.prev"
+# A resume finds the last launch's statistics in the run dir already: the check waits for this launch's.
+touch "$STARTED"
+say "train: $RUN_ID, $GPUS GPUs x batch $BS, chunk $CHUNK, $LOADER loader (memory $MEM, shuffle $SHUFFLE), $STEPS steps, checkpoints every $SAVE (log $LOG)"
 setsid bash -c "$(declare -f launch); REPO='$REPO' GPUS='$GPUS' BS='$BS' CHUNK='$CHUNK' LOADER='$LOADER' MEM='$MEM' MIX='$MIX' LR='$LR' SHUFFLE='$SHUFFLE' \
   DATA='$DATA' RUNS='$RUNS' PORT='$PORT' CKPT='$CKPT' RESUME_ARGS='$RESUME_ARGS' TORCHRUN='$TORCHRUN' launch '$RUN_ID' '$STEPS' '$SAVE'" \
-  > "$RUNS/logs/$RUN_ID.log" 2>&1 &
+  > "$LOG" 2>&1 &
 pid=$!
 "$PY" "$REPO/vla/mem_guard.py" "$pid" >> "$RUNS/logs/$RUN_ID.guard.log" 2>&1 &
-for _ in $(seq 1 240); do [ -f "$RUN/dataset_statistics.json" ] && break; kill -0 "$pid" 2>/dev/null || break; sleep 15; done
+for _ in $(seq 1 240); do [ "$RUN/dataset_statistics.json" -nt "$STARTED" ] && break; kill -0 "$pid" 2>/dev/null || break; sleep 15; done
 if ! "$PY" "$REPO/vla/memoryvla/set_norm_bounds.py" "$RUN/dataset_statistics.json" --base "$BASE_BOUNDS" --check > /dev/null 2>&1; then
-  kill -TERM -- "-$pid" 2>/dev/null; say "train: STOPPED, the run's statistics are not the edited ones"; exit 1
+  kill -TERM -- "-$pid" 2>/dev/null; say "train: STOPPED, the run's statistics are not the edited ones"; tail -n 40 "$LOG"; exit 1
 fi
 wait "$pid"; rc=$?
 say "train: exit $rc; checkpoints: $(ls "$RUN/checkpoints" 2>/dev/null | tr '\n' ' ')"
+[ $rc -eq 0 ] || tail -n 40 "$LOG"
 grep -h GUARD "$RUNS/logs/$RUN_ID.guard.log" 2>/dev/null | tail -1
 exit $rc
