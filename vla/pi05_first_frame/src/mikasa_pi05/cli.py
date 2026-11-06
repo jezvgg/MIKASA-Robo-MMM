@@ -215,7 +215,8 @@ def _warm_up(policy) -> None:
     meta = policy.metadata
     cameras = meta["mikasa_data"]["cameras"]
     observation = {f"observation.images.{name}": np.zeros(shape, np.uint8) for name, shape in cameras.items()}
-    observation[meta["first_frame"]["key"]] = np.zeros(cameras[meta["first_frame"]["camera"]], np.uint8)
+    if "first_frame" in meta:   # MemER's low level has no first-frame input (MEMER_POLICY_METADATA)
+        observation[meta["first_frame"]["key"]] = np.zeros(cameras[meta["first_frame"]["camera"]], np.uint8)
     observation["observation.state"] = np.zeros(meta["mikasa_data"]["state_dim"], np.float32)
     observation["prompt"] = "warm-up"
     start = time.time()
