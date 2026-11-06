@@ -139,6 +139,23 @@ def test_seeds_of_training_episodes_are_refused(tmp_path):
     assert [seed for _, seed, _ in ev.plan_rollouts(args, {"samedrawer": source})[0]] == [8]
 
 
+def test_tasks_take_turns_so_every_shard_covers_all_of_them():
+    sources = {task: SimpleNamespace(lengths=[10], env_id=task, instruction=task, training_seeds=set())
+               for task in ("samedrawer", "veggie")}
+    args = SimpleNamespace(seeds_dir=None, seeds=[], episodes=3, start_seed=0, max_steps=None,
+                           backend="memer", shard="0/1")
+    plan, settings = ev.plan_rollouts(args, sources)
+    assert [(task, seed) for task, seed, _ in plan] == [
+        ("samedrawer", 0), ("veggie", 0), ("samedrawer", 1), ("veggie", 1), ("samedrawer", 2), ("veggie", 2)]
+    assert settings["veggie"]["episodes"] == 3
+    args.episodes = 8
+    shards = [[(task, seed) for task, seed, _ in ev.plan_rollouts(SimpleNamespace(**{**vars(args), "shard": f"{k}/4"}),
+                                                                  sources)[0]] for k in range(4)]
+    assert shards[0] == [("samedrawer", 0), ("veggie", 3), ("samedrawer", 4), ("veggie", 7)]
+    assert sorted(item for shard in shards for item in shard) == sorted(
+        (task, seed) for task in sources for seed in range(8))  # every rollout once
+
+
 def load_server():
     spec = importlib.util.spec_from_file_location("serve_high", REPO / "vla/memer/serve_high.py")
     module = importlib.util.module_from_spec(spec)

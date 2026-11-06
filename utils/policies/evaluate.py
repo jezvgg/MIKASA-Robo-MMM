@@ -37,6 +37,7 @@ Backends:
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import subprocess
@@ -434,10 +435,16 @@ def task_seeds(args):
 
 
 def plan_rollouts(args, sources):
-    """(task, seed, dataset episode or None) for every rollout, and each task's settings."""
+    """(task, seed, dataset episode or None) for every rollout, and each task's settings.
+
+    Each task's seeds are dealt to the shards in turn (a task starting one shard after the
+    previous task), and within a shard the tasks take turns, so every shard and every partial
+    result covers all of them in equal parts.
+    """
     files = task_seeds(args)
-    plan, settings = [], {}
+    tasks, settings = {}, {}
     for task, source in sources.items():
+        plan = tasks[task] = []
         max_steps = args.max_steps or episode_limit(source.lengths)
         settings[task] = {"env_id": source.env_id, "instruction": source.instruction,
                           "dataset_episodes": len(source.lengths), "longest_dataset_frames": max(source.lengths),
@@ -446,7 +453,7 @@ def plan_rollouts(args, sources):
         if args.backend == "recorded":
             episodes = source.dataset.episodes[:args.episodes]
             plan += [(task, source.seed_of[episode.source_index], episode) for episode in episodes]
-            settings[task]["seeds"] = "the dataset's own"
+            settings[task].update(seeds="the dataset's own", episodes=len(plan))
             continue
         if task in files:
             seeds = read_seeds(files[task])
@@ -460,8 +467,11 @@ def plan_rollouts(args, sources):
         if overlap:
             raise ValueError(f"{task}: {len(overlap)} seeds of training episodes, e.g. {overlap[:5]}")
         plan += [(task, seed, None) for seed in seeds]
+        settings[task]["episodes"] = len(plan)
     shard, shards = map(int, args.shard.split("/"))
-    return plan[shard::shards], settings
+    mine = [[item for index, item in enumerate(items) if (index + offset) % shards == shard]
+            for offset, items in enumerate(tasks.values())]
+    return [item for turn in itertools.zip_longest(*mine) for item in turn if item is not None], settings
 
 
 def make_client(args):
