@@ -16,7 +16,8 @@ midpoint; the gripper keeps its target; a chunk's last executed target averages 
 chunk's next one, and is held when the chunk has none) or the target twice (--execution hold).
 The policy sees the frame after each pair. An episode ends at the first success, at a task
 fail (terminated without success) or at the limit: twice the task dataset's longest episode,
-4 x its 10 Hz frames in 20 Hz steps (--max-steps overrides).
+4 x its 10 Hz frames in 20 Hz steps (--max-steps overrides). Every rollout also records how
+far it got: its task's stages, read from the simulator at every step (utils/policies/progress.py).
 
 Seeds: the validation seeds of all six tasks are on HF, MIKASA-Robo-MMM/MIKASA-Robo-MMM
 <task>/validation_seeds.json; --seeds-dir reads that layout. --seeds TASK=FILE (a JSON list, or
@@ -363,8 +364,12 @@ def save_video(path, frames):
     imageio.mimsave(path, rows, fps=10, macro_block_size=1)
 
 
-def run_episode(env, obs, client, prompt, *, max_steps, horizon, execution, stop_on_success=True, video=None):
-    """Query, execute `horizon` targets of the chunk, query again; the policy sees every 10 Hz frame."""
+def run_episode(env, obs, client, prompt, *, max_steps, horizon, execution, stop_on_success=True, video=None,
+                progress=None):
+    """Query, execute `horizon` targets of the chunk, query again; the policy sees every 10 Hz frame.
+
+    `progress` (utils/policies/progress.py) reads the task's stages after every control step.
+    """
     def observe(obs):
         if video is not None:
             video.append(camera_frames(obs))
@@ -384,6 +389,8 @@ def run_episode(env, obs, client, prompt, *, max_steps, horizon, execution, stop
         for index, control in enumerate(control_steps(actions, horizon, execution)):
             obs, _, terminated, truncated, info = env.step(control)
             steps += 1
+            if progress is not None:
+                progress.update(env, info, steps)
             success = scalar_bool(info["success"])
             success_once |= success
             if stop_on_success and success:
@@ -398,7 +405,8 @@ def run_episode(env, obs, client, prompt, *, max_steps, horizon, execution, stop
                 client.ingest(observe(obs))
     return {"status": status, "success": success if not stop_on_success else success_once,
             "success_once": success_once, "simulator_steps": steps, "queries": queries,
-            "last_action_shape": last_shape, "history_observations": client.frames}
+            "last_action_shape": last_shape, "history_observations": client.frames,
+            **(progress.result() if progress is not None else {})}
 
 
 def summarize(rollouts):
@@ -490,6 +498,7 @@ def write_json(path, value):
 
 def evaluate(args):
     from utils.mikasa.seeding import seed_everything
+    from utils.policies.progress import Progress
 
     if args.backend == "hamlet" and args.execution_horizon != 16:
         raise ValueError("native HAMLET memory_stride=16 requires execution_horizon=16")
@@ -534,7 +543,8 @@ def evaluate(args):
             client.reset(session)
             outcome = run_episode(env, obs, client, source.instruction, max_steps=settings[task]["max_steps"],
                                   horizon=args.execution_horizon, execution=args.execution,
-                                  stop_on_success=args.backend != "recorded", video=frames)
+                                  stop_on_success=args.backend != "recorded", video=frames,
+                                  progress=Progress(task))
         finally:
             env.close()
         result = {"task": task, "env_id": source.env_id, "seed": seed, "session": session,
