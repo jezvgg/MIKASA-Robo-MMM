@@ -106,6 +106,9 @@ def main():
             except AuthenticationError:
                 logging.warning("refused a client with another key")
                 continue
+            except (EOFError, OSError) as error:  # a client gone before the handshake
+                logging.warning("dropped a connection before the handshake: %r", error)
+                continue
             with connection:
                 logging.info("client %s connected", listener.last_accepted)
                 serve(connection, policy, metadata)
